@@ -1,8 +1,8 @@
 [advisories]
 vulnerability = "deny"
-unmaintained = "none"
-unsound = "none"
-yanked = "none"
+unmaintained = "warn"
+unsound = "warn"
+yanked = "warn"
 
 [licenses]
 unlicensed = "deny"
