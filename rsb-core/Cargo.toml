@@ -34,7 +34,7 @@ aws-credential-types = "1.2.11"
 lettre = "0.11"
 lettre_email = "0.9.4"
 uuid = { version = "1.6", features = ["v4", "serde"] }
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 zeroize = { version = "1.7", features = ["derive"] }
 keyring = "2.1"
 base64 = "0.22"
