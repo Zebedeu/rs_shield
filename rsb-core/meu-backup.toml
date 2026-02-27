@@ -1,0 +1,4 @@
+source_path = "/Users/marciozebedeu/Documents/edu"
+destination_path = "/Volumes/kepya/test"
+exclude_patterns = ["*.tmp", "node_modules"]
+backup_mode = "incremental"

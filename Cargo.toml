@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "rsb-cli",
+    "rsb-core",
+    "rsb-desktop",
+]
+resolver = "2"
+
+[profile.release]
+debug = false
+lto = "thin"
+opt-level = 3
+codegen-units = 1
+strip = true
+panic = "abort"

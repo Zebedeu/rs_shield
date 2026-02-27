@@ -1,0 +1,54 @@
+[package]
+name = "rsb-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+walkdir = "2"
+zstd = "0.13"
+ring = "0.17"
+tracing = "0.1"
+rayon = "1.10"
+memmap2 = "0.9"
+blake3 = "1.5"
+regex = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ignore = "0.4"
+indicatif = "0.17"
+console = "0.15"
+aws-config = "1.1"
+aws-sdk-s3 = "1.15"
+async-trait = "0.1"
+glob = "0.3"
+battery = "0.7"
+maud = "0.25"
+sysinfo = "0.29"
+notify = "6.1"
+aws-credential-types = "1.2.11"
+lettre = "0.11"
+lettre_email = "0.9.4"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+reqwest = { version = "0.11", features = ["json"] }
+zeroize = { version = "1.7", features = ["derive"] }
+keyring = "2.1"
+base64 = "0.22"
+rand = "0.8"
+aes-gcm = "0.10"
+dirs = "5.0"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+rpassword = "7.4"
+
+[features]
+# CLI feature enables interactive credential prompting
+cli = []
+
+[dev-dependencies]
+tempfile = "3.8"
+

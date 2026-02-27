@@ -1,0 +1,134 @@
+# Exemplo de Configuração Segura para rs-shield
+# 🔐 SEGURANÇA: Este arquivo NÃO deve conter credenciais S3
+# As credenciais são armazenadas de forma segura em:
+# 1. Variáveis de ambiente (CI/CD)
+# 2. Arquivo criptografado ~/.rs-shield/s3_credentials.enc
+# 3. Keyring do sistema operacional (master password)
+
+# ========================================
+# CONFIGURAÇÃO DE BACKUP
+# ========================================
+
+[backup]
+# Caminho de origem para backup
+source_path = "/Users/usuario/Documents"
+
+# Caminho de destino local (ou bucket S3)
+destination_path = "/Volumes/backup/storage"
+
+# Modo de backup: "incremental" (apenas mudanças) ou "full" (tudo)
+backup_mode = "incremental"
+
+# Nível de compressão (0-11, 0=sem compressão, 11=máximo)
+compression_level = 6
+
+# ========================================
+# CRIPTOGRAFIA
+# ========================================
+
+[encryption]
+# Chave de criptografia (derivada de senha ou arquivo)
+# Se vazio, será solicitado interativamente
+encryption_key = ""  # DEIXAR VAZIO - soicitará senha
+
+# Padrões de arquivos que SEMPRE serão criptografados
+encrypt_patterns = [
+    "*.pdf",
+    "*.docx",
+    "*.xlsx",
+    "private/",
+    ".ssh/",
+    ".gnupg/",
+]
+
+# ========================================
+# EXCLUSÕES
+# ========================================
+
+[exclusions]
+# Padrões de arquivos/pastas a IGNORAR
+exclude_patterns = [
+    "*.tmp",
+    "*.log",
+    ".git/",
+    "node_modules/",
+    "__pycache__/",
+    ".DS_Store",
+    "Thumbs.db",
+]
+
+# ========================================
+# S3 CONFIGURATION
+# ========================================
+
+[s3]
+# Nome do bucket S3
+bucket = "my-backup-bucket-name"
+
+# Região AWS
+region = "us-east-1"
+
+# Endpoint (opcional, para S3 compatível)
+# endpoint = "https://s3.amazonaws.com"
+# endpoint = "https://minio.example.com"  # Para MinIO, etc
+
+# ⚠️ IMPORTANTE: Use VARIÁVEIS DE AMBIENTE ou ARQUIVO CRIPTOGRAFADO
+# NÃO coloque credenciais aqui!
+#
+# Opção 1: Variáveis de Ambiente
+# export AWS_ACCESS_KEY_ID="AKIA1234567890AB"
+# export AWS_SECRET_ACCESS_KEY="your-secret-key-here"
+# export AWS_SESSION_TOKEN="optional-session-token"
+#
+# Opção 2: Arquivo Criptografado
+# ~/.rs-shield/s3_credentials.enc (auto-carregado)
+#
+# Opção 3: Keyring do Sistema
+# macOS: Keychain
+# Linux: Secret Service
+# Windows: Credential Manager
+
+# ========================================
+# MONITORAMENTO DE RECURSOS
+# ========================================
+
+[resources]
+# Pausar backup se bateria cair abaixo deste nível (%)
+pause_on_low_battery = 20
+
+# Pausar backup se CPU ultrapassar este nível (%)
+pause_on_high_cpu = 80
+
+# ========================================
+# NOTIFICAÇÕES
+# ========================================
+
+[notifications]
+# Habilitar notificações
+enabled = true
+
+# Tipos: "email", "slack", "webhook"
+# notification_type = "email"
+
+# ========================================
+# AGENDAMENTO
+# ========================================
+
+[schedule]
+# Padrão cron para agendamento automático
+# "0 2 * * *" = todos os dias às 2:00 AM
+pattern = "0 2 * * *"
+
+# ========================================
+# RETENÇÃO
+# ========================================
+
+[retention]
+# Manter backups dos últimos N dias
+keep_days = 30
+
+# Manter no mínimo N backups mais recentes
+keep_min_backups = 5
+
+# Deletar backups mais antigos que N dias
+cleanup_older_than_days = 90

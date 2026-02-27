@@ -1,0 +1,123 @@
+// src/crypto/mod.rs
+
+use ring::aead::{Aad, LessSafeKey, Nonce, NONCE_LEN, AES_256_GCM, UnboundKey};
+use ring::pbkdf2;
+use ring::rand::{SecureRandom, SystemRandom};
+use std::io::{self, ErrorKind};
+use std::num::NonZeroU32;
+use blake3;
+use tracing::{debug, error};
+
+/// Calcula hash Blake3 de um ficheiro para verificação de integridade
+pub fn hash_file(path: &std::path::Path) -> io::Result<String> {
+    let content = std::fs::read(path)?;
+    Ok(blake3::hash(&content).to_hex().to_string())
+}
+
+/// Calcula hash Blake3 do conteúdo em memória
+pub fn hash_file_content(content: &[u8]) -> io::Result<String> {
+    Ok(blake3::hash(content).to_hex().to_string())
+}
+
+/// Encripta dados: compressão prévia já feita, encripta com AES-256-GCM + PBKDF2
+/// Formato de output: salt (16 bytes) + nonce (12 bytes) + ciphertext + tag (16 bytes)
+pub fn encrypt_data(data: &[u8], password: &[u8]) -> io::Result<Vec<u8>> {
+    let rand = SystemRandom::new();
+
+    let mut salt = [0u8; 16];
+    rand.fill(&mut salt)
+        .map_err(|_| io::Error::new(ErrorKind::Other, "Falha ao gerar salt aleatório"))?;
+
+    let mut derived_key = [0u8; 32];
+    pbkdf2::derive(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        NonZeroU32::new(600_000).unwrap(),  // Aumentado para segurança em 2026
+        &salt,
+        password,
+        &mut derived_key,
+    );
+
+    debug!("Chave derivada com sucesso (tamanho: {} bytes)", derived_key.len());
+
+    let unbound_key = UnboundKey::new(&AES_256_GCM, &derived_key)
+        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "Falha ao criar chave unbound (comprimento inválido)"))?;
+
+    let key = LessSafeKey::new(unbound_key);
+
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    rand.fill(&mut nonce_bytes)
+        .map_err(|_| io::Error::new(ErrorKind::Other, "Falha ao gerar nonce aleatório"))?;
+
+    let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+
+    let mut in_out = data.to_vec();
+
+    let tag = key
+        .seal_in_place_separate_tag(nonce, Aad::empty(), &mut in_out)
+        .map_err(|e| io::Error::new(ErrorKind::Other, format!("Falha na encriptação/seal: {:?}", e)))?;
+
+    debug!("Encriptação concluída (tamanho final do buffer: {} bytes)", in_out.len());
+
+    let mut result = Vec::with_capacity(salt.len() + nonce_bytes.len() + in_out.len() + tag.as_ref().len());
+    result.extend_from_slice(&salt);
+    result.extend_from_slice(&nonce_bytes);
+    result.extend_from_slice(&in_out);
+    result.extend_from_slice(tag.as_ref());
+
+    Ok(result)
+}
+
+/// Desencripta dados no formato: salt (16) + nonce (12) + ciphertext + tag (16)
+pub fn decrypt_data(encrypted: &[u8], password: &[u8]) -> io::Result<Vec<u8>> {
+    const SALT_LEN: usize = 16;
+    const TAG_LEN: usize = 16;
+    let min_len = SALT_LEN + NONCE_LEN as usize + TAG_LEN;
+
+    if encrypted.len() < min_len {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!("Dados encriptados inválidos: tamanho {} bytes (mínimo requerido: {})", encrypted.len(), min_len),
+        ));
+    }
+
+    let salt = &encrypted[0..SALT_LEN];
+    let nonce_bytes = &encrypted[SALT_LEN..SALT_LEN + NONCE_LEN as usize];
+    let data_with_tag = &encrypted[SALT_LEN + NONCE_LEN as usize..];
+
+    debug!("Desencriptando dados (tamanho total: {} bytes, ciphertext+tag: {} bytes)", encrypted.len(), data_with_tag.len());
+
+    let mut derived_key = [0u8; 32];
+    pbkdf2::derive(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        NonZeroU32::new(600_000).unwrap(),
+        salt,
+        password,
+        &mut derived_key,
+    );
+
+    let unbound_key = UnboundKey::new(&AES_256_GCM, &derived_key)
+        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "Falha ao criar chave unbound durante desencriptação"))?;
+
+    let key = LessSafeKey::new(unbound_key);
+
+    let nonce_arr: [u8; NONCE_LEN as usize] = nonce_bytes.try_into()
+        .map_err(|_| io::Error::new(ErrorKind::InvalidData, "Nonce inválido (tamanho incorreto)"))?;
+
+    let nonce = Nonce::assume_unique_for_key(nonce_arr);
+
+    let mut in_out = data_with_tag.to_vec();
+
+    let plaintext_slice = key
+        .open_in_place(nonce, Aad::empty(), &mut in_out)
+        .map_err(|e| {
+            error!("Falha na verificação da tag GCM: {:?}", e);
+            io::Error::new(
+                ErrorKind::InvalidData,
+                format!("Falha na desencriptação: verificação da tag falhou (senha errada, dados corrompidos ou formato inválido): {:?}", e),
+            )
+        })?;
+
+    debug!("Desencriptação concluída (tamanho do plaintext: {} bytes)", plaintext_slice.len());
+
+    Ok(plaintext_slice.to_vec())
+}

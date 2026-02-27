@@ -1,0 +1,35 @@
+name: MSRV Check
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths: ['Cargo.toml', 'Cargo.lock', 'rsb-*/**']
+  pull_request:
+    branches: [ main, develop ]
+    paths: ['Cargo.toml', 'Cargo.lock', 'rsb-*/**']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  msrv:
+    name: Check MSRV (Minimum Supported Rust Version)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Test with the MSRV (defined in Cargo.toml)
+      - uses: dtolnay/rust-toolchain@1.70
+      
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+      
+      - name: Test with MSRV
+        run: cargo test --workspace
+      
+      - name: Build with MSRV
+        run: cargo build --release --workspace
