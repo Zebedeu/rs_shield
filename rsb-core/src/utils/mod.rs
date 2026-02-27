@@ -223,7 +223,6 @@ pub fn build_walker(root: &Path, _custom_globs: &[String], respect_gitignore: bo
 /// - `.hidden`: Starts with dot (e.g., `.git`, `.DS_Store`)
 /// - `folder/` or `folder`: Simple pattern (e.g., `node_modules`, `build`)
 pub fn walk_filtered(root: &Path, custom_globs: &[String], respect_gitignore: bool) -> Walk {
-    
     build_walker(root, custom_globs, respect_gitignore).build()
 }
 
@@ -232,7 +231,6 @@ pub fn mmap_file(path: &Path) -> std::io::Result<Mmap> {
     let file = std::fs::File::open(path)?;
     unsafe { Mmap::map(&file) }
 }
-
 
 /// match ensure_directory_exists("~/.rs-shield") {
 ///     Ok(path) => println!("Diretório garantido: {:?}", path),
@@ -286,7 +284,6 @@ pub fn ensure_directory_exists(path: &str) -> std::result::Result<PathBuf, Strin
 
     Ok(expanded_path)
 }
-
 
 pub async fn ensure_directory_exists_async(path: &str) -> std::result::Result<PathBuf, String> {
     use tokio::fs;

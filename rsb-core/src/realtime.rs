@@ -106,7 +106,7 @@ impl RealtimeWatcher {
                                         change_type,
                                         timestamp: Utc::now(),
                                         size: metadata.len(),
-hash: None, // Calculated later
+                                        hash: None, // Calculated later
                                     };
 
                                     queue_clone.add_change(change).await;
@@ -424,7 +424,7 @@ pub async fn create_backup(
     let backup_dst = backup_dst.to_path_buf();
     let password = password.map(|p| p.to_string());
 
-    // Check if source exists  
+    // Check if source exists
     if !src.exists() {
         return Err("Source does not exist".to_string());
     }

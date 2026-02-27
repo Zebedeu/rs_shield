@@ -163,9 +163,10 @@ impl Storage for S3Storage {
                 if service_error.is_not_found() {
                     Ok(false)
                 } else {
-                    Err(io::Error::other(
-                        format!("S3 Head Error: {}", service_error),
-                    ))
+                    Err(io::Error::other(format!(
+                        "S3 Head Error: {}",
+                        service_error
+                    )))
                 }
             }
         }

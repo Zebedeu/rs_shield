@@ -94,7 +94,6 @@ pub fn prompt_for_s3_config(config_path: &Path) -> io::Result<()> {
     println!("\n📦 S3 Storage Configuration");
     println!("   Configure or select S3/S3-compatible storage\n");
 
-
     if !known_buckets.is_empty() {
         println!("📋 Known S3 Buckets:");
         for (idx, bucket_cfg) in known_buckets.iter().enumerate() {
@@ -145,9 +144,7 @@ pub fn prompt_for_s3_config(config_path: &Path) -> io::Result<()> {
             known_buckets[idx - 1].clone()
         }
         "2" => {
-
             println!("\n🆕 Create New S3 Bucket Configuration");
-
 
             print!("Enter S3 bucket name: ");
             io::stdout().flush()?;

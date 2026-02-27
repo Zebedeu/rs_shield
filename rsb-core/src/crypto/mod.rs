@@ -60,11 +60,7 @@ pub fn encrypt_data(data: &[u8], password: &[u8]) -> io::Result<Vec<u8>> {
 
     let tag = key
         .seal_in_place_separate_tag(nonce, Aad::empty(), &mut in_out)
-        .map_err(|e| {
-            io::Error::other(
-                format!("Falha na encriptação/seal: {:?}", e),
-            )
-        })?;
+        .map_err(|e| io::Error::other(format!("Falha na encriptação/seal: {:?}", e)))?;
 
     debug!(
         "Encriptação concluída (tamanho final do buffer: {} bytes)",

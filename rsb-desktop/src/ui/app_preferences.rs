@@ -62,8 +62,7 @@ impl AppPreferences {
         // Criar diretório se não existir usando função centralizada
         if let Some(parent) = path.parent() {
             let parent_str = parent.to_string_lossy().to_string();
-            ensure_directory_exists(&parent_str)
-                .map_err(|e| std::io::Error::other(e))?;
+            ensure_directory_exists(&parent_str).map_err(|e| std::io::Error::other(e))?;
         }
 
         let json_str = serde_json::to_string_pretty(self)?;

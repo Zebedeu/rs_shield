@@ -35,8 +35,7 @@ impl NotificationLogger {
             std::io::ErrorKind::InvalidInput,
             "Invalid path characters",
         ))?;
-        ensure_directory_exists(log_dir_str)
-            .map_err(std::io::Error::other)?;
+        ensure_directory_exists(log_dir_str).map_err(std::io::Error::other)?;
 
         Ok(Self { log_dir })
     }
