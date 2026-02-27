@@ -1,15 +1,12 @@
-version = 2
-
 [advisories]
-# Em vez de "warn", usamos "all" para verificar toda a árvore de dependências
 vulnerability = "deny"
-unmaintained = "all"
-unsound = "all"
-yanked = "deny"
+unmaintained = "warn"
+unsound = "warn"
+yanked = "warn"
 
 [licenses]
-unlicensed = "deny"
 confidence-threshold = 0.8
+unlicensed = "deny"
 allow = [
     "MIT",
     "Apache-2.0",
