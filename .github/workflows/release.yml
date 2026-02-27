@@ -38,6 +38,8 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
+        env:
+          PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -52,6 +54,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libxdo-dev \
+            libglib2.0-dev \
+            libglib2.0-0 \
             patchelf \
             pkg-config
 
