@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v6
       
       # Test with the MSRV (defined in Cargo.toml)
-      - uses: dtolnay/rust-toolchain@1.70
+      - uses: dtolnay/rust-toolchain@1.100
       
       - uses: Swatinem/rust-cache@v2
       
