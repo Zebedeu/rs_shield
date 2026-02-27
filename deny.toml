@@ -1,24 +1,11 @@
-# =====================
-# ADVISORIES
-# =====================
 [advisories]
+vulnerability = "deny"
+unmaintained = "all"
+unsound = "all"
 yanked = "warn"
 
-[advisories.vulnerability]
-severity = "deny"
-
-[advisories.unmaintained]
-all = true
-
-[advisories.unsound]
-all = true
-
-# =====================
-# LICENSES
-# =====================
 [licenses]
 confidence-threshold = 0.8
-
 allow = [
     "MIT",
     "Apache-2.0",
@@ -28,7 +15,6 @@ allow = [
     "ISC",
     "Unicode-DFS-2016",
 ]
-
 deny = [
     "GPL-2.0",
     "GPL-3.0",
@@ -38,9 +24,6 @@ deny = [
 [licenses.unlicensed]
 deny = true
 
-# =====================
-# BANS
-# =====================
 [bans]
 multiple-versions = "warn"
 highlight = "all"
@@ -49,10 +32,7 @@ wildcards = "allow"
 [[bans.deny]]
 name = "openssl"
 
-# =====================
-# SOURCES
-# =====================
 [sources]
 unknown-registry = "warn"
 unknown-git = "warn"
-allow-registry = ["https://github.com/rust-lang/crates.io-index"]   
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
