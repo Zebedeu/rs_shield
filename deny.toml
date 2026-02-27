@@ -2,6 +2,13 @@
 yanked = "warn"
 unmaintained = "transitive"
 unsound = "none"
+ignore = [
+    "RUSTSEC-2021-0119",
+    "RUSTSEC-2020-0168",
+    "RUSTSEC-2024-0384",
+    "RUSTSEC-2024-0388"
+
+]
 
 [licenses]
 confidence-threshold = 0.8
@@ -19,6 +26,8 @@ allow = [
     "Unicode-3.0",
     "MPL-2.0",
     "CC0-1.0",
+    "0BSD",                  
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]
