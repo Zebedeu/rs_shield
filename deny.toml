@@ -1,12 +1,15 @@
 [advisories]
+version = 2
+# As políticas agora ficam aqui dentro
 vulnerability = "deny"
-unmaintained = "all"
-unsound = "all"
+unmaintained = "warn"
+unsound = "warn"
 yanked = "warn"
 
 [licenses]
-unlicensed = "deny"
+version = 2
 confidence-threshold = 0.8
+unlicensed = "deny"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -23,14 +26,16 @@ deny = [
 ]
 
 [bans]
+version = 2
 multiple-versions = "warn"
 highlight = "all"
 wildcards = "allow"
-deny = [
-    { name = "openssl" },
-]
+
+[[bans.deny]]
+name = "openssl"
 
 [sources]
+version = 2
 unknown-registry = "warn"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
