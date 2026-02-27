@@ -1,8 +1,10 @@
 [advisories]
-vulnerability = "deny"
+yanked = "warn"
 unmaintained = "all"
 unsound = "all"
-yanked = "warn"
+
+[advisories.vulnerability]
+severity = "deny"
 
 [licenses]
 confidence-threshold = 0.8
@@ -20,9 +22,6 @@ deny = [
     "GPL-3.0",
     "AGPL-3.0",
 ]
-
-[licenses.unlicensed]
-deny = true
 
 [bans]
 multiple-versions = "warn"
