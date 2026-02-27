@@ -1,19 +1,18 @@
-# Cargo Deny configuration
-# https://embarkstudios.github.io/cargo-deny/
-
 [advisories]
-db-path = "$CARGO_HOME/cargo-deny"
-db-urls = ["https://github.com/rustsec/advisory-db/raw/main/db.json"]
-severity-threshold = "low"
+version = 2
+vulnerability = "deny"
+unmaintained = "warn"
+unsound = "warn"
+yanked = "warn"
 ignore = [
     #"RUSTSEC-2021-0001",
 ]
 
 [licenses]
+version = 2
 confidence-threshold = 0.8
-copyleft = "warn"
-allow-osi-fsf-free = "both"
-default = "deny"
+unlicensed = "deny"
+
 allow = [
     "MIT",
     "Apache-2.0",
@@ -28,26 +27,18 @@ deny = [
     "GPL-3.0",
     "AGPL-3.0",
 ]
-exceptions = [
-]
 
 [bans]
+version = 2
 multiple-versions = "warn"
 highlight = "all"
-allow = [
-]
+wildcards = "allow"
 deny = [
     { name = "openssl" },
 ]
-skip = [
-]
 
 [sources]
-# Lint level for what to happen when a crate from a crate registry that is not in the allow list is detected
+version = 2
 unknown-registry = "warn"
-# Lint level for what to happen when a crate from a git repository that is not in the allow list is detected
 unknown-git = "warn"
-# A list of allowed crate registries containing allowed crates
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# A list of allowed Git repositories containing allowed crates
-allow-git = []
