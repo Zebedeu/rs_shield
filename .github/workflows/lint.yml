@@ -40,7 +40,13 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config libglib2.0-dev libglib2.0-0
+          sudo apt-get install -y \
+            libssl-dev pkg-config \
+            libglib2.0-dev libglib2.0-0 \
+            libgtk-3-dev libgdk-pixbuf-2.0-dev \
+            libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev
       
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
