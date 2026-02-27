@@ -21,7 +21,7 @@ regex = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ignore = "0.4"
 indicatif = "0.18"
-console = "0.15"
+console = "0.16"
 aws-config = "1.1"
 aws-sdk-s3 = "1.15"
 async-trait = "0.1"
