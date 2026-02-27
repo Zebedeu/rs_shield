@@ -26,6 +26,7 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
           - "version-update:semver-patch"
+        versions: ["*-beta*", "*-rc*"]
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
