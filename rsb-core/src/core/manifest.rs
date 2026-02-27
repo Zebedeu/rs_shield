@@ -4,7 +4,7 @@ use crate::storage::Storage;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{error, info};
 use zstd::stream::copy_decode;
 
@@ -20,11 +20,11 @@ pub struct ChunkReport {
 /// Implementar log de chunks para auditoria
 #[allow(dead_code)]
 pub fn log_chunk_metadata(
-    file_path: &PathBuf,
+    file_path: &Path,
     chunks: &[ChunkMetadata],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report = ChunkReport {
-        file_path: file_path.clone(),
+        file_path: file_path.to_path_buf(),
         chunks: chunks.to_vec(),
         total_chunks: chunks.len(),
     };

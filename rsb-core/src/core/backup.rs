@@ -238,9 +238,10 @@ pub async fn perform_backup_with_cancellation(
     let _ = monitor_handle.join();
 
     let snapshot_path = if !dry_run {
+        let snapshot_data = snapshot_manifest.lock().unwrap().clone();
         write_manifest(
             &*storage,
-            &snapshot_manifest.lock().unwrap(),
+            &snapshot_data,
             encryption_key,
             dry_run,
         )

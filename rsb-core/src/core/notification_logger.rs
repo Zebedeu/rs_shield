@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn test_create_logger() {
         let temp_dir = TempDir::new().unwrap();
-        let logger = NotificationLogger::new(temp_dir.path()).unwrap();
+        let _logger = NotificationLogger::new(temp_dir.path()).unwrap();
         assert!(temp_dir.path().exists());
     }
 

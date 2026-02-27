@@ -14,6 +14,7 @@ use tokio::runtime::Handle;
 use tracing::info;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
+#[allow(clippy::too_many_arguments)]
 pub fn process_file(
     src: &Path,
     storage: &Arc<dyn Storage>,
@@ -127,6 +128,7 @@ pub fn process_file(
     Ok(FileStatus::Processed)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn process_file_multipart(
     storage: &Arc<dyn Storage>,
     rel_path: &Path,
