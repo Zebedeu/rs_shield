@@ -1,14 +1,10 @@
-use dioxus::prelude::*;
-use std::path::PathBuf;
-use crate::ui::{
-    app::AppConfig,
-    i18n::get_texts,
-};
-use rsb_core::realtime::{sync_all_files, create_backup};
-use notify_rust::Notification;
-use regex;
+use crate::ui::{app::AppConfig, i18n::get_texts};
 use battery::Manager;
+use dioxus::prelude::*;
+use notify_rust::Notification;
+use rsb_core::realtime::{create_backup, sync_all_files};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Event structure para webhook
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,7 +30,7 @@ fn send_system_notification(
         "info" => "dialog-information",
         _ => "dialog-information",
     };
-    
+
     // Criar evento para webhook
     let event = NotificationEvent {
         event_type: notification_type.to_string(),
@@ -48,13 +44,13 @@ fn send_system_notification(
             _ => "info".to_string(),
         },
     };
-    
+
     // Tenta enviar via notify-rust (sistema)
     let title = title.to_string();
     let message = message.to_string();
     let icon = icon.to_string();
     let webhook_url = webhook_url.map(|s| s.to_string());
-    
+
     std::thread::spawn(move || {
         // 1. Tenta notificação do sistema
         let notif_result = Notification::new()
@@ -63,10 +59,13 @@ fn send_system_notification(
             .icon(&icon)
             .timeout(5000)
             .show();
-        
+
         match notif_result {
             Ok(_) => {
-                println!("✅ [notify-rust] Notificação enviada: {} - {}", title, message);
+                println!(
+                    "✅ [notify-rust] Notificação enviada: {} - {}",
+                    title, message
+                );
             }
             Err(e) => {
                 eprintln!("⚠️ [notify-rust] Falhou: {:?}", e);
@@ -77,7 +76,7 @@ fn send_system_notification(
                 }
             }
         }
-        
+
         // 2. Enviar para webhook se configurado
         if let Some(url) = webhook_url {
             send_webhook_notification(&event, &url);
@@ -89,10 +88,10 @@ fn send_system_notification(
 fn send_webhook_notification(event: &NotificationEvent, webhook_url: &str) {
     let event = event.clone();
     let webhook_url = webhook_url.to_string();
-    
+
     std::thread::spawn(move || {
         let client = reqwest::blocking::Client::new();
-        
+
         match client.post(&webhook_url).json(&event).send() {
             Ok(response) => {
                 if response.status().is_success() {
@@ -111,36 +110,34 @@ fn send_webhook_notification(event: &NotificationEvent, webhook_url: &str) {
 /// Verificar estado da bateria
 fn check_battery_status() -> (f32, bool, String) {
     match Manager::new() {
-        Ok(manager) => {
-            match manager.batteries() {
-                Ok(mut batteries) => {
-                    if let Some(battery) = batteries.next() {
-                        match battery {
-                            Ok(batt) => {
-                                let percent = batt.state_of_charge().value * 100.0;
-                                let is_charging = batt.state() == battery::State::Charging;
-                                let energy_full = batt.energy_full().value;
-                                let energy = batt.energy().value;
-                                let health = format!("{:.1}%", (energy_full / energy) * 100.0);
-                                
-                                return (percent as f32, is_charging, health);
-                            }
-                            Err(e) => {
-                                eprintln!("⚠️ Erro ao obter info da bateria: {:?}", e);
-                            }
+        Ok(manager) => match manager.batteries() {
+            Ok(mut batteries) => {
+                if let Some(battery) = batteries.next() {
+                    match battery {
+                        Ok(batt) => {
+                            let percent = batt.state_of_charge().value * 100.0;
+                            let is_charging = batt.state() == battery::State::Charging;
+                            let energy_full = batt.energy_full().value;
+                            let energy = batt.energy().value;
+                            let health = format!("{:.1}%", (energy_full / energy) * 100.0);
+
+                            return (percent, is_charging, health);
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️ Erro ao obter info da bateria: {:?}", e);
                         }
                     }
                 }
-                Err(e) => {
-                    eprintln!("⚠️ Erro ao listar baterias: {:?}", e);
-                }
             }
-        }
+            Err(e) => {
+                eprintln!("⚠️ Erro ao listar baterias: {:?}", e);
+            }
+        },
         Err(e) => {
             eprintln!("⚠️ Manager de bateria indisponível: {:?}", e);
         }
     }
-    
+
     // Fallback: simular com valores padrão
     (100.0, true, "N/A".to_string())
 }
@@ -157,58 +154,60 @@ struct SyncEvent {
 pub fn RealtimeSyncScreen() -> Element {
     let app_config = use_context::<AppConfig>();
     let texts = get_texts(app_config.language());
-    
-    let mut source_path = use_signal(|| PathBuf::new());
-    let mut dest_path = use_signal(|| PathBuf::new());
-    let mut backup_path = use_signal(|| PathBuf::new());
-    let mut backup_password = use_signal(|| String::new());
+
+    let mut source_path = use_signal(PathBuf::new);
+    let mut dest_path = use_signal(PathBuf::new);
+    let mut backup_path = use_signal(PathBuf::new);
+    let mut backup_password = use_signal(String::new);
     let mut is_monitoring = use_signal(|| false);
     let mut status_msg = use_signal(|| "Pronto para monitorar e fazer backup".to_string());
-    
+
     let mut files_synced = use_signal(|| 0usize);
     let mut files_changed = use_signal(|| 0usize);
     let mut backups_created = use_signal(|| 0usize);
     let mut sync_errors = use_signal(|| 0usize);
-    
+
     // Histórico de eventos para dashboard
-    let mut sync_history = use_signal(|| Vec::<SyncEvent>::new());
+    let mut sync_history = use_signal(Vec::<SyncEvent>::new);
     let mut last_sync_time = use_signal(|| String::from("Nunca"));
     let mut success_rate = use_signal(|| 100.0);
-    
+
     // Notificações do sistema
     let mut notifications_enabled = use_signal(|| true);
-    
+
     // AlertDialog (fallback visual para notificações)
     let mut show_alert = use_signal(|| false);
-    let mut alert_title = use_signal(|| String::new());
-    let mut alert_message = use_signal(|| String::new());
+    let mut alert_title = use_signal(String::new);
+    let mut alert_message = use_signal(String::new);
     let mut alert_type = use_signal(|| String::from("info")); // "success", "error", "warning", "info"
-    
+
     // Monitoramento de bateria
     let mut battery_percent = use_signal(|| 100.0);
     let mut battery_status = use_signal(|| "AC".to_string());
     let mut show_low_battery_alert = use_signal(|| false);
     let mut battery_health = use_signal(|| String::from("N/A"));
-    
+
     // Webhook notifications
     let mut webhook_enabled = use_signal(|| false);
-    let mut webhook_url = use_signal(|| String::new());
+    let mut webhook_url = use_signal(String::new);
     let _show_webhook_config = use_signal(|| false);
-    
+
     // Configuração de ignores (padrões)
-    let mut ignore_patterns = use_signal(|| vec![
-        ".*\\.tmp$".to_string(),
-        ".*\\.lock$".to_string(),
-        ".*\\.swp$".to_string(),
-        ".git".to_string(),
-        ".DS_Store".to_string(),
-        "node_modules".to_string(),
-        "target".to_string(),
-    ]);
-    let mut new_pattern = use_signal(|| String::new());
+    let mut ignore_patterns = use_signal(|| {
+        vec![
+            ".*\\.tmp$".to_string(),
+            ".*\\.lock$".to_string(),
+            ".*\\.swp$".to_string(),
+            ".git".to_string(),
+            ".DS_Store".to_string(),
+            "node_modules".to_string(),
+            "target".to_string(),
+        ]
+    });
+    let mut new_pattern = use_signal(String::new);
     let mut show_ignore_editor = use_signal(|| false);
-    let mut pattern_test_input = use_signal(|| String::new());
-    let mut pattern_test_result = use_signal(|| String::new());
+    let mut pattern_test_input = use_signal(String::new);
+    let mut pattern_test_result = use_signal(String::new);
 
     // Função para mostrar AlertDialog visual
     let mut show_dialog = move |title: &str, message: &str, alert_type_str: &str| {
@@ -216,7 +215,7 @@ pub fn RealtimeSyncScreen() -> Element {
         alert_message.set(message.to_string());
         alert_type.set(alert_type_str.to_string());
         show_alert.set(true);
-        
+
         // Auto-fechar após 5 segundos (para "success" e "info")
         if alert_type_str == "success" || alert_type_str == "info" {
             spawn(async move {
@@ -277,7 +276,7 @@ pub fn RealtimeSyncScreen() -> Element {
         files_changed.set(0);
         backups_created.set(0);
         sync_errors.set(0);
-        
+
         // Notificar início de monitoramento
         if notifications_enabled() {
             send_system_notification(
@@ -299,19 +298,22 @@ pub fn RealtimeSyncScreen() -> Element {
         spawn(async move {
             // Sync inicial com timeout
             println!("[DEBUG] Iniciando sync inicial...");
-            status_msg.set("⏳ Processando sincronização inicial (pode levar alguns segundos)...".to_string());
-            
+            status_msg.set(
+                "⏳ Processando sincronização inicial (pode levar alguns segundos)...".to_string(),
+            );
+
             let sync_result = tokio::time::timeout(
                 tokio::time::Duration::from_secs(30),
-                sync_all_files(&src, &dst)
-            ).await;
-            
+                sync_all_files(&src, &dst),
+            )
+            .await;
+
             match sync_result {
                 Ok(Ok(count)) => {
                     println!("[DEBUG] ✅ Sync inicial completo: {} ficheiros", count);
                     files_synced.set(count);
                     status_msg.set("🟢 Sync inicial ok. Monitorando mudanças...".to_string());
-                    
+
                     // Monitorar alterações
                     let mut last_count = count;
                     let mut last_battery_check = 0usize;
@@ -321,42 +323,56 @@ pub fn RealtimeSyncScreen() -> Element {
                             status_msg.set("⏹️ Monitoramento parado".to_string());
                             break;
                         }
-                        
+
                         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                        
+
                         // Verificar bateria a cada 10 segundos
                         last_battery_check += 1;
                         if last_battery_check >= 5 {
                             last_battery_check = 0;
                             let (percent, is_charging, health) = check_battery_status();
-                            
+
                             battery_percent.set(percent);
-                            battery_status.set(if is_charging { "⚡ Carregando".to_string() } else { "🔋 Bateria".to_string() });
+                            battery_status.set(if is_charging {
+                                "⚡ Carregando".to_string()
+                            } else {
+                                "🔋 Bateria".to_string()
+                            });
                             battery_health.set(health);
-                            
+
                             // Alerta de bateria baixa (< 15%)
                             if percent < 15.0 && !is_charging && !show_low_battery_alert() {
                                 show_low_battery_alert.set(true);
                                 show_dialog(
                                     "⚠️ Bateria Baixa",
-                                    &format!("Bateria em {:.0}% - Considere conectar o carregador", percent),
-                                    "warning"
+                                    &format!(
+                                        "Bateria em {:.0}% - Considere conectar o carregador",
+                                        percent
+                                    ),
+                                    "warning",
                                 );
-                                
+
                                 if notify_enabled {
-                                    let webhook = if webhook_enabled_val { Some(webhook_url_val.as_str()) } else { None };
+                                    let webhook = if webhook_enabled_val {
+                                        Some(webhook_url_val.as_str())
+                                    } else {
+                                        None
+                                    };
                                     send_system_notification(
                                         "⚠️ Bateria Baixa",
-                                        &format!("Bateria em {:.0}% - Sincronização pode ser pausada", percent),
+                                        &format!(
+                                            "Bateria em {:.0}% - Sincronização pode ser pausada",
+                                            percent
+                                        ),
                                         "warning",
-                                        webhook
+                                        webhook,
                                     );
                                 }
                             } else if percent > 20.0 && is_charging {
                                 show_low_battery_alert.set(false);
                             }
                         }
-                        
+
                         // Verificar novas mudanças
                         match sync_all_files(&src, &dst).await {
                             Ok(new_count) => {
@@ -365,103 +381,127 @@ pub fn RealtimeSyncScreen() -> Element {
                                     println!("[DEBUG] 📄 Detectadas {} mudanças", changes);
                                     files_changed.set(files_changed() + changes);
                                     last_count = new_count;
-                                
-                                // Adicionar evento ao histórico
-                                let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-                                let mut history = sync_history();
-                                history.push(SyncEvent {
-                                    timestamp,
-                                    event_type: "file_synced".to_string(),
-                                    details: format!("{} arquivo(s) sincronizado(s)", changes),
-                                });
-                                // Manter apenas os últimos 20 eventos
-                                if history.len() > 20 {
-                                    history.remove(0);
-                                }
-                                sync_history.set(history);
-                                last_sync_time.set(chrono::Local::now().format("%H:%M:%S").to_string());
-                                
-                                // Notificar sincronização
-                                if notify_enabled {
-                                    let webhook = if webhook_enabled_val { Some(webhook_url_val.as_str()) } else { None };
-                                    send_system_notification(
-                                        "📄 Arquivos Sincronizados",
-                                        &format!("{} arquivo(s) sincronizado(s) com sucesso", changes),
-                                        "success",
-                                        webhook
-                                    );
-                                }
-                                
-                                // Fazer backup automático das mudanças (com criptografia)
-                                if let Ok(backup_name) = create_backup(&src, &bkp, Some(&pwd)).await {
-                                    backups_created.set(backups_created() + 1);
-                                    status_msg.set(format!("✅ {}", backup_name));
-                                    
-                                    // Adicionar evento de backup ao histórico
-                                    let timestamp_bkp = chrono::Local::now().format("%H:%M:%S").to_string();
+
+                                    // Adicionar evento ao histórico
+                                    let timestamp =
+                                        chrono::Local::now().format("%H:%M:%S").to_string();
                                     let mut history = sync_history();
                                     history.push(SyncEvent {
-                                        timestamp: timestamp_bkp,
-                                        event_type: "backup_created".to_string(),
-                                        details: "Backup automático criado com sucesso".to_string(),
+                                        timestamp,
+                                        event_type: "file_synced".to_string(),
+                                        details: format!("{} arquivo(s) sincronizado(s)", changes),
                                     });
+                                    // Manter apenas os últimos 20 eventos
                                     if history.len() > 20 {
                                         history.remove(0);
                                     }
                                     sync_history.set(history);
-                                    
-                                    // Notificar criação de backup
+                                    last_sync_time
+                                        .set(chrono::Local::now().format("%H:%M:%S").to_string());
+
+                                    // Notificar sincronização
                                     if notify_enabled {
-                                        let webhook = if webhook_enabled_val { Some(webhook_url_val.as_str()) } else { None };
+                                        let webhook = if webhook_enabled_val {
+                                            Some(webhook_url_val.as_str())
+                                        } else {
+                                            None
+                                        };
                                         send_system_notification(
+                                            "📄 Arquivos Sincronizados",
+                                            &format!(
+                                                "{} arquivo(s) sincronizado(s) com sucesso",
+                                                changes
+                                            ),
+                                            "success",
+                                            webhook,
+                                        );
+                                    }
+
+                                    // Fazer backup automático das mudanças (com criptografia)
+                                    if let Ok(backup_name) =
+                                        create_backup(&src, &bkp, Some(&pwd)).await
+                                    {
+                                        backups_created.set(backups_created() + 1);
+                                        status_msg.set(format!("✅ {}", backup_name));
+
+                                        // Adicionar evento de backup ao histórico
+                                        let timestamp_bkp =
+                                            chrono::Local::now().format("%H:%M:%S").to_string();
+                                        let mut history = sync_history();
+                                        history.push(SyncEvent {
+                                            timestamp: timestamp_bkp,
+                                            event_type: "backup_created".to_string(),
+                                            details: "Backup automático criado com sucesso"
+                                                .to_string(),
+                                        });
+                                        if history.len() > 20 {
+                                            history.remove(0);
+                                        }
+                                        sync_history.set(history);
+
+                                        // Notificar criação de backup
+                                        if notify_enabled {
+                                            let webhook = if webhook_enabled_val {
+                                                Some(webhook_url_val.as_str())
+                                            } else {
+                                                None
+                                            };
+                                            send_system_notification(
                                             "💾 Backup Criado",
                                             &format!("Backup '{}' criado com sucesso e criptografado", backup_name),
                                             "success",
                                             webhook
                                         );
-                                    }
-                                } else {
-                                    sync_errors.set(sync_errors() + 1);
-                                    
-                                    // Adicionar evento de erro
-                                    let timestamp_err = chrono::Local::now().format("%H:%M:%S").to_string();
-                                    let mut history = sync_history();
-                                    history.push(SyncEvent {
-                                        timestamp: timestamp_err,
-                                        event_type: "error".to_string(),
-                                        details: "Falha ao criar backup".to_string(),
-                                    });
-                                    if history.len() > 20 {
-                                        history.remove(0);
-                                    }
-                                    sync_history.set(history);
-                                    
-                                    // Notificar erro
-                                    if notify_enabled {
-                                        let webhook = if webhook_enabled_val { Some(webhook_url_val.as_str()) } else { None };
-                                        send_system_notification(
+                                        }
+                                    } else {
+                                        sync_errors.set(sync_errors() + 1);
+
+                                        // Adicionar evento de erro
+                                        let timestamp_err =
+                                            chrono::Local::now().format("%H:%M:%S").to_string();
+                                        let mut history = sync_history();
+                                        history.push(SyncEvent {
+                                            timestamp: timestamp_err,
+                                            event_type: "error".to_string(),
+                                            details: "Falha ao criar backup".to_string(),
+                                        });
+                                        if history.len() > 20 {
+                                            history.remove(0);
+                                        }
+                                        sync_history.set(history);
+
+                                        // Notificar erro
+                                        if notify_enabled {
+                                            let webhook = if webhook_enabled_val {
+                                                Some(webhook_url_val.as_str())
+                                            } else {
+                                                None
+                                            };
+                                            send_system_notification(
                                             "❌ Erro de Backup",
                                             "Falha ao criar backup automático - verifique as permissões",
                                             "error",
                                             webhook
                                         );
+                                        }
+                                    }
+
+                                    // Atualizar taxa de sucesso
+                                    let total = backups_created() + sync_errors();
+                                    if total > 0 {
+                                        let rate =
+                                            (backups_created() as f64 / total as f64) * 100.0;
+                                        success_rate.set(rate);
                                     }
                                 }
-                                
-                                // Atualizar taxa de sucesso
-                                let total = backups_created() + sync_errors();
-                                if total > 0 {
-                                    let rate = (backups_created() as f64 / total as f64) * 100.0;
-                                    success_rate.set(rate);
-                                }
-                            }
                             }
                             Err(e) => {
                                 println!("[DEBUG] ❌ Erro no sync: {}", e);
                                 sync_errors.set(sync_errors() + 1);
-                                
+
                                 // Adicionar evento de erro
-                                let timestamp_err = chrono::Local::now().format("%H:%M:%S").to_string();
+                                let timestamp_err =
+                                    chrono::Local::now().format("%H:%M:%S").to_string();
                                 let mut history = sync_history();
                                 history.push(SyncEvent {
                                     timestamp: timestamp_err,
@@ -472,15 +512,19 @@ pub fn RealtimeSyncScreen() -> Element {
                                     history.remove(0);
                                 }
                                 sync_history.set(history);
-                                
+
                                 // Notificar erro
                                 if notify_enabled {
-                                    let webhook = if webhook_enabled_val { Some(webhook_url_val.as_str()) } else { None };
+                                    let webhook = if webhook_enabled_val {
+                                        Some(webhook_url_val.as_str())
+                                    } else {
+                                        None
+                                    };
                                     send_system_notification(
                                         "❌ Erro de Sincronização",
                                         &format!("Falha na sincronização: {}", e),
                                         "error",
-                                        webhook
+                                        webhook,
                                     );
                                 }
                             }
@@ -494,7 +538,9 @@ pub fn RealtimeSyncScreen() -> Element {
                 }
                 Err(_) => {
                     println!("[DEBUG] Timeout: Sincronização inicial excedeu 30 segundos");
-                    status_msg.set("❌ Tempo limite excedido (30s) - pasta com muitos ficheiros?".to_string());
+                    status_msg.set(
+                        "❌ Tempo limite excedido (30s) - pasta com muitos ficheiros?".to_string(),
+                    );
                     is_monitoring.set(false);
                 }
             }
@@ -504,14 +550,14 @@ pub fn RealtimeSyncScreen() -> Element {
     let handle_stop_monitoring = move |_| {
         is_monitoring.set(false);
         status_msg.set("⏹️ Monitoramento parado".to_string());
-        
+
         // Notificar parada de monitoramento
         if notifications_enabled() {
             send_system_notification(
                 "⏹️ Monitoramento Parado",
                 "O monitoramento foi parado com sucesso",
                 "info",
-                None
+                None,
             );
         }
     };
@@ -579,9 +625,9 @@ pub fn RealtimeSyncScreen() -> Element {
     rsx! {
         div { class: "card",
             h2 { class: "page-title", "⚡ Real-Time Sync com Backup" }
-            
-            p { class: "hint mb-4", 
-                "Monitore uma pasta, sincronize em tempo real E crie backups automáticos das mudanças." 
+
+            p { class: "hint mb-4",
+                "Monitore uma pasta, sincronize em tempo real E crie backups automáticos das mudanças."
             }
 
             div { class: "form-group",
@@ -657,13 +703,13 @@ pub fn RealtimeSyncScreen() -> Element {
             }
 
             if !status_msg().is_empty() {
-                div { 
+                div {
                     class: "alert",
                     class: if status_msg().starts_with("✅") { "alert-success" } else if status_msg().starts_with("❌") { "alert-error" } else { "alert-info" },
-                    "{status_msg}" 
+                    "{status_msg}"
                 }
             }
-            
+
             // Configurações de notificações
             div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-4 mb-4 border border-slate-200 dark:border-slate-700",
                 div { class: "flex items-center justify-between",
@@ -671,17 +717,17 @@ pub fn RealtimeSyncScreen() -> Element {
                         span { class: "text-lg", "🔔" }
                         div {
                             p { class: "text-sm font-medium text-slate-900 dark:text-slate-100", "Notificações do Sistema" }
-                            p { class: "text-xs text-slate-600 dark:text-slate-400", 
+                            p { class: "text-xs text-slate-600 dark:text-slate-400",
                                 if notifications_enabled() { "Ativadas" } else { "Desativadas" }
                             }
                         }
                     }
                     button {
                         class: "px-3 py-2 rounded-lg font-medium text-sm transition-colors",
-                        class: if notifications_enabled() { 
-                            "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 hover:bg-green-200 dark:hover:bg-green-900/50" 
-                        } else { 
-                            "bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600" 
+                        class: if notifications_enabled() {
+                            "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 hover:bg-green-200 dark:hover:bg-green-900/50"
+                        } else {
+                            "bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600"
                         },
                         onclick: move |_| notifications_enabled.set(!notifications_enabled()),
                         if notifications_enabled() { "✅ Ativo" } else { "❌ Inativo" }
@@ -697,7 +743,7 @@ pub fn RealtimeSyncScreen() -> Element {
                     }
                 }
             }
-            
+
             // Configuração de Webhook Notifications
             div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-4 mb-4 border border-slate-200 dark:border-slate-700",
                 div { class: "flex items-center justify-between mb-4",
@@ -705,23 +751,23 @@ pub fn RealtimeSyncScreen() -> Element {
                         span { class: "text-lg", "🔗" }
                         div {
                             p { class: "text-sm font-medium text-slate-900 dark:text-slate-100", "Webhook Notifications" }
-                            p { class: "text-xs text-slate-600 dark:text-slate-400", 
+                            p { class: "text-xs text-slate-600 dark:text-slate-400",
                                 if webhook_enabled() { "Ativado" } else { "Desativado" }
                             }
                         }
                     }
                     button {
                         class: "px-3 py-2 rounded-lg font-medium text-sm transition-colors",
-                        class: if webhook_enabled() { 
-                            "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900/50" 
-                        } else { 
-                            "bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600" 
+                        class: if webhook_enabled() {
+                            "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900/50"
+                        } else {
+                            "bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600"
                         },
                         onclick: move |_| webhook_enabled.set(!webhook_enabled()),
                         if webhook_enabled() { "✅ Ativo" } else { "❌ Inativo" }
                     }
                 }
-                
+
                 if webhook_enabled() {
                     div { class: "space-y-3 border-t border-slate-200 dark:border-slate-600 pt-4",
                         div { class: "form-group",
@@ -735,23 +781,23 @@ pub fn RealtimeSyncScreen() -> Element {
                                 disabled: is_monitoring()
                             }
                         }
-                        
+
                         div { class: "bg-blue-50 dark:bg-blue-900/20 rounded p-3 text-xs text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 space-y-2",
                             p { class: "font-semibold", "📤 Estrutura do JSON enviado:" }
                             pre { class: "block font-mono text-xs overflow-auto bg-white dark:bg-slate-800 p-2 rounded border border-blue-200 dark:border-blue-700 text-left",
-r#"{{"#
-r#"  "event_type": "sync_complete","#
-r#"  "title": "Arquivos Sincronizados","#
-r#"  "message": "5 arquivo(s) sincronizado(s) com sucesso","#
-r#"  "timestamp": "2026-02-07 14:30:45","#
-r#"  "status": "success""#
-r#"}}"#
+    r#"{{"#
+    r#"  "event_type": "sync_complete","#
+    r#"  "title": "Arquivos Sincronizados","#
+    r#"  "message": "5 arquivo(s) sincronizado(s) com sucesso","#
+    r#"  "timestamp": "2026-02-07 14:30:45","#
+    r#"  "status": "success""#
+    r#"}}"#
                             }
                         }
                     }
                 }
             }
-            
+
             // Configuração de padrões de ignore
             div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-4 mb-4 border border-slate-200 dark:border-slate-700",
                 div { class: "flex items-center justify-between mb-4",
@@ -759,7 +805,7 @@ r#"}}"#
                         span { class: "text-lg", "🚫" }
                         div {
                             p { class: "text-sm font-medium text-slate-900 dark:text-slate-100", "Padrões de Ignore" }
-                            p { class: "text-xs text-slate-600 dark:text-slate-400", 
+                            p { class: "text-xs text-slate-600 dark:text-slate-400",
                                 "{ignore_patterns().len()} padrões configurados"
                             }
                         }
@@ -770,7 +816,7 @@ r#"}}"#
                         if show_ignore_editor() { "🔼 Fechar" } else { "⚙️ Editar" }
                     }
                 }
-                
+
                 // Editor de padrões (colapsável)
                 if show_ignore_editor() {
                     div { class: "space-y-3 border-t border-slate-200 dark:border-slate-600 pt-4",
@@ -790,7 +836,7 @@ r#"}}"#
                                 "➕"
                             }
                         }
-                        
+
                         // Testar padrão
                         div { class: "bg-white dark:bg-slate-800 rounded p-3 border border-slate-200 dark:border-slate-600",
                             p { class: "text-xs font-medium text-slate-700 dark:text-slate-300 mb-2", "🧪 Testar Padrão" }
@@ -811,7 +857,7 @@ r#"}}"#
                                 p { class: "text-xs text-slate-700 dark:text-slate-300", "{pattern_test_result}" }
                             }
                         }
-                        
+
                         // Lista de padrões
                         div { class: "space-y-1",
                             for pattern in ignore_patterns() {
@@ -831,7 +877,7 @@ r#"}}"#
                                 }
                             }
                         }
-                        
+
                         // Botão restaurar padrões
                         button {
                             class: "w-full px-3 py-2 rounded text-sm font-medium bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600",
@@ -896,7 +942,7 @@ r#"}}"#
             if is_monitoring() {
                 div { class: "card-section mb-4",
                     h3 { class: "section-title", "📊 Dashboard em Tempo Real" }
-                    
+
                     // Taxa de sucesso visual
                     div { class: "mb-6",
                         div { class: "flex justify-between items-center mb-2",
@@ -911,7 +957,7 @@ r#"}}"#
                             }
                         }
                     }
-                    
+
                     // Último sync
                     div { class: "grid grid-cols-2 gap-4 mb-6",
                         div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-4 border border-slate-200 dark:border-slate-700",
@@ -938,7 +984,7 @@ r#"}}"#
                             }
                         }
                     }
-                    
+
                     // Histórico de eventos
                     if !sync_history().is_empty() {
                         div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-4 border border-slate-200 dark:border-slate-700",
@@ -952,7 +998,7 @@ r#"}}"#
                                                 "error" => ("bg-red-50 dark:bg-red-900/30", "❌", "text-red-900 dark:text-red-200"),
                                                 _ => ("bg-slate-100 dark:bg-slate-800", "🔔", "text-slate-900 dark:text-slate-200"),
                                             };
-                                            
+
                                             rsx! {
                                                 div { key: "{event.timestamp}-{event.event_type}", class: "flex items-start gap-3 p-2 {bg_color} rounded border border-slate-200 dark:border-slate-700",
                                                     span { class: "text-lg flex-shrink-0", "{icon}" }
@@ -987,7 +1033,7 @@ r#"}}"#
                 }
             }
 
-            
+
             // AlertDialog Modal (Notificação Visual)
             if show_alert() {
                 div { class: "fixed inset-0 bg-black/50 flex items-center justify-center z-50",
@@ -1005,12 +1051,12 @@ r#"}}"#
                             }
                             h2 { class: "text-lg font-bold text-slate-900 dark:text-slate-100", "{alert_title}" }
                         }
-                        
+
                         // Body
                         div { class: "p-4",
                             p { class: "text-slate-700 dark:text-slate-300 text-sm leading-relaxed", "{alert_message}" }
                         }
-                        
+
                         // Footer
                         div { class: "flex gap-2 p-4 border-t border-slate-200 dark:border-slate-700",
                             button {

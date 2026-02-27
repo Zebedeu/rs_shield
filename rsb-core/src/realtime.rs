@@ -1,13 +1,13 @@
-use std::path::{Path, PathBuf};
-use std::collections::VecDeque;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use notify::{Watcher, RecursiveMode, Result as NotifyResult};
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
 use crate::config::Config;
 use crate::core::perform_backup;
 use crate::utils::ensure_directory_exists;
+use chrono::{DateTime, Utc};
+use notify::{RecursiveMode, Result as NotifyResult, Watcher};
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing;
 
 /// Tipos de mudanças detectadas
@@ -65,7 +65,7 @@ impl ChangeQueue {
     }
 }
 
-/// Monitor de ficheiros em tempo real
+/// File monitor in real-time
 pub struct RealtimeWatcher {
     watcher: Option<notify::RecommendedWatcher>,
     queue: ChangeQueue,
@@ -85,37 +85,38 @@ impl RealtimeWatcher {
         let queue = self.queue.clone();
         let root = root_path.to_path_buf();
 
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            match res {
-                Ok(event) => {
-                    let queue_clone = queue.clone();
-                    tokio::spawn(async move {
-                        for path in &event.paths {
-                            if let Ok(metadata) = std::fs::metadata(path) {
-                                let change_type = match event.kind {
-                                    notify::EventKind::Create(_) => ChangeType::Created,
-                                    notify::EventKind::Modify(_) => ChangeType::Modified,
-                                    notify::EventKind::Remove(_) => ChangeType::Deleted,
-                                    notify::EventKind::Access(_) => return, // Ignorar acessos
-                                    _ => return,
-                                };
+        let mut watcher =
+            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                match res {
+                    Ok(event) => {
+                        let queue_clone = queue.clone();
+                        tokio::spawn(async move {
+                            for path in &event.paths {
+                                if let Ok(metadata) = std::fs::metadata(path) {
+                                    let change_type = match event.kind {
+                                        notify::EventKind::Create(_) => ChangeType::Created,
+                                        notify::EventKind::Modify(_) => ChangeType::Modified,
+                                        notify::EventKind::Remove(_) => ChangeType::Deleted,
+                                        notify::EventKind::Access(_) => return, // Ignorar acessos
+                                        _ => return,
+                                    };
 
-                                let change = FileChange {
-                                    path: path.clone(),
-                                    change_type,
-                                    timestamp: Utc::now(),
-                                    size: metadata.len(),
-                                    hash: None, // Calcula-se depois
-                                };
+                                    let change = FileChange {
+                                        path: path.clone(),
+                                        change_type,
+                                        timestamp: Utc::now(),
+                                        size: metadata.len(),
+hash: None, // Calculated later
+                                    };
 
-                                queue_clone.add_change(change).await;
+                                    queue_clone.add_change(change).await;
+                                }
                             }
-                        }
-                    });
+                        });
+                    }
+                    Err(e) => eprintln!("Error monitoring files: {}", e),
                 }
-                Err(e) => eprintln!("Error monitoring files: {}", e),
-            }
-        })?;
+            })?;
 
         watcher.watch(&root, RecursiveMode::Recursive)?;
         self.watcher = Some(watcher);
@@ -134,18 +135,18 @@ impl RealtimeWatcher {
     }
 }
 
-/// Estratégia de sincronização
+/// Synchronization strategy
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncStrategy {
-    /// Sincronizar imediatamente ou em lote?
+    /// Sync immediately or in batch?
     pub immediate_sync: bool,
-    /// Intervalo de lote (segundos)
+    /// Batch interval (seconds)
     pub batch_interval: u64,
-    /// Tamanho máximo de ficheiro para sync imediato (bytes)
+    /// Maximum file size for immediate sync (bytes)
     pub immediate_threshold: u64,
-    /// Ignorar padrões (regex)
+    /// Ignore patterns (regex)
     pub ignore_patterns: Vec<String>,
-    /// Direcção: "uni" (origem → destino) ou "bi" (bidirecional)
+    /// Direction: "uni" (source → destination) or "bi" (bidirectional)
     pub direction: String,
 }
 
@@ -155,18 +156,16 @@ impl Default for SyncStrategy {
             immediate_sync: true,
             batch_interval: 5,
             immediate_threshold: 10_485_760, // 10 MB
-            // Padrões que fazem match apenas FINAL do caminho (com $)
-            // Evita false positives em pastas temporárias do SO
             ignore_patterns: vec![".*\\.tmp$".into(), ".*\\.lock$".into()],
             direction: "uni".into(),
         }
     }
 }
 
-/// Callback para quando mudanças são processadas
+/// Callback for when changes are processed
 pub type OnChangeCallback = Box<dyn Fn(FileChange) + Send + Sync>;
 
-/// Sincronizador em tempo real
+/// Real-time synchronizer
 pub struct RealtimeSync {
     watcher: RealtimeWatcher,
     pub queue: ChangeQueue,
@@ -200,8 +199,8 @@ impl RealtimeSync {
         self.watcher.stop_watching().await;
     }
 
-    /// Iniciar loop de processamento automático
-    /// Processa mudanças a cada `batch_interval` segundos
+    /// Start automatic processing loop
+    /// Processes changes every `batch_interval` seconds
     pub async fn start_processing_loop(self: Arc<Self>) {
         *self.is_processing.write().await = true;
 
@@ -211,16 +210,17 @@ impl RealtimeSync {
                     break;
                 }
 
-                // Esperar intervalo configurado
+                // Wait configured interval
                 tokio::time::sleep(tokio::time::Duration::from_secs(
                     self.strategy.batch_interval,
-                )).await;
+                ))
+                .await;
 
-                // Processar batch
+                // Process batch
                 let changes = self.process_batch().await;
                 for change in changes {
                     self.increment_synced().await;
-                    // Log da mudança processada
+                    // Log processed change
                     tracing::debug!("Change processed: {:?}", change);
                 }
             }
@@ -232,7 +232,7 @@ impl RealtimeSync {
         *self.is_processing.write().await = false;
     }
 
-    /// Verificar se está processando
+    /// Check if currently processing
     pub async fn is_processing(&self) -> bool {
         *self.is_processing.read().await
     }
@@ -249,7 +249,7 @@ impl RealtimeSync {
         }
 
         let mut attempt = 0;
-        
+
         loop {
             attempt += 1;
 
@@ -354,17 +354,17 @@ pub struct SyncStats {
 }
 
 /// Sincronizar todos os ficheiros de origem para destino
-/// 
+///
 /// # Argumentos
 /// * `src` - Caminho da pasta de origem
 /// * `dst` - Caminho da pasta de destino
-/// 
+///
 /// # Retorna
 /// Número de ficheiros sincronizados ou erro
 pub async fn sync_all_files(src: &Path, dst: &Path) -> Result<usize, String> {
     let src = src.to_path_buf();
     let dst = dst.to_path_buf();
-    
+
     // Executar operações bloqueantes em thread pool separada para não congelar a UI
     tokio::task::spawn_blocking(move || {
         use std::fs;
@@ -374,29 +374,28 @@ pub async fn sync_all_files(src: &Path, dst: &Path) -> Result<usize, String> {
             return Err("Source folder does not exist".to_string());
         }
 
-        let dst_str = dst.to_str().ok_or("Invalid path characters in destination")?;
+        let dst_str = dst
+            .to_str()
+            .ok_or("Invalid path characters in destination")?;
         ensure_directory_exists(dst_str)?;
 
         let mut count = 0;
 
-        for entry in WalkDir::new(&src)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+        for entry in WalkDir::new(&src).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
-            
+
             if path.is_file() {
-                let relative = path.strip_prefix(&src)
-                    .map_err(|e| e.to_string())?;
+                let relative = path.strip_prefix(&src).map_err(|e| e.to_string())?;
                 let dst_file = dst.join(relative);
 
                 if let Some(parent) = dst_file.parent() {
-                    let parent_str = parent.to_str().ok_or("Invalid path characters in destination")?;
+                    let parent_str = parent
+                        .to_str()
+                        .ok_or("Invalid path characters in destination")?;
                     ensure_directory_exists(parent_str)?;
                 }
 
-                fs::copy(path, &dst_file)
-                    .map_err(|e| format!("Error copying: {}", e))?;
+                fs::copy(path, &dst_file).map_err(|e| format!("Error copying: {}", e))?;
                 count += 1;
             }
         }
@@ -407,15 +406,15 @@ pub async fn sync_all_files(src: &Path, dst: &Path) -> Result<usize, String> {
     .map_err(|e| format!("Error in synchronization task: {}", e))?
 }
 
-/// Criar backup automático com encriptação e chunking
-/// 
-/// # Argumentos
-/// * `src` - Caminho da pasta a fazer backup
-/// * `backup_dst` - Caminho da pasta de destino do backup
-/// * `password` - Senha opcional para criptografia
-/// 
-/// # Retorna
-/// Nome/descrição do backup criado ou erro
+/// Create automatic backup with encryption and chunking
+///
+/// # Arguments
+/// * `src` - Path of the source folder to backup
+/// * `backup_dst` - Path of the backup destination folder
+/// * `password` - Optional password for encryption
+///
+/// # Returns
+/// Name/description of the backup created or error
 pub async fn create_backup(
     src: &Path,
     backup_dst: &Path,
@@ -425,15 +424,17 @@ pub async fn create_backup(
     let backup_dst = backup_dst.to_path_buf();
     let password = password.map(|p| p.to_string());
 
-    // Verificar se origem existe (rápido, fazer na thread atual)
+    // Check if source exists  
     if !src.exists() {
         return Err("Source does not exist".to_string());
     }
 
-    // Criar diretório em thread de blocking para não congelar a UI
+    // Create directory in blocking thread to avoid UI freeze
     let backup_dst_clone = backup_dst.clone();
     tokio::task::spawn_blocking(move || {
-        let dst_str = backup_dst_clone.to_str().ok_or("Invalid path characters in destination".to_string())?;
+        let dst_str = backup_dst_clone
+            .to_str()
+            .ok_or("Invalid path characters in destination".to_string())?;
         ensure_directory_exists(dst_str).map_err(|e| e.to_string())
     })
     .await
@@ -442,8 +443,8 @@ pub async fn create_backup(
 
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S").to_string();
 
-    // Criar Config para usar perform_backup do rsb-core
-    // O chunking é feito automaticamente (512MB chunks)
+    // Create Config to use perform_backup from rsb-core
+    // Chunking is done automatically (512MB chunks)
     let config = Config {
         source_path: src.to_string_lossy().to_string(),
         destination_path: backup_dst.to_string_lossy().to_string(),
@@ -453,7 +454,7 @@ pub async fn create_backup(
         s3_bucket: None,
         s3_region: None,
         s3_endpoint: None,
-        encrypt_patterns: Some(vec!["*".to_string()]), // Encriptar tudo
+        encrypt_patterns: Some(vec!["*".to_string()]), // Encrypt all files
         pause_on_low_battery: None,
         s3: None,
         s3_buckets: None,
@@ -461,20 +462,25 @@ pub async fn create_backup(
         compression_level: Some(3),
     };
 
-    // Usar perform_backup do rsb-core 
+    // Usar perform_backup do rsb-core
     // Faz automaticamente:
     // - Criptografia com a senha
     // - Chunking de 512MB (CHUNK_SIZE)
     // - Compressão com zstd
-    match perform_backup(&config, "incremental", password.as_deref(), false, false, None).await {
-        Ok(report) => {
-            Ok(format!(
-                "✅ Backup: {} with encryption\n📊 Files: {}/{}\n🔐 512MB chunks applied",
-                timestamp,
-                report.files_processed,
-                report.total_files
-            ))
-        },
-        Err(e) => Err(format!("Error creating backup: {}", e))
+    match perform_backup(
+        &config,
+        "incremental",
+        password.as_deref(),
+        false,
+        false,
+        None,
+    )
+    .await
+    {
+        Ok(report) => Ok(format!(
+            "✅ Backup: {} with encryption\n📊 Files: {}/{}\n🔐 512MB chunks applied",
+            timestamp, report.files_processed, report.total_files
+        )),
+        Err(e) => Err(format!("Error creating backup: {}", e)),
     }
 }

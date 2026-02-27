@@ -1,20 +1,20 @@
+use chrono::{DateTime, Local};
+use rsb_core::utils::ensure_directory_exists;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use chrono::{DateTime, Local};
-use rsb_core::utils::ensure_directory_exists;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Operation {
-    pub id: String, 
+    pub id: String,
     pub operation_type: String,
     pub timestamp: String,
     pub duration_secs: u64,
-    pub status: String, 
+    pub status: String,
     pub files_processed: usize,
     pub files_skipped: usize,
     pub files_with_errors: usize,
-    pub backup_size: String,              // "1.5 GB", etc
+    pub backup_size: String, // "1.5 GB", etc
     pub source_path: Option<String>,
     pub destination_path: Option<String>,
 }
@@ -37,36 +37,37 @@ impl OperationsHistory {
     }
 
     fn sort_by_timestamp(&mut self) {
-        self.operations.sort_by(|a, b| {
-            b.timestamp.cmp(&a.timestamp)
-        });
+        self.operations
+            .sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     }
 
     pub fn get_operations_count(&self, op_type: &str) -> usize {
-        self.operations.iter()
+        self.operations
+            .iter()
             .filter(|op| op.operation_type == op_type)
             .count()
     }
 
     pub fn get_successful_operations_count(&self, op_type: &str) -> usize {
-        self.operations.iter()
+        self.operations
+            .iter()
             .filter(|op| op.operation_type == op_type && op.status == "Sucesso")
             .count()
     }
 
     pub fn get_last_operation_time(&self, op_type: Option<&str>) -> String {
         match op_type {
-            Some(op_type) => {
-                self.operations.iter()
-                    .find(|op| op.operation_type == op_type)
-                    .map(|op| format_relative_time(&op.timestamp))
-                    .unwrap_or_else(|| "Nunca".to_string())
-            }
-            None => {
-                self.operations.first()
-                    .map(|op| format_relative_time(&op.timestamp))
-                    .unwrap_or_else(|| "Nunca".to_string())
-            }
+            Some(op_type) => self
+                .operations
+                .iter()
+                .find(|op| op.operation_type == op_type)
+                .map(|op| format_relative_time(&op.timestamp))
+                .unwrap_or_else(|| "Nunca".to_string()),
+            None => self
+                .operations
+                .first()
+                .map(|op| format_relative_time(&op.timestamp))
+                .unwrap_or_else(|| "Nunca".to_string()),
         }
     }
 
@@ -75,10 +76,7 @@ impl OperationsHistory {
     }
 
     pub fn get_recent_operations(&self, limit: usize) -> Vec<Operation> {
-        self.operations.iter()
-            .take(limit)
-            .cloned()
-            .collect()
+        self.operations.iter().take(limit).cloned().collect()
     }
 }
 
@@ -91,7 +89,7 @@ impl OperationsManager {
     pub fn new() -> Self {
         let history_file = get_history_file_path();
         let history = Self::load_history(&history_file);
-        
+
         Self {
             history_file,
             history,
@@ -100,12 +98,10 @@ impl OperationsManager {
 
     pub fn load_history(history_file: &PathBuf) -> OperationsHistory {
         match fs::read_to_string(history_file) {
-            Ok(content) => {
-                match serde_json::from_str(&content) {
-                    Ok(history) => history,
-                    Err(_) => OperationsHistory::new(),
-                }
-            }
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(history) => history,
+                Err(_) => OperationsHistory::new(),
+            },
             Err(_) => OperationsHistory::new(),
         }
     }
@@ -117,12 +113,10 @@ impl OperationsManager {
 
     pub fn save_history(&self) -> Result<(), String> {
         match serde_json::to_string_pretty(&self.history) {
-            Ok(json) => {
-                match fs::write(&self.history_file, json) {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(format!("Erro ao salvar histórico: {}", e)),
-                }
-            }
+            Ok(json) => match fs::write(&self.history_file, json) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!("Erro ao salvar histórico: {}", e)),
+            },
             Err(e) => Err(format!("Erro ao serializar histórico: {}", e)),
         }
     }

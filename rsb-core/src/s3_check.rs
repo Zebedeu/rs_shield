@@ -15,16 +15,10 @@ pub async fn verify_s3_connection(
         return Err("Required fields (Bucket, Region, Keys) not filled.".to_string());
     }
 
-    let credentials = Credentials::new(
-        access_key,
-        secret_key,
-        None,
-        None,
-        "manual_test",
-    );
+    let credentials = Credentials::new(access_key, secret_key, None, None, "manual_test");
 
     let region_provider = Region::new(region.to_string());
-    
+
     let mut config_loader = aws_config::defaults(BehaviorVersion::latest())
         .credentials_provider(credentials)
         .region(region_provider);
@@ -35,7 +29,7 @@ pub async fn verify_s3_connection(
     }
 
     let sdk_config = config_loader.load().await;
-    
+
     // S3-specific configuration
     let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
         // Force Path Style (e.g., domain.com/bucket) if we use a custom endpoint.
@@ -47,7 +41,10 @@ pub async fn verify_s3_connection(
 
     // Tries to get bucket metadata to validate access and existence
     match client.head_bucket().bucket(bucket).send().await {
-        Ok(_) => Ok(format!("✅ Connection established! Bucket '{}' accessible.", bucket)),
+        Ok(_) => Ok(format!(
+            "✅ Connection established! Bucket '{}' accessible.",
+            bucket
+        )),
         Err(e) => {
             let err_msg = e.to_string();
             // Simplifies the error message for the user

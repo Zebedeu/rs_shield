@@ -1,5 +1,5 @@
-/// SecureString: Tipo de dado sensível que zera a memória automaticamente
-/// Implementa Zeroize para limpar dados confidenciais da memória
+/// SecureString: Sensitive data type that automatically zeros memory
+/// Implements Zeroize to clear confidential data from memory
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -12,36 +12,36 @@ pub struct SecureString {
 }
 
 impl SecureString {
-    /// Criar a partir de uma String
+    /// Create from a String
     pub fn new(value: String) -> Self {
         SecureString { value }
     }
 
-    /// Obter a referência (imutável)
+    /// Get immutable reference
     pub fn as_str(&self) -> &str {
         &self.value
     }
 
-    /// Consumir e retornar a String original (não será possível com ZeroizeOnDrop)
+    /// Consume and return original String (not possible with ZeroizeOnDrop)
     pub fn as_inner(&self) -> &str {
         &self.value
     }
 
-    /// Verificar se está vazio
+    /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.value.is_empty()
     }
 
-    /// Validar se está em formato válido
+    /// Validate if in valid format
     pub fn is_valid(&self) -> bool {
         !self.value.is_empty() && self.value.len() >= 16
     }
 }
 
-/// Implementar Clone seguro
+/// Implement safe Debug
 impl fmt::Debug for SecureString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Não exibir o conteúdo em debug, apenas indicar que é sensível
+        // Don't display content in debug, just indicate it's sensitive
         f.debug_struct("SecureString")
             .field("value", &"***REDACTED***")
             .finish()
@@ -66,8 +66,10 @@ impl From<&str> for SecureString {
 impl PartialEq for SecureString {
     fn eq(&self, other: &Self) -> bool {
         // Usar comparação timing-safe se possível
-        self.value.as_bytes().len() == other.value.as_bytes().len()
-            && self.value.as_bytes()
+        self.value.len() == other.value.len()
+            && self
+                .value
+                .as_bytes()
                 .iter()
                 .zip(other.value.as_bytes())
                 .fold(0u8, |acc, (a, b)| acc | (a ^ b))

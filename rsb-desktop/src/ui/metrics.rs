@@ -15,7 +15,7 @@ pub struct SystemMetrics {
 pub fn get_system_metrics() -> SystemMetrics {
     let system = System::new_all();
 
-    let cpu_usage = system.global_cpu_info().cpu_usage();
+    let cpu_usage = system.global_cpu_usage();
 
     let memory_total_gb = system.total_memory() as f64 / 1_073_741_824.0;
     let memory_used_gb = system.used_memory() as f64 / 1_073_741_824.0;
@@ -29,39 +29,41 @@ pub fn get_system_metrics() -> SystemMetrics {
     let mut disk_used_gb = 0.0;
     let mut disk_free_gb = 0.0;
     let mut disk_usage = 0.0;
-    
+
     // Since we can't easily iterate disks in sysinfo 0.30 without additional methods,
     // we'll estimate based on the filesystem size
-    // For now, set realistic defaults that can be updated 
+    // For now, set realistic defaults that can be updated
     let disks = Disks::new_with_refreshed_list();
-    
-    // Tenta encontrar o disco raiz ("/") para evitar duplicação em sistemas como macOS (APFS) ou Linux 
-    let root_disk = disks.iter().find(|d| d.mount_point() == std::path::Path::new("/"));
+
+    // Tenta encontrar o disco raiz ("/") para evitar duplicação em sistemas como macOS (APFS) ou Linux
+    let root_disk = disks
+        .iter()
+        .find(|d| d.mount_point() == std::path::Path::new("/"));
 
     if let Some(disk) = root_disk {
         let total = disk.total_space() as f64 / 1_073_741_824.0;
         let available = disk.available_space() as f64 / 1_073_741_824.0;
         let used = total - available;
-        
+
         disk_total_gb = total;
         disk_used_gb = used;
         disk_free_gb = available;
     } else {
-        for disk in &disks { 
+        for disk in &disks {
             let total = disk.total_space() as f64 / 1_073_741_824.0; // Convert to GB
             let available = disk.available_space() as f64 / 1_073_741_824.0;
             let used = total - available;
-            
+
             disk_total_gb += total;
             disk_used_gb += used;
             disk_free_gb += available;
         }
     }
-    
+
     if disk_total_gb > 0.0 {
         disk_usage = (disk_used_gb / disk_total_gb * 100.0) as f32;
     }
-    
+
     SystemMetrics {
         cpu_usage,
         memory_usage,

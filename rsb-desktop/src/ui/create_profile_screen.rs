@@ -1,12 +1,9 @@
 use dioxus::prelude::*;
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::PathBuf;
 
-use crate::ui::{
-    app::AppConfig,
-    i18n::get_texts,
-};
+use crate::ui::{app::AppConfig, i18n::get_texts};
 use rsb_core::credentials::credentials_manager::{CredentialsManager, S3Credentials};
 use rsb_core::credentials::SecureString;
 use rsb_core::utils::ensure_directory_exists;
@@ -38,13 +35,13 @@ pub struct Config {
 pub fn CreateProfileScreen() -> Element {
     let app_config = use_context::<AppConfig>();
     let texts = get_texts(app_config.language());
-    
+
     let mut profile_name = use_signal(String::new);
     let mut source_path = use_signal(PathBuf::new);
     let mut dest_path = use_signal(PathBuf::new);
     let mut exclude_patterns = use_signal(|| "*.tmp\nnode_modules\n.git".to_string());
     let mut message = use_signal(String::new);
-    
+
     // S3 Signals
     let mut use_s3 = use_signal(|| false);
     let mut s3_bucket = use_signal(String::new);
@@ -98,11 +95,23 @@ pub fn CreateProfileScreen() -> Element {
         let s3_config = if use_s3() {
             // Nunca salvar credenciais no TOML por segurança!
             Some(S3Config {
-                bucket: if s3_bucket().is_empty() { None } else { Some(s3_bucket()) }, // Never save credentials in TOML for security!
-                region: if s3_region().is_empty() { None } else { Some(s3_region()) }, // access_key and secret_key are managed via:
-                endpoint: if s3_endpoint().is_empty() { None } else { Some(s3_endpoint()) }, // 1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-                // 2. Encrypted file (~/.rs-shield/s3_credentials.enc)
-                // 3. System keyring
+                bucket: if s3_bucket().is_empty() {
+                    None
+                } else {
+                    Some(s3_bucket())
+                }, // Never save credentials in TOML for security!
+                region: if s3_region().is_empty() {
+                    None
+                } else {
+                    Some(s3_region())
+                }, // access_key and secret_key are managed via:
+                endpoint: if s3_endpoint().is_empty() {
+                    None
+                } else {
+                    Some(s3_endpoint())
+                }, // 1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+                   // 2. Encrypted file (~/.rs-shield/s3_credentials.enc)
+                   // 3. System keyring
             })
         } else {
             None
@@ -115,17 +124,20 @@ pub fn CreateProfileScreen() -> Element {
         let access_key = s3_access_key().clone();
         let secret_key = s3_secret_key().clone();
         let excludes = exclude_patterns();
-        
+
         tracing::debug!("=== Form submitted ===");
         tracing::debug!("s3_use: {}", use_s3());
         tracing::debug!("access_key length: {}", access_key.len());
         tracing::debug!("secret_key length: {}", secret_key.len());
 
         spawn(async move {
-            match create_profile_async(&name, &source, &dest, &excludes, s3_config, access_key, secret_key).await {
+            match create_profile_async(
+                &name, &source, &dest, &excludes, s3_config, access_key, secret_key,
+            )
+            .await
+            {
                 Ok(_) => {
-                    let success_msg = texts.create_profile_success
-                        .replace("{0}", &name);
+                    let success_msg = texts.create_profile_success.replace("{0}", &name);
                     message.set(success_msg);
                     is_success.set(true);
                     profile_name.set(String::new());
@@ -133,8 +145,7 @@ pub fn CreateProfileScreen() -> Element {
                     dest_path.set(PathBuf::new());
                 }
                 Err(e) => {
-                    let error_msg = texts.error_creating_profile
-                        .replace("{0}", &e);
+                    let error_msg = texts.error_creating_profile.replace("{0}", &e);
                     message.set(error_msg);
                 }
             }
@@ -142,9 +153,8 @@ pub fn CreateProfileScreen() -> Element {
         });
     };
 
-    let profile_saved_msg = use_memo(move || {
-        texts.profile_saved_as.replace("{0}", &profile_name())
-    });
+    let profile_saved_msg =
+        use_memo(move || texts.profile_saved_as.replace("{0}", &profile_name()));
 
     rsx! {
         div { class: "card",
@@ -152,11 +162,11 @@ pub fn CreateProfileScreen() -> Element {
 
             div { class: "form-group",
                 label { class: "label-text", "{texts.profile_name_label}" }
-                input { 
-                    class: "input-field", 
-                    r#type: "text", 
+                input {
+                    class: "input-field",
+                    r#type: "text",
                     placeholder: "E.g.: documents_backup",
-                    value: "{profile_name}", 
+                    value: "{profile_name}",
                     oninput: move |evt| {
                         profile_name.set(evt.value());
                         message.set(String::new());
@@ -168,18 +178,18 @@ pub fn CreateProfileScreen() -> Element {
             div { class: "form-group",
                 label { class: "label-text", "{texts.source_dir_label}" }
                 div { class: "flex gap-3",
-                    input { 
-                        class: "input-field", 
-                        r#type: "text", 
+                    input {
+                        class: "input-field",
+                        r#type: "text",
                         placeholder: "{texts.select_source_folder}",
-                        value: "{source_path.read().to_string_lossy()}", 
+                        value: "{source_path.read().to_string_lossy()}",
                         readonly: true
                     }
-                    button { 
-                        class: "btn-icon", 
+                    button {
+                        class: "btn-icon",
                         onclick: handle_select_source,
                         disabled: is_loading(),
-                        "📂" 
+                        "📂"
                     }
                 }
                 p { class: "hint", "{texts.source_dir_hint}" }
@@ -188,18 +198,18 @@ pub fn CreateProfileScreen() -> Element {
             div { class: "form-group",
                 label { class: "label-text", "{texts.dest_dir_label}" }
                 div { class: "flex gap-3",
-                    input { 
-                        class: "input-field", 
-                        r#type: "text", 
+                    input {
+                        class: "input-field",
+                        r#type: "text",
                         placeholder: "{texts.select_dest_folder}",
-                        value: "{dest_path.read().to_string_lossy()}", 
+                        value: "{dest_path.read().to_string_lossy()}",
                         readonly: true
                     }
-                    button { 
-                        class: "btn-icon", 
+                    button {
+                        class: "btn-icon",
                         onclick: handle_select_dest,
                         disabled: is_loading(),
-                        "📂" 
+                        "📂"
                     }
                 }
                 p { class: "hint", "{texts.dest_dir_hint}" }
@@ -207,14 +217,14 @@ pub fn CreateProfileScreen() -> Element {
 
             div { class: "form-group",
                 label { class: "label-text", "{texts.exclude_patterns_label}" }
-                textarea { 
+                textarea {
                     class: "input-field min-h-[120px] font-mono text-sm",
                     placeholder: "One pattern per line:\n*.tmp\nnode_modules\n.git\n.DS_Store\n__pycache__",
                     value: "{exclude_patterns}",
                     oninput: move |evt| exclude_patterns.set(evt.value())
                 }
-                p { class: "hint", 
-                    "{texts.exclude_patterns_hint}\n" 
+                p { class: "hint",
+                    "{texts.exclude_patterns_hint}\n"
                     "- \"*.ext\" for wildcards (e.g., *.tmp, *.log)\n"
                     "- \".hidden\" for hidden files (e.g., .git, .DS_Store)\n"
                     "- \"folder\" for entire folders (e.g., node_modules, __pycache__)"
@@ -222,7 +232,7 @@ pub fn CreateProfileScreen() -> Element {
             }
 
             div { class: "card-section mt-4 border-t border-slate-200 dark:border-slate-700 pt-4",
-                div { 
+                div {
                     class: "flex items-center justify-between cursor-pointer select-none",
                     onclick: move |_| use_s3.set(!use_s3()),
                     h3 { class: "section-title mb-0", "{texts.s3_config_optional}" }
@@ -230,12 +240,12 @@ pub fn CreateProfileScreen() -> Element {
                         "▼"
                     }
                 }
-                
+
                 if use_s3() {
                     div { class: "mt-4 space-y-4 animate-fade-in",
                         div { class: "form-group",
                             label { class: "label-text", "Bucket Name" }
-                            input { 
+                            input {
                                 class: "input-field", r#type: "text", placeholder: "e.g., my-backup-bucket",
                                 value: "{s3_bucket}", oninput: move |evt| s3_bucket.set(evt.value())
                             }
@@ -243,14 +253,14 @@ pub fn CreateProfileScreen() -> Element {
                         div { class: "grid grid-cols-2 gap-4",
                             div { class: "form-group",
                                 label { class: "label-text", "Region" }
-                                input { 
+                                input {
                                     class: "input-field", r#type: "text", placeholder: "e.g., us-east-1",
                                     value: "{s3_region}", oninput: move |evt| s3_region.set(evt.value())
                                 }
                             }
                             div { class: "form-group",
                                 label { class: "label-text", "Endpoint (Optional)" }
-                                input { 
+                                input {
                                     class: "input-field", r#type: "text", placeholder: "e.g., https://s3.amazonaws.com",
                                     value: "{s3_endpoint}", oninput: move |evt| s3_endpoint.set(evt.value())
                                 }
@@ -258,46 +268,46 @@ pub fn CreateProfileScreen() -> Element {
                         }
                         div { class: "form-group",
                             label { class: "label-text", "Access Key ID" }
-                            input { 
+                            input {
                                 class: "input-field", r#type: "text", placeholder: "AWS_ACCESS_KEY_ID",
                                 value: "{s3_access_key}", oninput: move |evt| s3_access_key.set(evt.value())
                             }
                         }
                         div { class: "form-group",
                             label { class: "label-text", "Secret Access Key" }
-                            input { 
+                            input {
                                 class: "input-field", r#type: "password", placeholder: "AWS_SECRET_ACCESS_KEY",
                                 value: "{s3_secret_key}", oninput: move |evt| s3_secret_key.set(evt.value())
                             }
-                            p { class: "hint text-amber-600 dark:text-amber-400", 
-                                "⚠️ Note: Credentials will be saved in the configuration file. For greater security, use environment variables or IAM roles if possible." 
+                            p { class: "hint text-amber-600 dark:text-amber-400",
+                                "⚠️ Note: Credentials will be saved in the configuration file. For greater security, use environment variables or IAM roles if possible."
                             }
                         }
                     }
                 } else {
-                    p { class: "hint mt-2", 
-                        "Click to expand if you want to configure remote backup for AWS S3, MinIO, Cloudflare R2, etc." 
+                    p { class: "hint mt-2",
+                        "Click to expand if you want to configure remote backup for AWS S3, MinIO, Cloudflare R2, etc."
                     }
                 }
             }
 
             if !message().is_empty() {
-                div { 
+                div {
                     class: "alert",
                     class: if is_success() { "alert-success" } else { "alert-error" },
-                    "{message}" 
+                    "{message}"
                 }
             }
 
-            button { 
+            button {
                 class: "btn-primary",
                 class: if is_loading() { "btn-disabled" } else { "" },
                 onclick: handle_create,
                 disabled: is_loading() || profile_name().is_empty(),
-                if is_loading() { 
-                    "⏳ Creating profile..." 
-                } else { 
-                    "✨ Create Profile" 
+                if is_loading() {
+                    "⏳ Creating profile..."
+                } else {
+                    "✨ Create Profile"
                 }
             }
 
@@ -338,53 +348,56 @@ async fn create_profile_async(
         compression_level: Some(3),
     };
 
-    let toml_str = toml::to_string(&config)
-        .map_err(|e| format!("Error serializing TOML: {}", e))?;
-    
+    let toml_str =
+        toml::to_string(&config).map_err(|e| format!("Error serializing TOML: {}", e))?;
+
     let filename = format!("{}.toml", name);
-    
+
     // Try to save in the configuration directory (~/.rsb-desktop/)
     if let Some(home) = dirs::home_dir() {
         let home_str = home.to_string_lossy();
         let config_dir_path = format!("{}/.rsb-desktop", home_str);
-        
+
         // Use centralized function to create directory
         let config_dir = ensure_directory_exists(&config_dir_path)
             .map_err(|e| format!("Error creating configuration directory: {}", e))?;
-        
+
         let config_path = config_dir.join(&filename);
-        
+
         match fs::write(&config_path, &toml_str) {
             Ok(_) => {
                 tracing::info!("Profile saved at: {:?}", config_path);
-                
+
                 // Debug: check values
                 tracing::debug!("=== Debug: Salvando credenciais S3 ===");
                 tracing::debug!("s3_config.is_some(): {}", s3_config.is_some());
                 tracing::debug!("access_key.is_empty(): {}", access_key.is_empty());
                 tracing::debug!("secret_key.is_empty(): {}", secret_key.is_empty());
-                
+
                 // Save S3 credentials securely if provided
                 if s3_config.is_some() && !access_key.is_empty() && !secret_key.is_empty() {
                     tracing::info!("🔐 Starting S3 credential save...");
-                    
+
                     let credentials = S3Credentials {
                         access_key: SecureString::new(access_key.clone()),
                         secret_key: SecureString::new(secret_key.clone()),
                         session_token: None,
                     };
-                    
+
                     let cred_dir_path = format!("{}/.rs-shield", home_str);
                     // Ensure credentials directory exists
                     let _ = ensure_directory_exists(&cred_dir_path);
-                    
+
                     let cred_file = home.join(".rs-shield").join("s3_credentials.enc");
                     let cred_file_str = cred_file.to_string_lossy().to_string();
                     tracing::info!("Caminho das credenciais: {}", cred_file_str);
-                    
+
                     match CredentialsManager::save_encrypted(&cred_file_str, &credentials, false) {
                         Ok(_) => {
-                            tracing::info!("✅ S3 credentials saved securely at: {}", cred_file_str);
+                            tracing::info!(
+                                "✅ S3 credentials saved securely at: {}",
+                                cred_file_str
+                            );
                         }
                         Err(e) => {
                             tracing::error!("❌ Failed to save credentials: {}", e);
@@ -402,18 +415,18 @@ async fn create_profile_async(
                         tracing::warn!("   - Secret key is empty");
                     }
                 }
-                
-                return Ok(());
+
+                Ok(())
             }
             Err(e) => {
                 tracing::error!("❌ Error saving to ~/.rsb-desktop/: {}", e);
-                return Err(format!("Error writing TOML file: {}", e));
+                Err(format!("Error writing TOML file: {}", e))
             }
         }
     } else {
         // If it can't get home, fail clearly
         let error_msg = "❌ CRITICAL ERROR: Could not determine the user's HOME directory. Check environment variables (HOME/USERPROFILE).";
         tracing::error!("{}", error_msg);
-        return Err(error_msg.to_string());
+        Err(error_msg.to_string())
     }
 }

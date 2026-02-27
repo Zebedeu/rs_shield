@@ -70,10 +70,10 @@ fn test_shared_pause_flag_between_threads() {
     let thread_handle = thread::spawn(move || {
         // Thread sees initial state
         assert!(!should_pause_clone.load(Ordering::Relaxed));
-        
+
         // Wait a bit
         thread::sleep(Duration::from_millis(50));
-        
+
         // Check if pause was set from main thread
         should_pause_clone.load(Ordering::Relaxed)
     });
@@ -102,7 +102,7 @@ fn test_shared_running_flag_between_threads() {
 
     // Let thread run for a bit
     thread::sleep(Duration::from_millis(50));
-    
+
     // Stop the thread
     running.store(false, Ordering::Relaxed);
 
@@ -183,7 +183,7 @@ fn test_multiple_thread_access() {
 
     // Small delay to let threads start
     thread::sleep(Duration::from_millis(10));
-    
+
     // Set the flag while threads are running
     should_pause.store(true, Ordering::Relaxed);
 

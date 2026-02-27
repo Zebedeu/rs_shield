@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 
 /// Estrutura simplificada de um perfil
 #[derive(Debug, Clone)]
@@ -32,9 +32,14 @@ impl ProfileManager {
         if let Ok(entries) = fs::read_dir(&profiles_dir) {
             for entry in entries.flatten() {
                 if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() && entry.path().extension().map_or(false, |ext| ext == "toml") {
+                    if metadata.is_file()
+                        && entry.path().extension().is_some_and(|ext| ext == "toml")
+                    {
                         let file_name = entry.file_name();
-                        let name = file_name.to_string_lossy().trim_end_matches(".toml").to_string();
+                        let name = file_name
+                            .to_string_lossy()
+                            .trim_end_matches(".toml")
+                            .to_string();
                         let path = entry.path();
 
                         // Get modification date
@@ -48,7 +53,11 @@ impl ProfileManager {
                             "Unknown".to_string()
                         };
 
-                        profiles.push(ProfileEntry { name, path, created });
+                        profiles.push(ProfileEntry {
+                            name,
+                            path,
+                            created,
+                        });
                     }
                 }
             }
@@ -68,8 +77,8 @@ impl ProfileManager {
 /// Profile Management Screen
 #[component]
 pub fn ProfileManagerScreen(mut active_tab: Signal<crate::ui::app::ActiveTab>) -> Element {
-    let mut profiles = use_signal(|| ProfileManager::list_profiles());
-    let mut status_msg = use_signal(|| String::new());
+    let mut profiles = use_signal(ProfileManager::list_profiles);
+    let mut status_msg = use_signal(String::new);
     let mut show_status = use_signal(|| false);
     let mut status_type = use_signal(|| "success"); // "success" or "error"
     let mut to_delete = use_signal(|| Option::<ProfileEntry>::None);
@@ -77,7 +86,10 @@ pub fn ProfileManagerScreen(mut active_tab: Signal<crate::ui::app::ActiveTab>) -
     let mut handle_delete = move |profile_name: String, profile_path: PathBuf| {
         match ProfileManager::delete_profile(&profile_path) {
             Ok(()) => {
-                status_msg.set(format!("✅ Profile '{}' deleted successfully!", profile_name));
+                status_msg.set(format!(
+                    "✅ Profile '{}' deleted successfully!",
+                    profile_name
+                ));
                 status_type.set("success");
                 to_delete.set(None);
                 profiles.set(ProfileManager::list_profiles());
@@ -99,12 +111,12 @@ pub fn ProfileManagerScreen(mut active_tab: Signal<crate::ui::app::ActiveTab>) -
     let (bg_class, text_class) = if status_type() == "success" {
         (
             "bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800",
-            "text-green-800 dark:text-green-300"
+            "text-green-800 dark:text-green-300",
         )
     } else {
         (
             "bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800",
-            "text-red-800 dark:text-red-300"
+            "text-red-800 dark:text-red-300",
         )
     };
 

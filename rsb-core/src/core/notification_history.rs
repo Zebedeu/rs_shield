@@ -1,6 +1,6 @@
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use chrono::Local;
 
 /// Notification history entry
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -8,11 +8,11 @@ use chrono::Local;
 pub struct NotificationHistoryEntry {
     pub id: String,
     pub timestamp: String,
-    pub event_type: String,           // "sync", "backup", "error", "battery", "webhook"
+    pub event_type: String, // "sync", "backup", "error", "battery", "webhook"
     pub title: String,
     pub message: String,
-    pub status: String,               // "success", "error", "warning", "info"
-    pub duration_secs: Option<u64>,   // Duração da operação se aplicável
+    pub status: String,             // "success", "error", "warning", "info"
+    pub duration_secs: Option<u64>, // Duração da operação se aplicável
 }
 
 /// In-memory notification history manager
@@ -34,7 +34,7 @@ impl NotificationHistory {
     /// Add entry to history
     pub fn add_entry(&mut self, entry: NotificationHistoryEntry) {
         self.entries.push_front(entry);
-        
+
         // Keep only the last N entries
         if self.entries.len() > self.max_entries {
             self.entries.pop_back();
@@ -105,7 +105,11 @@ impl NotificationHistory {
             } else {
                 format!("Failed to send webhook to {}", webhook_url)
             },
-            status: if success { "success".to_string() } else { "error".to_string() },
+            status: if success {
+                "success".to_string()
+            } else {
+                "error".to_string()
+            },
             duration_secs: None,
         });
     }
@@ -117,11 +121,7 @@ impl NotificationHistory {
 
     /// Get last N entries
     pub fn get_recent(&self, count: usize) -> Vec<NotificationHistoryEntry> {
-        self.entries
-            .iter()
-            .take(count)
-            .cloned()
-            .collect()
+        self.entries.iter().take(count).cloned().collect()
     }
 
     /// Filter by event type
@@ -150,18 +150,15 @@ impl NotificationHistory {
             .iter()
             .filter(|e| e.status == "success")
             .count();
-        let errors = self
-            .entries
-            .iter()
-            .filter(|e| e.status == "error")
-            .count();
+        let errors = self.entries.iter().filter(|e| e.status == "error").count();
         let warnings = self
             .entries
             .iter()
             .filter(|e| e.status == "warning")
             .count();
 
-        let mut by_type: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut by_type: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for entry in self.entries.iter() {
             *by_type.entry(entry.event_type.clone()).or_insert(0) += 1;
         }
@@ -193,10 +190,7 @@ impl NotificationHistory {
 
     /// Buscar entrada por ID
     pub fn find_by_id(&self, id: &str) -> Option<NotificationHistoryEntry> {
-        self.entries
-            .iter()
-            .find(|e| e.id == id)
-            .cloned()
+        self.entries.iter().find(|e| e.id == id).cloned()
     }
 }
 
@@ -290,7 +284,7 @@ mod tests {
         let mut history = NotificationHistory::new(10);
         history.add_sync_success(5);
         history.add_error("Erro", "Msg");
-        
+
         let summary = history.get_summary();
         assert_eq!(summary.total_notifications, 2);
         assert_eq!(summary.success_count, 1);

@@ -1,21 +1,21 @@
-use serde::{Deserialize, Serialize};
 use reqwest::Client;
-use tracing::{info, error};
+use serde::{Deserialize, Serialize};
+use tracing::{error, info};
 
 /// Configuration for chat integrations (Slack, Telegram, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum ChatIntegration {
     Slack {
-        webhook_url: String,  // Slack channel Webhook URL
+        webhook_url: String,          // Slack channel Webhook URL
         mention_user: Option<String>, // ID or @username to mention
     },
     Telegram {
-        bot_token: String,    // Telegram bot token
-        chat_id: String,      // Chat/group ID
+        bot_token: String, // Telegram bot token
+        chat_id: String,   // Chat/group ID
     },
     Discord {
-        webhook_url: String,  // Discord Webhook URL
+        webhook_url: String, // Discord Webhook URL
     },
 }
 
@@ -95,8 +95,18 @@ pub async fn send_chat_notification(
     notification_type: &str, // "success", "error", "warning", "info"
 ) -> Result<(), Box<dyn std::error::Error>> {
     match integration {
-        ChatIntegration::Slack { webhook_url, mention_user } => {
-            send_slack_notification(webhook_url, title, message, notification_type, mention_user.as_deref()).await
+        ChatIntegration::Slack {
+            webhook_url,
+            mention_user,
+        } => {
+            send_slack_notification(
+                webhook_url,
+                title,
+                message,
+                notification_type,
+                mention_user.as_deref(),
+            )
+            .await
         }
         ChatIntegration::Telegram { bot_token, chat_id } => {
             send_telegram_notification(bot_token, chat_id, title, message, notification_type).await
@@ -158,7 +168,10 @@ async fn send_slack_notification(
     match client.post(webhook_url).json(&slack_msg).send().await {
         Ok(response) => {
             if response.status().is_success() {
-                info!("✅ [Slack] Notification sent successfully to {}", mention_user.unwrap_or("user"));
+                info!(
+                    "✅ [Slack] Notification sent successfully to {}",
+                    mention_user.unwrap_or("user")
+                );
                 Ok(())
             } else {
                 error!("❌ [Slack] Error: {}", response.status());
@@ -187,10 +200,7 @@ async fn send_telegram_notification(
         _ => "ℹ️",
     };
 
-    let text = format!(
-        "*{}* {}\n\n{}",
-        emoji, title, message
-    );
+    let text = format!("*{}* {}\n\n{}", emoji, title, message);
 
     let telegram_msg = TelegramMessage {
         chat_id: chat_id.to_string(),
@@ -234,31 +244,29 @@ async fn send_discord_notification(
 
     let discord_msg = DiscordMessage {
         content: format!("{} **{}**: {}", emoji, title, message),
-        embeds: Some(vec![
-            DiscordEmbed {
-                title: format!("{} {}", emoji, title),
-                description: message.to_string(),
-                color,
-                fields: Some(vec![
-                    DiscordField {
-                        name: "Color".to_string(),
-                        value: format!("#{:06x}", color),
-                        inline: true,
-                    },
-                    DiscordField {
-                        name: "Timestamp".to_string(),
-                        value: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                        inline: true,
-                    },
-                    DiscordField {
-                        name: "Type".to_string(),
-                        value: notification_type.to_string(),
-                        inline: true,
-                    },
-                ]),
-                timestamp: chrono::Local::now().to_rfc3339(),
-            }
-        ]),
+        embeds: Some(vec![DiscordEmbed {
+            title: format!("{} {}", emoji, title),
+            description: message.to_string(),
+            color,
+            fields: Some(vec![
+                DiscordField {
+                    name: "Color".to_string(),
+                    value: format!("#{:06x}", color),
+                    inline: true,
+                },
+                DiscordField {
+                    name: "Timestamp".to_string(),
+                    value: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    inline: true,
+                },
+                DiscordField {
+                    name: "Type".to_string(),
+                    value: notification_type.to_string(),
+                    inline: true,
+                },
+            ]),
+            timestamp: chrono::Local::now().to_rfc3339(),
+        }]),
     };
 
     let client = Client::new();
@@ -266,7 +274,10 @@ async fn send_discord_notification(
         Ok(response) => {
             if response.status().is_success() {
                 let color_str = format!("#{:06x}", color);
-                info!("✅ [Discord] Notification sent successfully with color {}", color_str);
+                info!(
+                    "✅ [Discord] Notification sent successfully with color {}",
+                    color_str
+                );
                 Ok(())
             } else {
                 error!("❌ [Discord] Error: {}", response.status());
@@ -289,7 +300,12 @@ pub fn send_chat_notification_blocking(
     notification_type: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(send_chat_notification(integration, title, message, notification_type))
+    rt.block_on(send_chat_notification(
+        integration,
+        title,
+        message,
+        notification_type,
+    ))
 }
 
 #[cfg(test)]

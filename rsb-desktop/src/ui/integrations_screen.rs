@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
+use rsb_core::utils::ensure_directory_exists;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use rsb_core::utils::ensure_directory_exists;
 
 /// Configurações de integrações salvas localmente
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +52,7 @@ impl IntegrationConfig {
             None => std::path::Path::new("."),
         };
         let config_path = config_dir.join("integrations.json");
-        
+
         if config_path.exists() {
             if let Ok(content) = fs::read_to_string(&config_path) {
                 if let Ok(config) = serde_json::from_str(&content) {
@@ -60,7 +60,7 @@ impl IntegrationConfig {
                 }
             }
         }
-        
+
         Self {
             email: None,
             slack: None,
@@ -76,12 +76,12 @@ impl IntegrationConfig {
             None => std::path::Path::new("."),
         };
         let config_path = config_dir.join("integrations.json");
-        
+
         // Criar diretório se não existir
         if let Some(dir_str) = config_dir.to_str() {
             let _ = ensure_directory_exists(dir_str);
         }
-        
+
         let json = serde_json::to_string_pretty(self)?;
         fs::write(config_path, json)?;
         Ok(())
@@ -97,17 +97,17 @@ pub fn IntegrationScreen() -> Element {
     } else {
         std::path::PathBuf::from("~/.rs-shield/default.toml")
     };
-    
+
     let mut config = use_signal(|| IntegrationConfig::load(&profile_path));
     let mut active_tab = use_signal(|| "email");
-    let mut status_msg = use_signal(|| String::new());
+    let mut status_msg = use_signal(String::new);
     let mut show_status = use_signal(|| false);
 
     let handle_save_config = move |_| {
         if let Ok(()) = config().save(&profile_path) {
             status_msg.set("✅ Configurações salvas com sucesso!".to_string());
             show_status.set(true);
-            
+
             // Auto-hide após 3 segundos
             spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
@@ -400,7 +400,11 @@ fn SlackForm(
         on_change.call(SlackIntegrationConfig {
             enabled: enabled(),
             webhook_url: webhook_url(),
-            mention_user: if mention_user().is_empty() { None } else { Some(mention_user()) },
+            mention_user: if mention_user().is_empty() {
+                None
+            } else {
+                Some(mention_user())
+            },
         });
     };
 
@@ -409,63 +413,67 @@ fn SlackForm(
         on_change.call(SlackIntegrationConfig {
             enabled: enabled(),
             webhook_url: webhook_url(),
-            mention_user: if mention_user().is_empty() { None } else { Some(mention_user()) },
+            mention_user: if mention_user().is_empty() {
+                None
+            } else {
+                Some(mention_user())
+            },
         });
     };
 
     rsx! {
-        div { class: "space-y-6 p-6 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700",
-            // Enable Toggle
-            div { class: "flex items-center justify-between",
-                label { class: "text-lg font-semibold text-slate-700 dark:text-slate-300", "Ativar Slack" }
+    div { class: "space-y-6 p-6 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700",
+        // Enable Toggle
+        div { class: "flex items-center justify-between",
+            label { class: "text-lg font-semibold text-slate-700 dark:text-slate-300", "Ativar Slack" }
+            input {
+                r#type: "checkbox",
+                class: "checkbox",
+                checked: enabled(),
+                onchange: handle_enable_change
+            }
+        }
+        }
+
+        if enabled() {
+            // Webhook URL
+            div {
+                label { class: "label font-medium text-slate-700 dark:text-slate-300", "Webhook URL" }
                 input {
-                    r#type: "checkbox",
-                    class: "checkbox",
-                    checked: enabled(),
-                    onchange: handle_enable_change
-                }
-            }
-            }
-
-            if enabled() {
-                // Webhook URL
-                div {
-                    label { class: "label font-medium text-slate-700 dark:text-slate-300", "Webhook URL" }
-                    input {
-                        r#type: "text",
-                        placeholder: "https://hooks.slack.com/services/T.../B.../...",
-                        class: "input input-bordered w-full",
-                        value: webhook_url(),
-                        onchange: move |e| {
-                            webhook_url.set(e.value());
-                            handle_update(e);
-                        }
-                    }
-                    p { class: "text-xs text-slate-500 dark:text-slate-400 mt-1",
-                        "Obtenha em: api.slack.com → Incoming Webhooks"
+                    r#type: "text",
+                    placeholder: "https://hooks.slack.com/services/T.../B.../...",
+                    class: "input input-bordered w-full",
+                    value: webhook_url(),
+                    onchange: move |e| {
+                        webhook_url.set(e.value());
+                        handle_update(e);
                     }
                 }
+                p { class: "text-xs text-slate-500 dark:text-slate-400 mt-1",
+                    "Obtenha em: api.slack.com → Incoming Webhooks"
+                }
+            }
 
-                // Mention User (Optional)
-                div {
-                    label { class: "label font-medium text-slate-700 dark:text-slate-300", "Mencionar Usuário (Opcional)" }
-                    input {
-                        r#type: "text",
-                        placeholder: "U123456 ou nome_usuario",
-                        class: "input input-bordered w-full",
-                        value: mention_user(),
-                        onchange: move |e| {
-                            mention_user.set(e.value());
-                            handle_update(e);
-                        }
+            // Mention User (Optional)
+            div {
+                label { class: "label font-medium text-slate-700 dark:text-slate-300", "Mencionar Usuário (Opcional)" }
+                input {
+                    r#type: "text",
+                    placeholder: "U123456 ou nome_usuario",
+                    class: "input input-bordered w-full",
+                    value: mention_user(),
+                    onchange: move |e| {
+                        mention_user.set(e.value());
+                        handle_update(e);
                     }
-                    p { class: "text-xs text-slate-500 dark:text-slate-400 mt-1",
-                        "ID do usuário ou @username"
-                    }
+                }
+                p { class: "text-xs text-slate-500 dark:text-slate-400 mt-1",
+                    "ID do usuário ou @username"
                 }
             }
         }
     }
+}
 
 /// Telegram Configuration Form
 #[component]

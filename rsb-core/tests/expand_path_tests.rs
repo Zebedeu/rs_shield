@@ -7,11 +7,17 @@ mod tests_expand_path {
     fn test_expand_home_directory() {
         let path = "~/backups";
         let expanded = expand_path(path);
-        
+
         // Deve começar com o home directory
         if let Some(home) = dirs::home_dir() {
-            assert!(expanded.starts_with(&home), "Path should start with home directory");
-            assert!(expanded.ends_with("backups"), "Path should end with 'backups'");
+            assert!(
+                expanded.starts_with(&home),
+                "Path should start with home directory"
+            );
+            assert!(
+                expanded.ends_with("backups"),
+                "Path should end with 'backups'"
+            );
         }
     }
 
@@ -19,11 +25,20 @@ mod tests_expand_path {
     fn test_expand_home_with_multiple_segments() {
         let path = "~/Documents/projects/backup";
         let expanded = expand_path(path);
-        
+
         if let Some(home) = dirs::home_dir() {
-            assert!(expanded.starts_with(&home), "Path should start with home directory");
-            assert!(expanded.to_string_lossy().contains("Documents"), "Should contain Documents");
-            assert!(expanded.to_string_lossy().contains("backup"), "Should contain backup");
+            assert!(
+                expanded.starts_with(&home),
+                "Path should start with home directory"
+            );
+            assert!(
+                expanded.to_string_lossy().contains("Documents"),
+                "Should contain Documents"
+            );
+            assert!(
+                expanded.to_string_lossy().contains("backup"),
+                "Should contain backup"
+            );
         }
     }
 
@@ -31,8 +46,12 @@ mod tests_expand_path {
     fn test_absolute_path_unchanged() {
         let path = "/absolute/path/to/backup";
         let expanded = expand_path(path);
-        
-        assert_eq!(expanded, PathBuf::from(path), "Absolute path should remain unchanged");
+
+        assert_eq!(
+            expanded,
+            PathBuf::from(path),
+            "Absolute path should remain unchanged"
+        );
     }
 
     #[test]
@@ -42,7 +61,7 @@ mod tests_expand_path {
             let path = "$HOME/backups";
             let expanded = expand_path(path);
             let expanded_str = expanded.to_string_lossy().to_string();
-            
+
             assert!(expanded_str.starts_with(&home), "Should expand $HOME");
             assert!(expanded_str.ends_with("backups"), "Should end with backups");
         }
@@ -55,7 +74,7 @@ mod tests_expand_path {
             let path = "${HOME}/backups";
             let expanded = expand_path(path);
             let expanded_str = expanded.to_string_lossy().to_string();
-            
+
             assert!(expanded_str.starts_with(&home), "Should expand braced HOME");
             assert!(expanded_str.ends_with("backups"), "Should end with backups");
         }
@@ -65,7 +84,7 @@ mod tests_expand_path {
     fn test_tilde_only() {
         let path = "~";
         let expanded = expand_path(path);
-        
+
         if let Some(home) = dirs::home_dir() {
             assert_eq!(expanded, home, "Tilde only should expand to home directory");
         }
@@ -75,8 +94,12 @@ mod tests_expand_path {
     fn test_relative_path_unchanged() {
         let path = "relative/path/to/backup";
         let expanded = expand_path(path);
-        
-        assert_eq!(expanded, PathBuf::from(path), "Relative path without ~ should stay unchanged");
+
+        assert_eq!(
+            expanded,
+            PathBuf::from(path),
+            "Relative path without ~ should stay unchanged"
+        );
     }
 
     #[test]
@@ -87,8 +110,11 @@ mod tests_expand_path {
             let path = "$USERPROFILE/backups";
             let expanded = expand_path(path);
             let expanded_str = expanded.to_string_lossy().to_string();
-            
-            assert!(expanded_str.starts_with(&userprofile), "Should expand USERPROFILE on Windows");
+
+            assert!(
+                expanded_str.starts_with(&userprofile),
+                "Should expand USERPROFILE on Windows"
+            );
             assert!(expanded_str.ends_with("backups"), "Should end with backups");
         }
     }
@@ -100,13 +126,16 @@ mod tests_expand_path {
         // $HOME deve fazer fallback a USERPROFILE
         let path = "$HOME/backups";
         let expanded = expand_path(path);
-        
+
         if let Some(home) = dirs::home_dir() {
             let home_str = home.to_string_lossy().to_string();
             let expanded_str = expanded.to_string_lossy().to_string();
-            
+
             // Deve expandir para o mesmo que home_dir() retorna
-            assert!(expanded_str.starts_with(&home_str), "Should expand HOME to user home on Windows");
+            assert!(
+                expanded_str.starts_with(&home_str),
+                "Should expand HOME to user home on Windows"
+            );
         }
     }
 
@@ -115,12 +144,15 @@ mod tests_expand_path {
     fn test_macos_home_expansion() {
         let path = "$HOME/backups";
         let expanded = expand_path(path);
-        
+
         if let Some(home) = dirs::home_dir() {
             let home_str = home.to_string_lossy().to_string();
             let expanded_str = expanded.to_string_lossy().to_string();
-            
-            assert!(expanded_str.starts_with(&home_str), "Should expand HOME on macOS");
+
+            assert!(
+                expanded_str.starts_with(&home_str),
+                "Should expand HOME on macOS"
+            );
         }
     }
 
@@ -129,12 +161,15 @@ mod tests_expand_path {
     fn test_linux_home_expansion() {
         let path = "$HOME/backups";
         let expanded = expand_path(path);
-        
+
         if let Some(home) = dirs::home_dir() {
             let home_str = home.to_string_lossy().to_string();
             let expanded_str = expanded.to_string_lossy().to_string();
-            
-            assert!(expanded_str.starts_with(&home_str), "Should expand HOME on Linux");
+
+            assert!(
+                expanded_str.starts_with(&home_str),
+                "Should expand HOME on Linux"
+            );
         }
     }
 
@@ -143,11 +178,11 @@ mod tests_expand_path {
         // Teste com múltiplas variáveis
         std::env::set_var("TEST_VAR1", "value1");
         std::env::set_var("TEST_VAR2", "value2");
-        
+
         let path = "$TEST_VAR1/backup/$TEST_VAR2";
         let expanded = expand_path(path);
         let expanded_str = expanded.to_string_lossy().to_string();
-        
+
         assert!(expanded_str.contains("value1"), "Should expand TEST_VAR1");
         assert!(expanded_str.contains("value2"), "Should expand TEST_VAR2");
     }
@@ -155,11 +190,11 @@ mod tests_expand_path {
     #[test]
     fn test_mixed_tilde_and_env_vars() {
         std::env::set_var("BACKUP_TYPE", "daily");
-        
+
         let path = "~/backups/$BACKUP_TYPE";
         let expanded = expand_path(path);
         let expanded_str = expanded.to_string_lossy().to_string();
-        
+
         if let Some(home) = dirs::home_dir() {
             let home_str = home.to_string_lossy().to_string();
             assert!(expanded_str.starts_with(&home_str), "Should expand tilde");
@@ -172,8 +207,11 @@ mod tests_expand_path {
         let path = "$UNDEFINED_VAR_12345/backups";
         let expanded = expand_path(path);
         let expanded_str = expanded.to_string_lossy().to_string();
-        
+
         // Variável não definida deve ser mantida como está
-        assert!(expanded_str.contains("UNDEFINED_VAR_12345"), "Undefined var should be kept as-is");
+        assert!(
+            expanded_str.contains("UNDEFINED_VAR_12345"),
+            "Undefined var should be kept as-is"
+        );
     }
 }

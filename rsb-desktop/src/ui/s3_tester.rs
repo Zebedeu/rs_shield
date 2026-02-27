@@ -16,7 +16,7 @@ pub fn S3ConnectionTester(
     let on_test_click = move |_| {
         is_testing.set(true);
         result_message.set(None);
-        
+
         // Captura valores atuais dos signals
         let b = bucket();
         let r = region();
@@ -26,13 +26,13 @@ pub fn S3ConnectionTester(
 
         spawn(async move {
             let result = verify_s3_connection(&b, &r, &e, &a, &s).await;
-            
+
             is_testing.set(false);
             match result {
                 Ok(msg) => {
                     is_success.set(true);
                     result_message.set(Some(msg));
-                },
+                }
                 Err(err) => {
                     is_success.set(false);
                     result_message.set(Some(err));

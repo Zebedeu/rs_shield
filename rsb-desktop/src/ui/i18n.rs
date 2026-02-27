@@ -1,4 +1,3 @@
-
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum Language {
     #[default]
@@ -252,7 +251,7 @@ pub const EN_STRINGS: Translations = Translations {
 };
 
 pub fn get_texts(lang: Language) -> &'static Translations {
-    match lang { 
+    match lang {
         Language::Pt => &PT_STRINGS,
         Language::En => &EN_STRINGS,
     }

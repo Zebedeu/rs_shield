@@ -40,7 +40,7 @@ pub fn generate_html(data: &ReportData) -> String {
                     "pre { white-space: pre-wrap; word-wrap: break-word; background: #fff; padding: 10px; border-radius: 4px; }"
                 }
             }
-         
+
          body {
             div class="container" {
                 h1 { "RSB Operation Report" }

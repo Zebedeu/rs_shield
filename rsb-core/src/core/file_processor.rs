@@ -1,4 +1,6 @@
-use super::types::{ChunkMetadata, FileMetadata, FileStatus, ProgressCallback, CHUNK_SIZE, MULTIPART_THRESHOLD};
+use super::types::{
+    ChunkMetadata, FileMetadata, FileStatus, ProgressCallback, CHUNK_SIZE, MULTIPART_THRESHOLD,
+};
 use crate::crypto::{encrypt_data, hash_file_content};
 use crate::storage::Storage;
 use crate::utils::mmap_file;
@@ -57,9 +59,9 @@ pub fn process_file(
     let mut should_encrypt = key.is_some();
     if let Some(patterns) = encrypt_patterns {
         if !patterns.is_empty() {
-            should_encrypt = patterns.iter().any(|p| {
-                Pattern::new(p).map_or(false, |pat| pat.matches_path(rel_path))
-            });
+            should_encrypt = patterns
+                .iter()
+                .any(|p| Pattern::new(p).is_ok_and(|pat| pat.matches_path(rel_path)));
         }
     }
     let final_should_encrypt = should_encrypt && key.is_some();
@@ -139,17 +141,21 @@ pub fn process_file_multipart(
 ) -> io::Result<FileStatus> {
     // Criar progress bar para multipart processing
     let pb = ProgressBar::new(mapped.len() as u64);
-    pb.set_style(ProgressStyle::default_bar()
-        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes}")
-        .unwrap()
-        .progress_chars("#>-"));
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes}",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+    );
 
     let mut should_encrypt = key.is_some();
     if let Some(patterns) = encrypt_patterns {
         if !patterns.is_empty() {
-            should_encrypt = patterns.iter().any(|p| {
-                Pattern::new(p).map_or(false, |pat| pat.matches_path(rel_path))
-            });
+            should_encrypt = patterns
+                .iter()
+                .any(|p| Pattern::new(p).is_ok_and(|pat| pat.matches_path(rel_path)));
         }
     }
     let final_should_encrypt = should_encrypt && key.is_some();
@@ -162,7 +168,11 @@ pub fn process_file_multipart(
         // Use Ordering to update counter
         let chunk_num = chunk_counter.fetch_add(1, Ordering::SeqCst);
         pb.inc(chunk_data.len() as u64);
-        info!("📦 Processing chunk {} - {} bytes", chunk_num, chunk_data.len());
+        info!(
+            "📦 Processing chunk {} - {} bytes",
+            chunk_num,
+            chunk_data.len()
+        );
         let chunk_hash = hash_file_content(chunk_data)?;
         let data_path = format!(
             "data/{}/{}",
@@ -224,8 +234,8 @@ pub fn get_file_priority(path: &Path) -> u8 {
             let ext_lower = ext.to_lowercase();
             match ext_lower.as_str() {
                 // Documentos e texto - prioridade máxima
-                "txt" | "md" | "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx"
-                | "odt" | "ods" | "rtf" | "csv" | "json" | "toml" | "xml" | "yaml" | "yml" => 0,
+                "txt" | "md" | "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt"
+                | "ods" | "rtf" | "csv" | "json" | "toml" | "xml" | "yaml" | "yml" => 0,
 
                 // Código fonte e scripts
                 "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "java" | "go" | "html" | "css"

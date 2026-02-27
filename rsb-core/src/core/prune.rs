@@ -1,10 +1,13 @@
+use crate::config::Config;
 use crate::core::types::FileMetadata;
-use crate::{config::Config};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use tracing::{info};
+use tracing::info;
 
-pub async fn perform_prune(config: &Config, keep_last: usize) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn perform_prune(
+    config: &Config,
+    keep_last: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     let storage = super::storage_backend::get_storage(config).await;
     let mut snapshots = storage.list("snapshots").await?;
     snapshots.retain(|s| s.ends_with(".toml"));
@@ -22,7 +25,9 @@ pub async fn perform_prune(config: &Config, keep_last: usize) -> Result<(), Box<
     let mut keep_hashes = HashSet::new();
 
     for snap in keep_snapshots {
-        let content = super::manifest::read_manifest(&*storage, &snap, config.encryption_key.as_deref()).await?;
+        let content =
+            super::manifest::read_manifest(&*storage, &snap, config.encryption_key.as_deref())
+                .await?;
         let manifest: HashMap<PathBuf, FileMetadata> = toml::from_str(&content)?;
 
         for metadata in manifest.values() {
@@ -42,7 +47,11 @@ pub async fn perform_prune(config: &Config, keep_last: usize) -> Result<(), Box<
     let mut deleted_count = 0;
 
     for data_file in all_data {
-        let fname = PathBuf::from(&data_file).file_name().unwrap().to_string_lossy().to_string();
+        let fname = PathBuf::from(&data_file)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         if !keep_hashes.contains(&fname) {
             info!("Pruning data: {}", data_file);
             storage.delete(&data_file).await?;

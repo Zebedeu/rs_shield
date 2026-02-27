@@ -1,6 +1,6 @@
 use crate::config::Config;
-use crate::storage::{LocalStorage, S3Storage, Storage};
 use crate::credentials::CredentialsManager;
+use crate::storage::{LocalStorage, S3Storage, Storage};
 use std::sync::Arc;
 use tracing::info;
 
@@ -33,9 +33,9 @@ pub async fn get_storage(config: &Config) -> Arc<dyn Storage> {
             // 2. Encrypted file ~/.rs-shield/s3_credentials.enc
             // 3. Prompt user interactively
             // 4. Config values (not recommended)
-            
+
             let load_result = load_s3_credentials_securely(config);
-            
+
             match load_result {
                 Ok(_) => {
                     info!(
@@ -47,7 +47,9 @@ pub async fn get_storage(config: &Config) -> Arc<dyn Storage> {
                 Err(e) => {
                     // S3 is configured but credentials failed - this is a HARD ERROR
                     // Do not silently fallback to local storage!
-                    eprintln!("\n❌ FATAL ERROR: S3 is configured but credentials could not be loaded");
+                    eprintln!(
+                        "\n❌ FATAL ERROR: S3 is configured but credentials could not be loaded"
+                    );
                     eprintln!("   Error: {}", e);
                     eprintln!("\n📋 To fix:");
                     eprintln!("   1. Provide AWS credentials via environment variables:");
@@ -78,7 +80,7 @@ pub async fn get_storage(config: &Config) -> Arc<dyn Storage> {
 /// 4. Config file (deprecated, not recommended)
 fn load_s3_credentials_securely(config: &Config) -> Result<(), String> {
     use std::env;
-    
+
     // Option 1: Use environment variables (better for CI/CD)
     if let (Ok(access_key), Ok(secret_key)) = (
         env::var("AWS_ACCESS_KEY_ID"),
@@ -95,7 +97,7 @@ fn load_s3_credentials_securely(config: &Config) -> Result<(), String> {
     if let Some(home_path) = home {
         let cred_file = format!("{}/.rs-shield/s3_credentials.enc", home_path);
         let cred_path = std::path::Path::new(&cred_file);
-        
+
         if cred_path.exists() {
             match CredentialsManager::load_encrypted(&cred_file) {
                 Ok(credentials) => {

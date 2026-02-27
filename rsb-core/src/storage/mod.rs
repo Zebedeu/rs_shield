@@ -1,12 +1,12 @@
+use crate::utils::ensure_directory_exists_async;
 use async_trait::async_trait;
+use aws_config::BehaviorVersion;
+use aws_sdk_s3::config::Region;
+use aws_sdk_s3::Client;
 use std::io::{self, ErrorKind};
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use aws_sdk_s3::Client;
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::config::Region;
-use crate::utils::ensure_directory_exists_async;
 
 #[async_trait]
 pub trait Storage: Send + Sync {
@@ -35,8 +35,9 @@ impl Storage for LocalStorage {
         let full_path = self.base_path.join(path);
         if let Some(parent) = full_path.parent() {
             let parent_str = parent.to_string_lossy().to_string();
-            ensure_directory_exists_async(&parent_str).await
-                .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+            ensure_directory_exists_async(&parent_str)
+                .await
+                .map_err(io::Error::other)?;
         }
         let mut file = fs::File::create(full_path).await?;
         file.write_all(data).await?;
@@ -56,7 +57,7 @@ impl Storage for LocalStorage {
     async fn list(&self, prefix: &str) -> io::Result<Vec<String>> {
         let dir = self.base_path.join(prefix);
         let mut results = Vec::new();
-        
+
         if !dir.exists() {
             return Ok(results);
         }
@@ -86,18 +87,18 @@ pub struct S3Storage {
 impl S3Storage {
     pub async fn new(bucket: &str, region: Option<String>, endpoint: Option<String>) -> Self {
         let mut config_loader = aws_config::defaults(BehaviorVersion::latest());
-        
+
         if let Some(r) = region {
             config_loader = config_loader.region(Region::new(r));
         }
-        
+
         let force_path_style = endpoint.is_some();
         if let Some(e) = endpoint {
             config_loader = config_loader.endpoint_url(e);
         }
 
         let sdk_config = config_loader.load().await;
-        
+
         // Configuração específica para S3
         let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
             // Força Path Style (ex: domain.com/bucket) se usarmos um endpoint customizado.
@@ -124,12 +125,13 @@ impl Storage for S3Storage {
             .body(data.to_vec().into())
             .send()
             .await
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("S3 Upload Error: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("S3 Upload Error: {}", e)))?;
         Ok(())
     }
 
     async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
-        let resp = self.client
+        let resp = self
+            .client
             .get_object()
             .bucket(&self.bucket)
             .key(path)
@@ -137,39 +139,65 @@ impl Storage for S3Storage {
             .await
             .map_err(|e| io::Error::new(ErrorKind::NotFound, format!("S3 Read Error: {}", e)))?;
 
-        let data = resp.body.collect().await
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("S3 Body Error: {}", e)))?;
-        
+        let data = resp
+            .body
+            .collect()
+            .await
+            .map_err(|e| io::Error::other(format!("S3 Body Error: {}", e)))?;
+
         Ok(data.into_bytes().to_vec())
     }
 
     async fn exists(&self, path: &str) -> io::Result<bool> {
-        match self.client.head_object().bucket(&self.bucket).key(path).send().await {
+        match self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(path)
+            .send()
+            .await
+        {
             Ok(_) => Ok(true),
             Err(e) => {
                 let service_error = e.into_service_error();
                 if service_error.is_not_found() {
                     Ok(false)
                 } else {
-                    Err(io::Error::new(ErrorKind::Other, format!("S3 Head Error: {}", service_error)))
+                    Err(io::Error::other(
+                        format!("S3 Head Error: {}", service_error),
+                    ))
                 }
             }
         }
     }
 
     async fn list(&self, prefix: &str) -> io::Result<Vec<String>> {
-        let resp = self.client.list_objects_v2().bucket(&self.bucket).prefix(prefix).send().await
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("S3 List Error: {}", e)))?;
+        let resp = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(prefix)
+            .send()
+            .await
+            .map_err(|e| io::Error::other(format!("S3 List Error: {}", e)))?;
 
-        let files = resp.contents.unwrap_or_default().into_iter()
+        let files = resp
+            .contents
+            .unwrap_or_default()
+            .into_iter()
             .filter_map(|obj| obj.key)
             .collect();
         Ok(files)
     }
 
     async fn delete(&self, path: &str) -> io::Result<()> {
-        self.client.delete_object().bucket(&self.bucket).key(path).send().await
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("S3 Delete Error: {}", e)))?;
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(path)
+            .send()
+            .await
+            .map_err(|e| io::Error::other(format!("S3 Delete Error: {}", e)))?;
         Ok(())
     }
 }

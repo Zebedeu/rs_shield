@@ -1,6 +1,6 @@
+use super::cancellation::CancellationToken;
 use super::manifest::find_latest_snapshot;
 use super::types::{FileMetadata, ProgressCallback};
-use super::cancellation::CancellationToken;
 use crate::config::Config;
 use crate::crypto::decrypt_data;
 use crate::report::ReportData;
@@ -8,7 +8,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
-use tracing::{ info};
+use tracing::info;
 use zstd::stream::copy_decode;
 
 pub async fn perform_verify(
@@ -32,7 +32,8 @@ pub async fn perform_verify_with_cancellation(
     let start_time = Instant::now();
     let storage = super::storage_backend::get_storage(config).await;
 
-    let (path, content) = find_latest_snapshot(&*storage, snapshot_id, config.encryption_key.as_deref()).await?;
+    let (path, content) =
+        find_latest_snapshot(&*storage, snapshot_id, config.encryption_key.as_deref()).await?;
     info!("Verifying snapshot: {}", path);
 
     let manifest: HashMap<PathBuf, FileMetadata> = toml::from_str(&content)?;
@@ -65,7 +66,11 @@ pub async fn perform_verify_with_cancellation(
 
         pb.set_message(format!("Verifying: {}", rel_path.display()));
         if let Some(cb) = &on_progress {
-            cb(current_files, total_files, format!("Verifying: {}", rel_path.display()));
+            cb(
+                current_files,
+                total_files,
+                format!("Verifying: {}", rel_path.display()),
+            );
         }
 
         if let Some(chunks) = &metadata.chunks {
@@ -86,14 +91,24 @@ pub async fn perform_verify_with_cancellation(
                 if fast {
                     let data = storage.read(&data_path).await?;
                     if data.len() as u64 != chunk.stored_size {
-                        let msg = format!("Chunk size mismatch for {}: expected {}, got {}", rel_path.display(), chunk.stored_size, data.len());
+                        let msg = format!(
+                            "Chunk size mismatch for {}: expected {}, got {}",
+                            rel_path.display(),
+                            chunk.stored_size,
+                            data.len()
+                        );
                         errors.push(msg);
                         stats_size_error += 1;
                     }
                     if let Some(expected) = &chunk.stored_hash {
                         let hash = crate::crypto::hash_file_content(&data)?;
                         if hash != *expected {
-                            let msg = format!("Chunk stored hash mismatch for {}: expected {}, got {}", rel_path.display(), expected, hash);
+                            let msg = format!(
+                                "Chunk stored hash mismatch for {}: expected {}, got {}",
+                                rel_path.display(),
+                                expected,
+                                hash
+                            );
                             errors.push(msg);
                             stats_hash_error += 1;
                         }
@@ -121,7 +136,12 @@ pub async fn perform_verify_with_cancellation(
 
                 if let Some(expected_size) = metadata.stored_size {
                     if size != expected_size {
-                        let msg = format!("Size mismatch for {}: expected {}, got {}", rel_path.display(), expected_size, size);
+                        let msg = format!(
+                            "Size mismatch for {}: expected {}, got {}",
+                            rel_path.display(),
+                            expected_size,
+                            size
+                        );
                         errors.push(msg);
                         stats_size_error += 1;
                     }
@@ -129,7 +149,12 @@ pub async fn perform_verify_with_cancellation(
 
                 if let Some(expected_hash) = &metadata.stored_hash {
                     if &hash != expected_hash {
-                        let msg = format!("Stored hash mismatch for {}: expected {}, got {}", rel_path.display(), expected_hash, hash);
+                        let msg = format!(
+                            "Stored hash mismatch for {}: expected {}, got {}",
+                            rel_path.display(),
+                            expected_hash,
+                            hash
+                        );
                         errors.push(msg);
                         stats_hash_error += 1;
                     }
@@ -142,7 +167,8 @@ pub async fn perform_verify_with_cancellation(
                         match decrypt_data(&data, k.as_bytes()) {
                             Ok(d) => d,
                             Err(e) => {
-                                let msg = format!("Decryption failed for {}: {}", rel_path.display(), e);
+                                let msg =
+                                    format!("Decryption failed for {}: {}", rel_path.display(), e);
                                 errors.push(msg);
                                 continue;
                             }
@@ -168,7 +194,12 @@ pub async fn perform_verify_with_cancellation(
 
                 let computed_hash = crate::crypto::hash_file_content(&final_data)?;
                 if computed_hash != metadata.hash {
-                    let msg = format!("Hash mismatch for {}: expected {}, got {}", rel_path.display(), metadata.hash, computed_hash);
+                    let msg = format!(
+                        "Hash mismatch for {}: expected {}, got {}",
+                        rel_path.display(),
+                        metadata.hash,
+                        computed_hash
+                    );
                     errors.push(msg);
                     stats_hash_error += 1;
                 } else {
@@ -183,7 +214,12 @@ pub async fn perform_verify_with_cancellation(
 
     pb.finish_and_clear();
 
-    let status = if errors.is_empty() { "Success" } else { "Failure with errors" }.to_string();
+    let status = if errors.is_empty() {
+        "Success"
+    } else {
+        "Failure with errors"
+    }
+    .to_string();
 
     if !quiet {
         info!("✅ Arquivos verificados com sucesso: {}", stats_ok);

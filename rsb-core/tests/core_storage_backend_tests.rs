@@ -14,12 +14,13 @@ fn test_local_storage_selection() {
         s3_region: None,
         s3_endpoint: None,
         s3: None,
+        s3_buckets: None,
         encrypt_patterns: None,
         pause_on_low_battery: None,
         pause_on_high_cpu: None,
         compression_level: Some(3),
     };
-    
+
     // Should use local storage
     assert!(config.s3_bucket.is_none());
     assert!(config.s3.is_none());
@@ -37,12 +38,13 @@ fn test_s3_storage_selection_with_bucket() {
         s3_region: Some("us-east-1".to_string()),
         s3_endpoint: None,
         s3: None,
+        s3_buckets: None,
         encrypt_patterns: None,
         pause_on_low_battery: None,
         pause_on_high_cpu: None,
         compression_level: None,
     };
-    
+
     // Should use S3 storage
     assert!(config.s3_bucket.is_some());
     assert_eq!(config.s3_bucket.unwrap(), "my-bucket");
@@ -57,7 +59,7 @@ fn test_s3_config_nested_structure() {
         access_key: Some("AKIA...".to_string()),
         secret_key: Some("secret...".to_string()),
     };
-    
+
     let config = Config {
         source_path: "/source".to_string(),
         destination_path: "/destination".to_string(),
@@ -68,12 +70,13 @@ fn test_s3_config_nested_structure() {
         s3_region: None,
         s3_endpoint: None,
         s3: Some(s3_config),
+        s3_buckets: None,
         encrypt_patterns: None,
         pause_on_low_battery: None,
         pause_on_high_cpu: None,
         compression_level: Some(5),
     };
-    
+
     assert!(config.s3.is_some());
     let s3 = config.s3.unwrap();
     assert_eq!(s3.bucket.unwrap(), "nested-bucket");
@@ -89,7 +92,7 @@ fn test_s3_bucket_extraction_nested() {
         access_key: None,
         secret_key: None,
     };
-    
+
     let bucket = s3_config.bucket.clone();
     assert_eq!(bucket.unwrap(), "extracted-bucket");
 }
@@ -106,12 +109,13 @@ fn test_s3_bucket_extraction_flat() {
         s3_region: Some("us-west-2".to_string()),
         s3_endpoint: None,
         s3: None,
+        s3_buckets: None,
         encrypt_patterns: None,
         pause_on_low_battery: None,
         pause_on_high_cpu: None,
         compression_level: None,
     };
-    
+
     let bucket = config.s3_bucket.clone();
     assert_eq!(bucket.unwrap(), "flat-bucket");
 }
@@ -128,12 +132,13 @@ fn test_empty_bucket_uses_local() {
         s3_region: None,
         s3_endpoint: None,
         s3: None,
+        s3_buckets: None,
         encrypt_patterns: None,
         pause_on_low_battery: None,
         pause_on_high_cpu: None,
         compression_level: None,
     };
-    
+
     let bucket = config.s3_bucket.as_ref().map(|b| b.trim());
     // Empty bucket should fall back to local
     assert_eq!(bucket.unwrap(), "");
@@ -148,7 +153,7 @@ fn test_s3_credentials_presence() {
         access_key: Some("AKIAIOSFODNN7EXAMPLE".to_string()),
         secret_key: Some("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string()),
     };
-    
+
     assert!(s3_config.access_key.is_some());
     assert!(s3_config.secret_key.is_some());
 }
@@ -162,7 +167,7 @@ fn test_s3_credentials_missing() {
         access_key: None,
         secret_key: None,
     };
-    
+
     assert!(s3_config.access_key.is_none());
     assert!(s3_config.secret_key.is_none());
 }
@@ -176,7 +181,7 @@ fn test_s3_endpoint_override() {
         access_key: None,
         secret_key: None,
     };
-    
+
     assert!(s3_config.endpoint.is_some());
     assert_eq!(s3_config.endpoint.unwrap(), "https://minio.example.com");
 }
@@ -194,12 +199,13 @@ fn test_local_storage_path_preservation() {
         s3_region: None,
         s3_endpoint: None,
         s3: None,
+        s3_buckets: None,
         encrypt_patterns: None,
         pause_on_low_battery: None,
         pause_on_high_cpu: None,
         compression_level: None,
     };
-    
+
     assert_eq!(config.destination_path, dest_path);
 }
 
@@ -213,7 +219,7 @@ fn test_s3_region_fallback() {
         access_key: None,
         secret_key: None,
     };
-    
+
     let config = Config {
         source_path: "/source".to_string(),
         destination_path: "/dest".to_string(),
@@ -223,17 +229,20 @@ fn test_s3_region_fallback() {
         s3_bucket: None,
         s3_region: Some("flat-region".to_string()),
         s3_endpoint: None,
+        s3_buckets: None,
         s3: Some(s3_config),
         encrypt_patterns: None,
         pause_on_low_battery: None,
         pause_on_high_cpu: None,
         compression_level: None,
     };
-    
-    let region = config.s3.as_ref()
+
+    let region = config
+        .s3
+        .as_ref()
         .and_then(|s| s.region.clone())
         .or(config.s3_region.clone());
-    
+
     // Nested should take precedence
     assert_eq!(region.unwrap(), "nested-region");
 }
@@ -250,16 +259,19 @@ fn test_s3_endpoint_fallback() {
         s3_region: None,
         s3_endpoint: Some("https://s3.amazonaws.com".to_string()),
         s3: None,
+        s3_buckets: None,
         encrypt_patterns: None,
         pause_on_low_battery: None,
         pause_on_high_cpu: None,
         compression_level: None,
     };
-    
-    let endpoint = config.s3.as_ref()
+
+    let endpoint = config
+        .s3
+        .as_ref()
         .and_then(|s| s.endpoint.clone())
         .or(config.s3_endpoint.clone());
-    
+
     assert_eq!(endpoint.unwrap(), "https://s3.amazonaws.com");
 }
 
@@ -272,7 +284,7 @@ fn test_complete_s3_config() {
         access_key: Some("key".to_string()),
         secret_key: Some("secret".to_string()),
     };
-    
+
     let config = Config {
         source_path: "/source".to_string(),
         destination_path: "/dest".to_string(),
@@ -281,6 +293,7 @@ fn test_complete_s3_config() {
         backup_mode: "full".to_string(),
         s3_bucket: None,
         s3_region: None,
+        s3_buckets: None,
         s3_endpoint: None,
         s3: Some(s3_config),
         encrypt_patterns: None,
@@ -288,7 +301,7 @@ fn test_complete_s3_config() {
         pause_on_high_cpu: Some(80),
         compression_level: Some(6),
     };
-    
+
     let s3 = config.s3.unwrap();
     assert!(s3.bucket.is_some());
     assert!(s3.region.is_some());

@@ -1,17 +1,17 @@
+use chrono::Local;
 use dioxus::prelude::*;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::fs;
-use chrono::Local;
 
 use rsb_core::{config, core, CancellationToken};
 
 use crate::ui::{
     app::AppConfig,
     i18n::get_texts,
-    shared::ProgressBar,
     operations_helpers::record_backup_operation,
     profile_loader::{load_profile, ProfileData},
+    shared::ProgressBar,
 };
 
 #[component]
@@ -25,11 +25,11 @@ pub fn BackupScreen() -> Element {
     let mut generate_report = use_signal(|| false);
     let mut dry_run = use_signal(|| false);
     let mut last_report_path = use_signal(|| Option::<PathBuf>::None);
-    
+
     let mut status_msg = use_signal(|| texts.ready.to_string());
     let mut is_running = use_signal(|| false);
     let mut progress = use_signal(|| 0.0);
-    let mut cancellation_token = use_signal(|| CancellationToken::new());
+    let mut cancellation_token = use_signal(CancellationToken::new);
 
     let handle_load_profile = move |_| {
         spawn(async move {
@@ -46,17 +46,27 @@ pub fn BackupScreen() -> Element {
                         source_path.set(PathBuf::from(profile_data.source_path));
                         dest_path.set(PathBuf::from(profile_data.destination_path));
                         key.set(profile_data.encryption_key);
-                        
+
                         // Carregar todas as configurações do perfil
-                        app_config.exclude_patterns.set(profile_data.exclude_patterns);
+                        app_config
+                            .exclude_patterns
+                            .set(profile_data.exclude_patterns);
                         app_config.backup_mode.set(profile_data.backup_mode);
                         app_config.s3_bucket.set(profile_data.s3_bucket);
                         app_config.s3_region.set(profile_data.s3_region);
                         app_config.s3_endpoint.set(profile_data.s3_endpoint);
-                        app_config.encrypt_patterns.set(profile_data.encrypt_patterns);
-                        app_config.pause_on_low_battery.set(profile_data.pause_on_low_battery);
-                        app_config.pause_on_high_cpu.set(profile_data.pause_on_high_cpu);
-                        app_config.compression_level.set(profile_data.compression_level);
+                        app_config
+                            .encrypt_patterns
+                            .set(profile_data.encrypt_patterns);
+                        app_config
+                            .pause_on_low_battery
+                            .set(profile_data.pause_on_low_battery);
+                        app_config
+                            .pause_on_high_cpu
+                            .set(profile_data.pause_on_high_cpu);
+                        app_config
+                            .compression_level
+                            .set(profile_data.compression_level);
 
                         status_msg.set("✅ Profile loaded successfully!".to_string());
                     }
@@ -69,8 +79,10 @@ pub fn BackupScreen() -> Element {
     };
 
     let handle_backup = move |_| {
-        if is_running() { return; }
-        
+        if is_running() {
+            return;
+        }
+
         is_running.set(true);
         // Reset do token de cancellation para nova operação
         let token = CancellationToken::new();
@@ -82,25 +94,31 @@ pub fn BackupScreen() -> Element {
         let src = source_path();
         let dst = dest_path();
         let key_val = key();
-        let key_opt = if key_val.is_empty() { None } else { Some(key_val) };
+        let key_opt = if key_val.is_empty() {
+            None
+        } else {
+            Some(key_val)
+        };
         let create_report = generate_report();
         let dry_run_mode = dry_run();
 
         let excludes_str = app_config.exclude_patterns();
-        let excludes: Vec<String> = excludes_str.lines()
+        let excludes: Vec<String> = excludes_str
+            .lines()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        
+
         let encrypt_patterns_str = app_config.encrypt_patterns();
-        let encrypt_patterns: Vec<String> = encrypt_patterns_str.lines()
+        let encrypt_patterns: Vec<String> = encrypt_patterns_str
+            .lines()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        
+
         let pause_on_low_battery_str = app_config.pause_on_low_battery();
         let pause_on_low_battery = pause_on_low_battery_str.parse::<u8>().ok();
-        
+
         let pause_on_high_cpu_str = app_config.pause_on_high_cpu();
         let pause_on_high_cpu = pause_on_high_cpu_str.parse::<u8>().ok();
 
@@ -113,12 +131,32 @@ pub fn BackupScreen() -> Element {
         let s3_endpoint = app_config.s3_endpoint();
         let s3_access_key = app_config.s3_access_key();
         let s3_secret_key = app_config.s3_secret_key();
-        
-        let s3_bucket_opt = if s3_bucket.is_empty() { None } else { Some(s3_bucket) };
-        let s3_region_opt = if s3_region.is_empty() { None } else { Some(s3_region) };
-        let s3_endpoint_opt = if s3_endpoint.is_empty() { None } else { Some(s3_endpoint) };
-        let s3_access_key_opt = if s3_access_key.is_empty() { None } else { Some(s3_access_key) };
-        let s3_secret_key_opt = if s3_secret_key.is_empty() { None } else { Some(s3_secret_key) };
+
+        let s3_bucket_opt = if s3_bucket.is_empty() {
+            None
+        } else {
+            Some(s3_bucket)
+        };
+        let s3_region_opt = if s3_region.is_empty() {
+            None
+        } else {
+            Some(s3_region)
+        };
+        let s3_endpoint_opt = if s3_endpoint.is_empty() {
+            None
+        } else {
+            Some(s3_endpoint)
+        };
+        let s3_access_key_opt = if s3_access_key.is_empty() {
+            None
+        } else {
+            Some(s3_access_key)
+        };
+        let s3_secret_key_opt = if s3_secret_key.is_empty() {
+            None
+        } else {
+            Some(s3_secret_key)
+        };
 
         let s3_config = if s3_bucket_opt.is_some() {
             Some(config::S3Config {
@@ -133,9 +171,9 @@ pub fn BackupScreen() -> Element {
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        
+
         let progress_cb = Arc::new(move |current: usize, total: usize, msg: String| {
-            let _ = tx.send((current, total, msg)); 
+            let _ = tx.send((current, total, msg));
         });
 
         spawn(async move {
@@ -149,7 +187,9 @@ pub fn BackupScreen() -> Element {
             });
 
             let res = async {
-                if src.as_os_str().is_empty() || (dst.as_os_str().is_empty() && s3_bucket_opt.is_none()) {
+                if src.as_os_str().is_empty()
+                    || (dst.as_os_str().is_empty() && s3_bucket_opt.is_none())
+                {
                     return Err(texts.please_define_paths.to_string());
                 }
 
@@ -167,20 +207,29 @@ pub fn BackupScreen() -> Element {
                     s3: s3_config,
                     s3_buckets: None,
                     pause_on_high_cpu,
-                    compression_level
+                    compression_level,
                 };
 
                 let token = cancellation_token();
-                core::perform_backup_with_cancellation(&cfg, &mode, key_opt.as_deref(), dry_run_mode, true, Some(progress_cb), Some(token))
-                    .await
-                    .map_err(|e| e.to_string())
-            }.await;
+                core::backup::perform_backup_with_cancellation(
+                    &cfg,
+                    &mode,
+                    key_opt.as_deref(),
+                    dry_run_mode,
+                    true,
+                    Some(progress_cb),
+                    Some(token),
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+            .await;
 
             match res {
                 Ok(mut report) => {
                     let duration = report.duration.as_secs();
                     let backup_size = format!("{}B", report.duration.as_secs());
-                    
+
                     let _ = record_backup_operation(
                         report.status.clone(),
                         report.files_processed,
@@ -189,22 +238,25 @@ pub fn BackupScreen() -> Element {
                         src.to_string_lossy().to_string(),
                         dst.to_string_lossy().to_string(),
                     );
-                    
+
                     if create_report {
                         report.profile_path = "Desktop UI".to_string();
                         let html = rsb_core::report::generate_html(&report);
-                        let filename = format!("rsb-report-backup-{}.html", Local::now().format("%Y%m%d-%H%M%S"));
-                        if let Ok(_) = fs::write(&filename, html) {
-                             status_msg.set(format!("{} Relatório: {}", report.status, filename));
-                             last_report_path.set(Some(PathBuf::from(filename)));
+                        let filename = format!(
+                            "rsb-report-backup-{}.html",
+                            Local::now().format("%Y%m%d-%H%M%S")
+                        );
+                        if fs::write(&filename, html).is_ok() {
+                            status_msg.set(format!("{} Relatório: {}", report.status, filename));
+                            last_report_path.set(Some(PathBuf::from(filename)));
                         } else {
-                             status_msg.set(format!("{} (Error writing report)", report.status));
+                            status_msg.set(format!("{} (Error writing report)", report.status));
                         }
                     } else {
                         status_msg.set(report.status);
                     }
                     progress.set(1.0);
-                },
+                }
                 Err(e) => {
                     let _ = record_backup_operation(
                         "Failed".to_string(),
@@ -215,7 +267,7 @@ pub fn BackupScreen() -> Element {
                         dst.to_string_lossy().to_string(),
                     );
                     status_msg.set(format!("{} {}", texts.error_prefix, e))
-                },
+                }
             }
             is_running.set(false);
         });
@@ -230,7 +282,7 @@ pub fn BackupScreen() -> Element {
     rsx! {
         div { class: "card",
             h2 { class: "page-title", "{texts.backup_title}" }
-            
+
             div { class: "form-group",
                 label { class: "label-text", "📋 Load Profile (Optional)" }
                 div { class: "flex gap-3",
@@ -250,7 +302,7 @@ pub fn BackupScreen() -> Element {
                 }
                 p { class: "hint", "Loads all profile settings automatically" }
             }
-            
+
             div { class: "form-group",
                 label { class: "label-text", "{texts.source_label}" }
                 div { class: "flex gap-3",
@@ -278,81 +330,81 @@ pub fn BackupScreen() -> Element {
             div { class: "form-group",
                 label { class: "label-text", "{texts.dest_label}" }
                 div { class: "flex gap-3",
-                    input { 
-                        class: "input-field", 
-                        r#type: "text", 
+                    input {
+                        class: "input-field",
+                        r#type: "text",
                         placeholder: "{texts.dest_label}",
-                        value: "{dest_path.read().to_string_lossy()}", 
-                        oninput: move |evt| dest_path.set(PathBuf::from(evt.value())) 
+                        value: "{dest_path.read().to_string_lossy()}",
+                        oninput: move |evt| dest_path.set(PathBuf::from(evt.value()))
                     }
-                    button { 
-                        class: "btn-icon", 
-                        onclick: move |_| { 
-                            spawn(async move { 
-                                if let Some(handle) = rfd::AsyncFileDialog::new().pick_folder().await { 
-                                    dest_path.set(handle.path().to_path_buf()); 
-                                } 
-                            }); 
-                        }, 
-                        "📂" 
+                    button {
+                        class: "btn-icon",
+                        onclick: move |_| {
+                            spawn(async move {
+                                if let Some(handle) = rfd::AsyncFileDialog::new().pick_folder().await {
+                                    dest_path.set(handle.path().to_path_buf());
+                                }
+                            });
+                        },
+                        "📂"
                     }
                 }
             }
 
             div { class: "form-group",
                 label { class: "label-text", "{texts.key_label_opt}" }
-                input { 
-                    class: "input-field", 
-                    r#type: "password", 
+                input {
+                    class: "input-field",
+                    r#type: "password",
                     placeholder: "{texts.key_label_opt}",
-                    value: "{key}", 
-                    oninput: move |evt| key.set(evt.value()) 
+                    value: "{key}",
+                    oninput: move |evt| key.set(evt.value())
                 }
                 p { class: "hint", "Leave blank to disable encryption" }
             }
 
             div { class: "form-group",
                 label { class: "label-text", "{texts.s3_title}" }
-                input { 
-                    class: "input-field", 
-                    r#type: "text", 
+                input {
+                    class: "input-field",
+                    r#type: "text",
                     placeholder: "S3 Bucket (Optional)",
-                    value: "{app_config.s3_bucket}", 
-                    readonly: true 
+                    value: "{app_config.s3_bucket}",
+                    readonly: true
                 }
                 p { class: "hint", "Configured via profile or global settings" }
             }
 
             div { class: "form-group",
                 div { class: "flex items-center gap-3 p-3 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg border border-indigo-200 dark:border-indigo-800",
-                    input { 
-                        r#type: "checkbox", 
+                    input {
+                        r#type: "checkbox",
                         id: "gen_report",
                         class: "w-4 h-4 rounded",
-                        checked: "{generate_report}", 
-                        oninput: move |evt| generate_report.set(evt.value() == "true") 
+                        checked: "{generate_report}",
+                        oninput: move |evt| generate_report.set(evt.value() == "true")
                     }
-                    label { 
+                    label {
                         class: "label-text mb-0 cursor-pointer",
                         r#for: "gen_report",
-                        "{texts.generate_report_label}" 
+                        "{texts.generate_report_label}"
                     }
                 }
             }
 
             div { class: "form-group",
                 div { class: "flex items-center gap-3 p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-800",
-                    input { 
-                        r#type: "checkbox", 
+                    input {
+                        r#type: "checkbox",
                         id: "dry_run_mode",
                         class: "w-4 h-4 rounded",
-                        checked: "{dry_run}", 
-                        oninput: move |evt| dry_run.set(evt.value() == "true") 
+                        checked: "{dry_run}",
+                        oninput: move |evt| dry_run.set(evt.value() == "true")
                     }
-                    label { 
+                    label {
                         class: "label-text mb-0 cursor-pointer",
                         r#for: "dry_run_mode",
-                        "🧪 Dry-Run Mode - Simulates backup without writing files" 
+                        "🧪 Dry-Run Mode - Simulates backup without writing files"
                     }
                 }
             }
@@ -377,7 +429,7 @@ pub fn BackupScreen() -> Element {
             if is_running() || progress() > 0.0 {
                 ProgressBar { progress: progress() }
             }
-            
+
             if let Some(path) = last_report_path() {
                 button {
                     class: "w-full mt-4 px-4 py-2 bg-slate-500 dark:bg-slate-600 hover:bg-slate-600 dark:hover:bg-slate-700 text-white font-semibold rounded-lg transition-colors",
@@ -388,9 +440,9 @@ pub fn BackupScreen() -> Element {
                 }
             }
 
-            div { class: "status-box mt-6", 
+            div { class: "status-box mt-6",
                 p { class: "font-semibold mb-2", "Status:" }
-                p { "{status_msg}" } 
+                p { "{status_msg}" }
             }
         }
     }

@@ -1,11 +1,11 @@
 // src/utils/mod.rs
 
-use ignore::{WalkBuilder, Walk};
+use ignore::{Walk, WalkBuilder};
 use memmap2::Mmap;
 use std::path::{Path, PathBuf};
 
 pub fn expand_path(path: &str) -> PathBuf {
-    // Primeiro, expandir ~ se o path começar com ele
+    // First, expand ~ if path starts with it
     let path_str = if path.starts_with("~") {
         if let Some(home) = dirs::home_dir() {
             path.replacen("~", &home.to_string_lossy(), 1)
@@ -16,12 +16,11 @@ pub fn expand_path(path: &str) -> PathBuf {
         path.to_string()
     };
 
-    // Depois, expandir variáveis de ambiente ($VAR e ${VAR})
+    // Then, expand environment variables ($VAR and ${VAR})
     let expanded = expand_env_vars(&path_str);
-    
+
     PathBuf::from(expanded)
 }
-
 
 fn expand_env_vars(path: &str) -> String {
     let mut result = String::new();
@@ -29,13 +28,11 @@ fn expand_env_vars(path: &str) -> String {
 
     while let Some(ch) = chars.next() {
         if ch == '$' {
-            // Check if next char is { or alphanumeric
             match chars.peek() {
                 Some('{') => {
-                    // ${VAR} format
                     chars.next(); // consume {
                     let mut var_name = String::new();
-                    
+
                     while let Some(&c) = chars.peek() {
                         if c == '}' {
                             chars.next(); // consume }
@@ -44,7 +41,7 @@ fn expand_env_vars(path: &str) -> String {
                         var_name.push(c);
                         chars.next();
                     }
-                    
+
                     // Tentar expandir com fallbacks inteligentes
                     if let Some(expanded) = expand_env_var_with_fallback(&var_name) {
                         result.push_str(&expanded);
@@ -57,9 +54,8 @@ fn expand_env_vars(path: &str) -> String {
                     }
                 }
                 Some(c) if c.is_alphanumeric() || *c == '_' => {
-                    // $VAR format
                     let mut var_name = String::new();
-                    
+
                     while let Some(&c) = chars.peek() {
                         if c.is_alphanumeric() || c == '_' {
                             var_name.push(c);
@@ -68,18 +64,17 @@ fn expand_env_vars(path: &str) -> String {
                             break;
                         }
                     }
-                    
-                    // Tentar expandir com fallbacks inteligentes
+
+                    // Try to expand with smart fallbacks
                     if let Some(expanded) = expand_env_var_with_fallback(&var_name) {
                         result.push_str(&expanded);
                     } else {
-                        // Se a variável não existir, manter como está
+                        // If variable doesn't exist, keep as is
                         result.push('$');
                         result.push_str(&var_name);
                     }
                 }
                 _ => {
-                    // $ alone
                     result.push('$');
                 }
             }
@@ -91,74 +86,74 @@ fn expand_env_vars(path: &str) -> String {
     result
 }
 
-/// Tenta expandir uma variável de ambiente com fallbacks inteligentes para cross-platform
+/// Try to expand an environment variable with smart cross-platform fallbacks
 fn expand_env_var_with_fallback(var_name: &str) -> Option<String> {
-    // Primeiro, tentar a variável literal
+    // First, try the literal variable
     if let Ok(val) = std::env::var(var_name) {
         return Some(val);
     }
-    
-    // Fallbacks inteligentes para HOME / USERPROFILE
+
+    // Smart fallbacks for HOME / USERPROFILE
     match var_name {
         "HOME" => {
-            // No Windows, tentar USERPROFILE se HOME não existir
-            std::env::var("USERPROFILE").ok()
+            // On Windows, try USERPROFILE if HOME doesn't exist
+            std::env::var("USERPROFILE")
+                .ok()
                 .or_else(|| dirs::home_dir().map(|p| p.to_string_lossy().into_owned()))
         }
         "USERPROFILE" => {
-            // Em Linux/macOS, tentar HOME se USERPROFILE não existir
-            std::env::var("HOME").ok()
+            // On Linux/macOS, try HOME if USERPROFILE doesn't exist
+            std::env::var("HOME")
+                .ok()
                 .or_else(|| dirs::home_dir().map(|p| p.to_string_lossy().into_owned()))
         }
         _ => None,
     }
 }
 
-/// Verifica se um caminho corresponde a um padrão de exclusão
-/// 
-/// ## Sistema de Exclusão de Arquivos
-/// 
-/// O aplicativo utiliza **3 mecanismos combinados** para excluir arquivos do backup:
-/// 
-/// ### 1️⃣ Arquivos .gitignore (Automático - Sem Log Individual)
-/// Se um `.gitignore` existe, as regras nele são respeitadas automaticamente.
-/// Exemplo: Se `.gitignore` contém `node_modules/`, esses arquivos não aparecem no backup.
-/// Rastreamento: Log geral indica "✅ Respeitar .gitignore: ATIVO"
-/// 
-/// ### 2️⃣ Padrões Personalizados (Do Perfil ou Configuração Global)
-/// Padrões especificados em `exclude_patterns` no arquivo `.toml` ou `app_preferences.json`.
-/// Cada arquivo excluído gera log: "🚫 Excluindo: <arquivo> (padrão: <pattern>)"
-/// 
-/// ### 3️⃣ Formatos de Padrão Suportados
-/// - `*.ext` - Wildcard: `*.tmp`, `*.log`, `*.js` → todos arquivos com essa extensão
-/// - `.hidden` - Ponto no início: `.git`, `.DS_Store` → arquivos/pastas ocultos
-/// - `folder` - Pasta: `node_modules`, `build`, `__pycache__` → diretório inteiro
-/// - `arquivo.js` - Arquivo exato: `app.ts`, `index.js` → arquivo específico
+/// Checks if a path matches an exclusion pattern
+///
+/// ## File Exclusion System
+///
+/// The application uses **3 combined mechanisms** to exclude files from backup:
+///
+/// ### 1️⃣ .gitignore Files (Automatic - No Individual Log)
+/// If a `.gitignore` exists, its rules are automatically respected.
+/// Example: If `.gitignore` contains `node_modules/`, those files don't appear in backup.
+/// Tracking: General log shows "✅ Respect .gitignore: ACTIVE"
+///
+/// ### 2️⃣ Custom Patterns (From Profile or Global Configuration)
+/// Patterns specified in `exclude_patterns` in TOML file or `app_preferences.json`.
+/// Each excluded file generates log: "🚫 Excluding: <file> (pattern: <pattern>)"
+///
+/// ### 3️⃣ Supported Pattern Formats
+/// - `*.ext` - Wildcard: `*.tmp`, `*.log`, `*.js` → all files with this extension
+/// - `.hidden` - Starting with dot: `.git`, `.DS_Store` → hidden files/folders
+/// - `folder` - Folder: `node_modules`, `build`, `__pycache__` → entire directory
+/// - `file.js` - Exact file: `app.ts`, `index.js` → specific file
 pub fn matches_exclude_pattern(path: &Path, pattern: &str) -> bool {
     let path_str = path.to_string_lossy();
     let path_display = path.display().to_string();
-    
+
     if pattern.is_empty() {
         return false;
     }
-    
+
     let pattern_normalized = pattern.trim_end_matches('/');
-    
-    // ============================================================================
-    // Caso 1: Padrão wildcard → *.ext
+
+    // Case 1: Wildcard pattern → *.ext
     // ============================================================================
     if pattern_normalized.starts_with("*.") {
-        // Exemplo: *.tmp, *.js, *.log
-        let ext = &pattern_normalized[1..]; // Remove o * → .tmp, .js, .log
+        // Example: *.tmp, *.js, *.log
+        let ext = &pattern_normalized[1..]; // Remove * → .tmp, .js, .log
         return path_str.ends_with(ext);
     }
-    
-    // ============================================================================
-    // Caso 2: Padrão com ponto no início → .git, .gitignore, .DS_Store
+
+    // Case 2: Pattern starting with dot → .git, .gitignore, .DS_Store
     // ============================================================================
     if pattern_normalized.starts_with('.') {
-        // Procura componentes do path que são exatamente este padrão
-        // Exemplo: .git, .DS_Store
+        // Check path components that match this pattern
+        // Example: .git, .DS_Store
         for component in path.iter() {
             if let Some(comp_str) = component.to_str() {
                 if comp_str == pattern_normalized || comp_str.starts_with(pattern_normalized) {
@@ -167,14 +162,13 @@ pub fn matches_exclude_pattern(path: &Path, pattern: &str) -> bool {
             }
         }
     }
-    
+
+    // Case 3: File or directory
     // ============================================================================
-    // Caso 3: Arquivo ou pasta específica
-    // ============================================================================
-    
-    // 3a: Verifica se o último componente do path é exatamente o padrão
-    // Exemplo: pattern="index.js" → /path/to/index.js → EXCLUIR
-    //          pattern="app.ts" → /path/to/app.ts → EXCLUIR
+
+    // 3a: Check if last path component matches exactly
+    // Example: pattern="index.js" → /path/to/index.js → EXCLUDE
+    //          pattern="app.ts" → /path/to/app.ts → EXCLUDE
     if let Some(file_name) = path.file_name() {
         if let Some(file_name_str) = file_name.to_str() {
             if file_name_str == pattern_normalized {
@@ -182,10 +176,10 @@ pub fn matches_exclude_pattern(path: &Path, pattern: &str) -> bool {
             }
         }
     }
-    
-    // 3b: Verifica se é um diretório completo (componente do meio do path)
-    // Exemplo: pattern="node_modules" → /src/node_modules/lib.js → EXCLUIR
-    //          pattern="build" → /src/build/out.js → EXCLUIR
+
+    // 3b: Check if it's a complete directory (middle path component)
+    // Example: pattern="node_modules" → /src/node_modules/lib.js → EXCLUDE
+    //          pattern="build" → /src/build/out.js → EXCLUDE
     for component in path.iter() {
         if let Some(comp_str) = component.to_str() {
             if comp_str == pattern_normalized {
@@ -193,25 +187,21 @@ pub fn matches_exclude_pattern(path: &Path, pattern: &str) -> bool {
             }
         }
     }
-    
-    // 3c: Verifica como substring para caminhos relativos
-    // Exemplo: pattern="node_modules" → caminhos contendo /node_modules/ ou node_modules/
+
+    // 3c: Check as substring for relative paths
+    // Example: pattern="node_modules" → containing /node_modules/ or node_modules/
     if path_display.contains(&format!("/{}/", pattern_normalized))
         || path_display.contains(&format!("{}/", pattern_normalized))
         || path_display.starts_with(&format!("{}/", pattern_normalized))
     {
         return true;
     }
-    
+
     false
 }
 
-/// Cria um WalkBuilder configurado com filtros de exclusão
-pub fn build_walker(
-    root: &Path,
-    _custom_globs: &[String],
-    respect_gitignore: bool,
-) -> WalkBuilder {
+/// Builds a WalkBuilder configured with exclusion filters
+pub fn build_walker(root: &Path, _custom_globs: &[String], respect_gitignore: bool) -> WalkBuilder {
     let mut builder = WalkBuilder::new(root);
 
     builder
@@ -225,20 +215,16 @@ pub fn build_walker(
     builder
 }
 
-/// Retorna o iterador Walk pronto a usar com filtragem de exclusão
-/// 
-/// IMPORTANTE: Esta função filtra os resultados do walk baseado nos padrões
-/// de exclusão fornecidos. Os padrões suportados são:
-/// - `*.ext`: Wildcard no final (e.g., `*.tmp`, `*.log`)
-/// - `.hidden`: Começa com ponto (e.g., `.git`, `.DS_Store`)
-/// - `folder/` ou `folder`: Padrão simples (e.g., `node_modules`, `build`)
-pub fn walk_filtered(
-    root: &Path,
-    custom_globs: &[String],
-    respect_gitignore: bool,
-) -> Walk {
-    let walker = build_walker(root, custom_globs, respect_gitignore).build();
-    walker
+/// Returns a Walk iterator ready to use with exclusion filtering
+///
+/// IMPORTANT: This function filters walk results based on exclusion patterns.
+/// Supported patterns are:
+/// - `*.ext`: Wildcard at end (e.g., `*.tmp`, `*.log`)
+/// - `.hidden`: Starts with dot (e.g., `.git`, `.DS_Store`)
+/// - `folder/` or `folder`: Simple pattern (e.g., `node_modules`, `build`)
+pub fn walk_filtered(root: &Path, custom_globs: &[String], respect_gitignore: bool) -> Walk {
+    
+    build_walker(root, custom_globs, respect_gitignore).build()
 }
 
 /// Memory-map de ficheiro
@@ -247,141 +233,114 @@ pub fn mmap_file(path: &Path) -> std::io::Result<Mmap> {
     unsafe { Mmap::map(&file) }
 }
 
-/// ============================================================================
-/// PONTO CENTRALIZADO PARA VERIFICAÇÃO E CRIAÇÃO DE DIRETÓRIOS
-/// ============================================================================
-/// 
-/// Esta é a ÚNICA função que deve ser usada no sistema para criar/verificar 
-/// diretórios. Garante:
-/// 
-/// 1. Cross-platform: Windows, macOS, Linux com mesmo comportamento
-/// 2. Permissões consistentes: 0o700 (rwx------) em Unix/macOS
-/// 3. Home directory: Sempre usa dirs::home_dir() para expansão correta
-/// 4. Tratamento de erros unificado
-/// 5. Logging centralizado para auditoria
-/// ============================================================================
 
-/// Garante que um diretório existe, criando-o se necessário com permissões corretas
-/// 
-/// ## Cross-Platform Behavior
-/// - **Windows:** Cria com permissões padrão do SO
-/// - **macOS/Linux:** Cria com permissões 0o700 (rwx------)
-/// 
-/// ## Exemplo
-/// ```rust
-/// use rsb_core::utils::ensure_directory_exists;
-/// 
 /// match ensure_directory_exists("~/.rs-shield") {
 ///     Ok(path) => println!("Diretório garantido: {:?}", path),
 ///     Err(e) => eprintln!("Erro: {}", e),
 /// }
 /// ```
 pub fn ensure_directory_exists(path: &str) -> std::result::Result<PathBuf, String> {
-    use std::fs;
-    
-    // Expandir path (suporta ~, $VAR, ${VAR})
+    // Expand path (supports ~, $VAR, ${VAR})
     let expanded_path = expand_path(path);
-    
-    // Verificar se já existe
+
     if expanded_path.exists() {
         if expanded_path.is_dir() {
             return Ok(expanded_path);
         } else {
             return Err(format!(
-                "Caminho existe mas não é diretório: {}",
+                "Path exists but is not a directory: {}",
                 expanded_path.display()
             ));
         }
     }
-    
-    // Criar diretório com permissões apropriadas
+
+    // Create directory with appropriate permissions
     #[cfg(unix)]
     {
         use std::fs::DirBuilder;
         use std::os::unix::fs::DirBuilderExt;
-        
+
         let mut builder = DirBuilder::new();
         builder.mode(0o700); // rwx------
         builder.recursive(true);
-        
-        builder
-            .create(&expanded_path)
-            .map_err(|e| format!(
-                "Erro ao criar diretório '{}': {}",
+
+        builder.create(&expanded_path).map_err(|e| {
+            format!(
+                "Error creating directory '{}': {}",
                 expanded_path.display(),
                 e
-            ))?;
+            )
+        })?;
     }
-    
+
     #[cfg(not(unix))]
     {
-        fs::create_dir_all(&expanded_path)
-            .map_err(|e| format!(
-                "Erro ao criar diretório '{}': {}",
+        std::fs::create_dir_all(&expanded_path).map_err(|e| {
+            format!(
+                "Error creating directory '{}': {}",
                 expanded_path.display(),
                 e
-            ))?;
+            )
+        })?;
     }
-    
+
     Ok(expanded_path)
 }
 
-/// Versão assíncrona de ensure_directory_exists
-/// 
-/// Mesmo comportamento que versão síncrona, mas usa tokio::fs para não bloquear
+
 pub async fn ensure_directory_exists_async(path: &str) -> std::result::Result<PathBuf, String> {
     use tokio::fs;
-    
-    // Expandir path (suporta ~, $VAR, ${VAR})
+
+    // Expand path (supports ~, $VAR, ${VAR})
     let expanded_path = expand_path(path);
-    
-    // Verificar se já existe
+
+    // Check if already exists
     match fs::metadata(&expanded_path).await {
         Ok(meta) => {
             if meta.is_dir() {
                 return Ok(expanded_path);
             } else {
                 return Err(format!(
-                    "Caminho existe mas não é diretório: {}",
+                    "Path exists but is not a directory: {}",
                     expanded_path.display()
                 ));
             }
         }
         Err(_) => {
-            // Não existe, vai criar
+            // Path doesn't exist yet, will create
         }
     }
-    
-    // Criar diretório
-    fs::create_dir_all(&expanded_path)
-        .await
-        .map_err(|e| format!(
-            "Erro ao criar diretório '{}': {}",
+
+    // Create directory
+    fs::create_dir_all(&expanded_path).await.map_err(|e| {
+        format!(
+            "Error creating directory '{}': {}",
             expanded_path.display(),
             e
-        ))?;
-    
+        )
+    })?;
+
     Ok(expanded_path)
 }
 
-/// Verifica se um diretório existe, retorna PathBuf expandido ou erro
+/// Checks if a directory exists, returns expanded PathBuf or error
 pub fn verify_directory_exists(path: &str) -> std::result::Result<PathBuf, String> {
     let expanded_path = expand_path(path);
-    
+
     if !expanded_path.exists() {
         return Err(format!(
-            "Diretório não encontrado: {} (expandido de: {})",
+            "Directory not found: {} (expanded from: {})",
             expanded_path.display(),
             path
         ));
     }
-    
+
     if !expanded_path.is_dir() {
         return Err(format!(
-            "Caminho existe mas não é diretório: {}",
+            "Path exists but is not a directory: {}",
             expanded_path.display()
         ));
     }
-    
+
     Ok(expanded_path)
 }

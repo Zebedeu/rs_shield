@@ -98,7 +98,7 @@ pub fn ConfigScreen() -> Element {
             }
 
             h3 { class: "section-title", "{texts.encryption_section_title}" }
-            
+
             div { class: "form-group",
                 label { class: "label-text", "{texts.encrypt_patterns_label}" }
                 textarea {
@@ -108,7 +108,7 @@ pub fn ConfigScreen() -> Element {
                 }
                 p { class: "hint", "{texts.crypto_hint}" }
             }
-            
+
             h3 { class: "section-title", "{texts.exclude_section_title}" }
 
             div { class: "form-group",
@@ -122,59 +122,59 @@ pub fn ConfigScreen() -> Element {
             }
 
             h3 { class: "section-title", "{texts.s3_config_title}" }
-            
+
             div { class: "form-group",
                 label { class: "label-text", "{texts.bucket_label}" }
-                input { 
-                    class: "input-field", 
-                    r#type: "text", 
+                input {
+                    class: "input-field",
+                    r#type: "text",
                     placeholder: "my-backup-bucket",
-                    value: "{app_config.s3_bucket}", 
-                    oninput: move |evt| app_config.s3_bucket.set(evt.value()) 
+                    value: "{app_config.s3_bucket}",
+                    oninput: move |evt| app_config.s3_bucket.set(evt.value())
                 }
             }
 
             div { class: "form-group",
                 label { class: "label-text", "{texts.region_label}" }
-                input { 
-                    class: "input-field", 
-                    r#type: "text", 
+                input {
+                    class: "input-field",
+                    r#type: "text",
                     placeholder: "us-east-1",
-                    value: "{app_config.s3_region}", 
-                    oninput: move |evt| app_config.s3_region.set(evt.value()) 
+                    value: "{app_config.s3_region}",
+                    oninput: move |evt| app_config.s3_region.set(evt.value())
                 }
             }
 
             div { class: "form-group",
                 label { class: "label-text", "{texts.endpoint_label}" }
-                input { 
-                    class: "input-field", 
-                    r#type: "text", 
+                input {
+                    class: "input-field",
+                    r#type: "text",
                     placeholder: "https://s3.amazonaws.com",
-                    value: "{app_config.s3_endpoint}", 
-                    oninput: move |evt| app_config.s3_endpoint.set(evt.value()) 
+                    value: "{app_config.s3_endpoint}",
+                    oninput: move |evt| app_config.s3_endpoint.set(evt.value())
                 }
             }
 
             div { class: "form-group",
                 label { class: "label-text", "Access Key" }
-                input { 
-                    class: "input-field", 
-                    r#type: "password", 
+                input {
+                    class: "input-field",
+                    r#type: "password",
                     placeholder: "AWS Access Key ID",
-                    value: "{app_config.s3_access_key}", 
-                    oninput: move |evt| app_config.s3_access_key.set(evt.value()) 
+                    value: "{app_config.s3_access_key}",
+                    oninput: move |evt| app_config.s3_access_key.set(evt.value())
                 }
             }
 
             div { class: "form-group",
                 label { class: "label-text", "Secret Key" }
-                input { 
-                    class: "input-field", 
-                    r#type: "password", 
+                input {
+                    class: "input-field",
+                    r#type: "password",
                     placeholder: "AWS Secret Access Key",
-                    value: "{app_config.s3_secret_key}", 
-                    oninput: move |evt| app_config.s3_secret_key.set(evt.value()) 
+                    value: "{app_config.s3_secret_key}",
+                    oninput: move |evt| app_config.s3_secret_key.set(evt.value())
                 }
             }
 
@@ -189,7 +189,7 @@ pub fn ConfigScreen() -> Element {
             div { class: "info-box",
                 "ℹ️ {texts.s3_hint}"
             }
-            
+
         }
     }
 }

@@ -57,7 +57,7 @@ pub fn create_profile(name: &str, source: &Path, dest: &Path) -> io::Result<()> 
         compression_level: Some(3),
     };
 
-    let toml_str = toml::to_string(&config).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let toml_str = toml::to_string(&config).map_err(io::Error::other)?;
     let filename = format!("{}.toml", name);
     fs::write(filename, toml_str)?;
     Ok(())
@@ -65,12 +65,17 @@ pub fn create_profile(name: &str, source: &Path, dest: &Path) -> io::Result<()> 
 
 pub fn load_config(path: &Path) -> io::Result<Config> {
     let content = fs::read_to_string(path)?;
-    let mut config: Config = toml::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    
-    // Expandir paths especiais como ~ e variáveis de ambiente
-    config.source_path = expand_path(&config.source_path).to_string_lossy().into_owned();
-    config.destination_path = expand_path(&config.destination_path).to_string_lossy().into_owned();
-    
+    let mut config: Config =
+        toml::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    // Expand special paths like ~ and environment variables
+    config.source_path = expand_path(&config.source_path)
+        .to_string_lossy()
+        .into_owned();
+    config.destination_path = expand_path(&config.destination_path)
+        .to_string_lossy()
+        .into_owned();
+
     Ok(config)
 }
 
@@ -79,63 +84,71 @@ pub fn load_config(path: &Path) -> io::Result<Config> {
 #[cfg(feature = "cli")]
 pub fn prompt_for_s3_config(config_path: &Path) -> io::Result<()> {
     use std::io::Write;
-    
-    // Load existing config
-    let content = fs::read_to_string(config_path)?;
-    let mut config: Config = toml::from_str(&content)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    // Initialize s3_buckets if not present
+    let content = fs::read_to_string(config_path)?;
+    let mut config: Config =
+        toml::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
     let mut known_buckets = config.s3_buckets.clone().unwrap_or_default();
-    
+
     println!("\n📦 S3 Storage Configuration");
     println!("   Configure or select S3/S3-compatible storage\n");
-    
-    // Show known buckets if any exist
+
+
     if !known_buckets.is_empty() {
         println!("📋 Known S3 Buckets:");
         for (idx, bucket_cfg) in known_buckets.iter().enumerate() {
-            println!("   {}. {} ({})", idx + 1, bucket_cfg.name, bucket_cfg.endpoint);
+            println!(
+                "   {}. {} ({})",
+                idx + 1,
+                bucket_cfg.name,
+                bucket_cfg.endpoint
+            );
         }
         println!();
     }
-    
-    // Ask user to select or create new bucket
+
     println!("Options:");
     println!("  1. Select existing bucket");
     println!("  2. Add new bucket");
     print!("\nChoose option (1 or 2): ");
     io::stdout().flush()?;
-    
+
     let mut choice = String::new();
     io::stdin().read_line(&mut choice)?;
     let choice = choice.trim();
-    
+
     let bucket_config = match choice {
         "1" => {
-            // Select existing bucket
             if known_buckets.is_empty() {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "No known buckets. Please add a new bucket first."));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "No known buckets. Please add a new bucket first.",
+                ));
             }
-            
+
             print!("\nSelect bucket number (1-{}): ", known_buckets.len());
             io::stdout().flush()?;
             let mut idx_str = String::new();
             io::stdin().read_line(&mut idx_str)?;
-            let idx: usize = idx_str.trim().parse()
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid bucket number"))?;
-            
+            let idx: usize = idx_str.trim().parse().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "Invalid bucket number")
+            })?;
+
             if idx < 1 || idx > known_buckets.len() {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "Bucket number out of range"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Bucket number out of range",
+                ));
             }
-            
+
             known_buckets[idx - 1].clone()
         }
         "2" => {
-            // Add new bucket
+
             println!("\n🆕 Create New S3 Bucket Configuration");
-            
-            // Get bucket name
+
+
             print!("Enter S3 bucket name: ");
             io::stdout().flush()?;
             let mut bucket = String::new();
@@ -143,10 +156,12 @@ pub fn prompt_for_s3_config(config_path: &Path) -> io::Result<()> {
             let bucket = bucket.trim().to_string();
 
             if bucket.is_empty() {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "Bucket name cannot be empty"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Bucket name cannot be empty",
+                ));
             }
 
-            // Get region
             print!("Enter S3 region (e.g., us-east-1, eu-west-1): ");
             io::stdout().flush()?;
             let mut region = String::new();
@@ -154,7 +169,10 @@ pub fn prompt_for_s3_config(config_path: &Path) -> io::Result<()> {
             let region = region.trim().to_string();
 
             if region.is_empty() {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "Region cannot be empty"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Region cannot be empty",
+                ));
             }
 
             // Get endpoint (REQUIRED for S3-compatible services)
@@ -165,7 +183,7 @@ pub fn prompt_for_s3_config(config_path: &Path) -> io::Result<()> {
             println!("   Wasabi:        https://s3.wasabisys.com");
             println!("   DigitalOcean:  https://nyc3.digitaloceanspaces.com");
             println!("   R2 (Cloudflare): https://<account-id>.r2.cloudflarestorage.com\n");
-            
+
             print!("Enter S3 endpoint URL: ");
             io::stdout().flush()?;
             let mut endpoint = String::new();
@@ -173,42 +191,41 @@ pub fn prompt_for_s3_config(config_path: &Path) -> io::Result<()> {
             let endpoint = endpoint.trim().to_string();
 
             if endpoint.is_empty() {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, 
-                    "Endpoint URL cannot be empty.\nExamples:\n  https://s3.amazonaws.com\n  http://localhost:9000 (for MinIO)"));
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "Endpoint URL cannot be empty.\nExamples:\n  https://s3.amazonaws.com\n  http://localhost:9000 (for MinIO)"));
             }
-            
+
             let new_bucket = S3BucketConfig {
                 name: bucket.clone(),
                 region: region.clone(),
                 endpoint: endpoint.clone(),
             };
-            
+
             known_buckets.push(new_bucket.clone());
-            
+
             println!("\n✅ Bucket added to known buckets list");
             new_bucket
         }
         _ => {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid choice. Please enter 1 or 2"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid choice. Please enter 1 or 2",
+            ));
         }
     };
-    
+
     // Update S3 config with selected bucket
     let s3_config = S3Config {
         bucket: Some(bucket_config.name.clone()),
         region: Some(bucket_config.region.clone()),
         endpoint: Some(bucket_config.endpoint.clone()),
-        access_key: None,  // Will be set by credentials manager
-        secret_key: None,  // Will be set by credentials manager
+        access_key: None, // Will be set by credentials manager
+        secret_key: None, // Will be set by credentials manager
     };
 
-    // Use only s3 struct (not the redundant top-level fields)
     config.s3 = Some(s3_config);
     config.s3_buckets = Some(known_buckets);
 
-    // Save updated config to file
-    let toml_str = toml::to_string(&config)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let toml_str = toml::to_string(&config).map_err(io::Error::other)?;
     fs::write(config_path, toml_str)?;
 
     println!("\n✅ S3 configuration updated:");

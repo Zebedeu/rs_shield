@@ -1,23 +1,23 @@
-/// Módulo de criptografia de credenciais em repouso
-/// Usa AES-256-GCM para criptografia autenticada
+/// Encryption module for credentials at rest
+/// Uses AES-256-GCM for authenticated encryption
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
-    Aes256Gcm, Nonce, Key,
+    Aes256Gcm, Key, Nonce,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct EncryptedCredentials {
-    /// Ciphertext codificado em base64
+    /// Ciphertext encoded in base64
     pub cipher: String,
-    /// Nonce (IV) codificado em base64 - deve ser único para cada encriptação
+    /// Nonce (IV) encoded in base64 - must be unique for each encryption
     pub nonce: String,
-    /// Salt para derivação de chave
+    /// Salt for key derivation
     pub salt: String,
-    /// Versão do algoritmo de criptografia para compatibilidade futura
+    /// Encryption algorithm version for future compatibility
     pub version: u32,
 }
 
@@ -32,7 +32,7 @@ impl fmt::Debug for EncryptedCredentials {
     }
 }
 
-/// Derivar chave a partir de uma senha master usando PBKDF2
+/// Derive key from master password using PBKDF2
 fn derive_key_from_password(password: &str, salt: &[u8]) -> [u8; 32] {
     use pbkdf2::pbkdf2_hmac;
     use sha2::Sha256;
@@ -42,34 +42,36 @@ fn derive_key_from_password(password: &str, salt: &[u8]) -> [u8; 32] {
     key
 }
 
-/// Criptografar JSON de credenciais
+/// Encrypt credentials JSON
 pub fn encrypt_credentials(
     json: &str,
     master_password: &str,
 ) -> Result<EncryptedCredentials, String> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
-    // Gerar salt (16 bytes)
-    let salt: [u8; 16] = rng.gen();
+    // Generate salt (16 bytes)
+    let mut salt = [0u8; 16];
+    rng.fill_bytes(&mut salt);
 
-    // Derivar chave da senha master
+    // Derive key from master password
     let key_bytes = derive_key_from_password(master_password, &salt);
     let key = Key::<Aes256Gcm>::from(key_bytes);
 
-    // Gerar nonce único (12 bytes para GCM)
-    let nonce_bytes: [u8; 12] = rng.gen();
+    // Generate unique nonce (12 bytes for GCM)
+    let mut nonce_bytes = [0u8; 12];
+    rng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    // Criptografar
+    // Encrypt
     let cipher = Aes256Gcm::new(&key);
     let ciphertext = cipher
         .encrypt(nonce, Payload::from(json.as_bytes()))
         .map_err(|e| format!("Encryption failed: {}", e))?;
 
-    // Codificar em base64 para armazenamento
+    // Encode in base64 for storage
     let cipher_b64 = BASE64.encode(&ciphertext);
-    let nonce_b64 = BASE64.encode(&nonce_bytes);
-    let salt_b64 = BASE64.encode(&salt);
+    let nonce_b64 = BASE64.encode(nonce_bytes);
+    let salt_b64 = BASE64.encode(salt);
 
     Ok(EncryptedCredentials {
         cipher: cipher_b64,
@@ -79,20 +81,23 @@ pub fn encrypt_credentials(
     })
 }
 
-/// Descriptografar JSON de credenciais
+/// Decrypt credentials JSON
 pub fn decrypt_credentials(
     encrypted: &EncryptedCredentials,
     master_password: &str,
 ) -> Result<String, String> {
-    // Decodificar de base64
-    let ciphertext = BASE64.decode(&encrypted.cipher)
+    // Decode from base64
+    let ciphertext = BASE64
+        .decode(&encrypted.cipher)
         .map_err(|e| format!("Failed to decode cipher: {}", e))?;
-    let nonce_bytes = BASE64.decode(&encrypted.nonce)
+    let nonce_bytes = BASE64
+        .decode(&encrypted.nonce)
         .map_err(|e| format!("Failed to decode nonce: {}", e))?;
-    let salt = BASE64.decode(&encrypted.salt)
+    let salt = BASE64
+        .decode(&encrypted.salt)
         .map_err(|e| format!("Failed to decode salt: {}", e))?;
 
-    // Validar tamanhos
+    // Validate sizes
     if nonce_bytes.len() != 12 {
         return Err("Invalid nonce".to_string());
     }
@@ -100,18 +105,18 @@ pub fn decrypt_credentials(
         return Err("Invalid salt".to_string());
     }
 
-    // Derivar chave
+    // Derive key
     let key_bytes = derive_key_from_password(master_password, &salt);
     let key = Key::<Aes256Gcm>::from(key_bytes);
 
-    // Descriptografar
+    // Decrypt
     let nonce = Nonce::from_slice(&nonce_bytes);
     let cipher = Aes256Gcm::new(&key);
     let plaintext = cipher
         .decrypt(nonce, Payload::from(ciphertext.as_ref()))
         .map_err(|e| format!("Decryption failed (incorrect password?): {}", e))?;
 
-    // Converter para string
+    // Convert to string
     String::from_utf8(plaintext).map_err(|e| format!("Invalid JSON: {}", e))
 }
 
@@ -150,7 +155,7 @@ mod tests {
         let enc1 = encrypt_credentials(original, password).unwrap();
         let enc2 = encrypt_credentials(original, password).unwrap();
 
-        // Mesmo com mesmos dados, nonces e salts diferentes produzem ciphers diferentes
+        // Same data but different nonces and salts produce different ciphers
         assert_ne!(enc1.cipher, enc2.cipher);
         assert_ne!(enc1.nonce, enc2.nonce);
     }

@@ -19,13 +19,16 @@ pub struct ChunkReport {
 
 /// Implementar log de chunks para auditoria
 #[allow(dead_code)]
-pub fn log_chunk_metadata(file_path: &PathBuf, chunks: &[ChunkMetadata]) -> Result<(), Box<dyn std::error::Error>> {
+pub fn log_chunk_metadata(
+    file_path: &PathBuf,
+    chunks: &[ChunkMetadata],
+) -> Result<(), Box<dyn std::error::Error>> {
     let report = ChunkReport {
         file_path: file_path.clone(),
         chunks: chunks.to_vec(),
         total_chunks: chunks.len(),
     };
-    
+
     let json = serde_json::to_string(&report)?;
     info!("📦 Chunk metadata: {}", json);
     Ok(())
@@ -74,14 +77,14 @@ pub async fn read_manifest(
             }
         }
     }
-    
+
     // Tentar descomprimir se o conteúdo for comprimido
     let mut decompressed = Vec::new();
     if copy_decode(&raw[..], &mut decompressed).is_ok() {
         info!("📚 Manifest descomprimido com sucesso");
         return Ok(String::from_utf8(decompressed)?);
     }
-    
+
     Ok(String::from_utf8(raw)?)
 }
 

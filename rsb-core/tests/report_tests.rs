@@ -49,7 +49,10 @@ fn test_report_no_errors() {
         status: "Success".to_string(),
     };
 
-    assert!(report.errors.is_empty(), "Report with no errors should have empty error vector");
+    assert!(
+        report.errors.is_empty(),
+        "Report with no errors should have empty error vector"
+    );
     assert_eq!(report.files_with_errors, 0);
 }
 
@@ -98,7 +101,10 @@ fn test_report_prune_operation() {
 
     assert_eq!(report.operation, "Prune");
     // All files processed successfully
-    assert_eq!(report.files_processed + report.files_skipped, report.total_files);
+    assert_eq!(
+        report.files_processed + report.files_skipped,
+        report.total_files
+    );
 }
 
 #[test]
@@ -122,7 +128,10 @@ fn test_report_with_duration() {
     };
 
     assert_eq!(report.duration.as_secs(), 3661);
-    assert!(report.duration.as_secs() > 3600, "Duration should be over 1 hour");
+    assert!(
+        report.duration.as_secs() > 3600,
+        "Duration should be over 1 hour"
+    );
 }
 
 #[test]

@@ -1,15 +1,14 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing::{info, Level};
-use tracing_subscriber;
 
 mod config;
 mod core;
-mod crypto;
-mod utils;
-mod storage;
-mod report;
 mod credentials;
+mod crypto;
+mod report;
+mod storage;
+mod utils;
 
 #[derive(Parser)]
 #[command(name = "rsb", version = "0.1.0", about = "Rust Shield Backup")]
@@ -102,17 +101,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config::create_profile(&name, &source, &dest)?;
             info!("Profile {} created.", name);
         }
-        Commands::Backup { config, mode, key, dry_run } => {
+        Commands::Backup {
+            config,
+            mode,
+            key,
+            dry_run,
+        } => {
             let cfg = config::load_config(&config)?;
             core::perform_backup(&cfg, &mode, key.as_deref(), dry_run, true, None).await?;
             info!("Backup completed.");
         }
-        Commands::Restore { config, snapshot, target, key, force } => {
+        Commands::Restore {
+            config,
+            snapshot,
+            target,
+            key,
+            force,
+        } => {
             let cfg = config::load_config(&config)?;
-            core::perform_restore(&cfg, snapshot.as_deref(), target, key.as_deref(), force, None).await?;
+            core::perform_restore(
+                &cfg,
+                snapshot.as_deref(),
+                target,
+                key.as_deref(),
+                force,
+                None,
+            )
+            .await?;
             info!("Restore completed.");
         }
-        Commands::Verify { config, snapshot, quiet, fast } => {
+        Commands::Verify {
+            config,
+            snapshot,
+            quiet,
+            fast,
+        } => {
             let cfg = config::load_config(&config)?;
             core::perform_verify(&cfg, snapshot.as_deref(), quiet, fast, None).await?;
             info!("Verification completed.");
@@ -125,17 +148,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Schedule { config, format } => {
             let abs_config = std::fs::canonicalize(&config).unwrap_or(config.clone());
             let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rsb"));
-            
+
             // Quote paths to handle spaces (common on Windows/macOS)
             let exe_str = format!("\"{}\"", exe.display());
             let config_str = format!("\"{}\"", abs_config.display());
 
             if format == "cron" {
                 println!("# Add this line to your crontab (crontab -e):");
-                println!("0 3 * * * {} backup {} --key \"YOUR_KEY_HERE\"", exe_str, config_str);
+                println!(
+                    "0 3 * * * {} backup {} --key \"YOUR_KEY_HERE\"",
+                    exe_str, config_str
+                );
             } else if format == "systemd" {
                 println!("# Example of rsb-backup.service:");
-                println!("[Service]\nType=oneshot\nExecStart={} backup {} --key \"YOUR_KEY_HERE\"", exe_str, config_str);
+                println!(
+                    "[Service]\nType=oneshot\nExecStart={} backup {} --key \"YOUR_KEY_HERE\"",
+                    exe_str, config_str
+                );
             } else {
                 println!("Unknown format. Use 'cron' or 'systemd'.");
             }

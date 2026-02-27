@@ -1,4 +1,4 @@
-use crate::ui::operations::{OperationsManager, create_operation};
+use crate::ui::operations::{create_operation, OperationsManager};
 
 pub fn record_backup_operation(
     status: String,
@@ -9,9 +9,9 @@ pub fn record_backup_operation(
     destination: String,
 ) -> Result<(), String> {
     let mut manager = OperationsManager::new();
-    
+
     let operation = create_operation(
-        "Backup".to_string(), 
+        "Backup".to_string(),
         status,
         files_processed,
         0, // files_skipped
@@ -21,7 +21,7 @@ pub fn record_backup_operation(
         Some(source),
         Some(destination),
     );
-    
+
     manager.add_operation(operation)
 }
 
@@ -33,9 +33,9 @@ pub fn record_restore_operation(
     destination: String,
 ) -> Result<(), String> {
     let mut manager = OperationsManager::new();
-    
+
     let operation = create_operation(
-        "Restore".to_string(), 
+        "Restore".to_string(),
         status,
         files_processed,
         0,
@@ -45,7 +45,7 @@ pub fn record_restore_operation(
         Some(source),
         Some(destination),
     );
-    
+
     manager.add_operation(operation)
 }
 
@@ -57,9 +57,9 @@ pub fn record_verify_operation(
     backup_path: String,
 ) -> Result<(), String> {
     let mut manager = OperationsManager::new();
-    
+
     let operation = create_operation(
-        "Verify".to_string(), 
+        "Verify".to_string(),
         status,
         files_processed,
         0,
@@ -69,7 +69,7 @@ pub fn record_verify_operation(
         Some(backup_path),
         None,
     );
-    
+
     manager.add_operation(operation)
 }
 
@@ -81,9 +81,9 @@ pub fn record_prune_operation(
     backup_path: String,
 ) -> Result<(), String> {
     let mut manager = OperationsManager::new();
-    
+
     let operation = create_operation(
-        "Prune".to_string(), 
+        "Prune".to_string(),
         status,
         files_removed,
         0,
@@ -93,7 +93,7 @@ pub fn record_prune_operation(
         Some(backup_path),
         None,
     );
-    
+
     manager.add_operation(operation)
 }
 pub async fn record_schedule_operation(
@@ -102,12 +102,16 @@ pub async fn record_schedule_operation(
     duration_secs: Option<u64>,
 ) -> Result<(), String> {
     let mut manager = OperationsManager::new();
-    
-    let status = if success { "success".to_string() } else { format!("failed: {:?}", error) };
+
+    let status = if success {
+        "success".to_string()
+    } else {
+        format!("failed: {:?}", error)
+    };
     let duration = duration_secs.unwrap_or(0);
-    
+
     let operation = create_operation(
-        "Schedule".to_string(), 
+        "Schedule".to_string(),
         status,
         0,
         0,
@@ -117,6 +121,6 @@ pub async fn record_schedule_operation(
         None,
         None,
     );
-    
+
     manager.add_operation(operation)
 }

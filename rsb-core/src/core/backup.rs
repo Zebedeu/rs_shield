@@ -1,11 +1,11 @@
+use super::cancellation::CancellationToken;
 use super::manifest::write_manifest;
 use super::resource_monitor::spawn_resource_monitor;
 use super::types::{FileMetadata, ProgressCallback};
-use super::cancellation::CancellationToken;
 use crate::config::Config;
 use crate::core::types::FileStatus;
 use crate::report::ReportData;
-use crate::utils::{walk_filtered, matches_exclude_pattern};
+use crate::utils::{matches_exclude_pattern, walk_filtered};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -23,7 +23,16 @@ pub async fn perform_backup(
     resume: bool,
     on_progress: Option<ProgressCallback>,
 ) -> Result<ReportData, Box<dyn std::error::Error>> {
-    perform_backup_with_cancellation(config, mode, encryption_key, dry_run, resume, on_progress, None).await
+    perform_backup_with_cancellation(
+        config,
+        mode,
+        encryption_key,
+        dry_run,
+        resume,
+        on_progress,
+        None,
+    )
+    .await
 }
 
 pub async fn perform_backup_with_cancellation(
@@ -57,19 +66,22 @@ pub async fn perform_backup_with_cancellation(
     );
 
     let walker = walk_filtered(source, &config.exclude_patterns, true);
-    
+
     // Log of defined exclusion patterns
     if !config.exclude_patterns.is_empty() {
-        info!("Exclusion patterns defined ({}):", config.exclude_patterns.len());
+        info!(
+            "Exclusion patterns defined ({}):",
+            config.exclude_patterns.len()
+        );
         for pattern in &config.exclude_patterns {
             info!("   - {}", pattern);
         }
     } else {
         info!("⚠️  No exclusion patterns defined");
     }
-    
+
     info!("Respect .gitignore: ACTIVE - Files in .gitignore will be automatically filtered");
-    
+
     let mut files: Vec<(PathBuf, PathBuf)> = walker
         .into_iter()
         .filter_map(|e| e.ok())
@@ -78,13 +90,13 @@ pub async fn perform_backup_with_cancellation(
             if !e.path().is_file() {
                 return false;
             }
-            
+
             // Check if it matches an exclusion pattern
             let rel_path = match e.path().strip_prefix(source) {
                 Ok(p) => p,
                 Err(_) => return true, // If strip fails, include the file
             };
-            
+
             // If any exclusion pattern matches, EXCLUDE the file
             for pattern in &config.exclude_patterns {
                 if matches_exclude_pattern(rel_path, pattern) {
@@ -92,7 +104,7 @@ pub async fn perform_backup_with_cancellation(
                     return false; // Exclude this file
                 }
             }
-            
+
             true // Include file
         })
         .map(|e| {
@@ -125,10 +137,8 @@ pub async fn perform_backup_with_cancellation(
     }
     let previous_metadata_cache = Arc::new(previous_metadata_cache);
 
-    let (resource_paused, monitor_running, monitor_handle) = spawn_resource_monitor(
-        config.pause_on_low_battery,
-        config.pause_on_high_cpu,
-    );
+    let (resource_paused, monitor_running, monitor_handle) =
+        spawn_resource_monitor(config.pause_on_low_battery, config.pause_on_high_cpu);
 
     let pb = ProgressBar::new(files.len() as u64);
     pb.set_style(
@@ -210,7 +220,11 @@ pub async fn perform_backup_with_cancellation(
                 let current = stats_processed_clone.load(Ordering::Relaxed)
                     + stats_skipped_clone.load(Ordering::Relaxed)
                     + stats_errors_clone.load(Ordering::Relaxed);
-                cb(current, files_len, format!("Processing: {}", rel_path.display()));
+                cb(
+                    current,
+                    files_len,
+                    format!("Processing: {}", rel_path.display()),
+                );
             }
 
             pb_clone.inc(1);
@@ -223,8 +237,14 @@ pub async fn perform_backup_with_cancellation(
     monitor_running.store(false, Ordering::Relaxed);
     let _ = monitor_handle.join();
 
-     let snapshot_path = if !dry_run {
-        write_manifest(&*storage, &snapshot_manifest.lock().unwrap(), encryption_key, dry_run).await?
+    let snapshot_path = if !dry_run {
+        write_manifest(
+            &*storage,
+            &snapshot_manifest.lock().unwrap(),
+            encryption_key,
+            dry_run,
+        )
+        .await?
     } else {
         "[Dry-run] No snapshot written".to_string()
     };

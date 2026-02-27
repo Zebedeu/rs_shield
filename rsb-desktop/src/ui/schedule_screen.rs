@@ -1,17 +1,14 @@
+use crate::ui::operations_helpers::record_schedule_operation;
 use dioxus::prelude::*;
 use std::path::PathBuf;
-use crate::ui::operations_helpers::record_schedule_operation;
 
-use crate::ui::{
-    app::AppConfig,
-    i18n::get_texts,
-};
+use crate::ui::{app::AppConfig, i18n::get_texts};
 
 #[component]
 pub fn ScheduleScreen() -> Element {
     let app_config = use_context::<AppConfig>();
     let texts = get_texts(app_config.language());
-    
+
     let mut config_path = use_signal(PathBuf::new);
     let mut format = use_signal(|| "cron".to_string());
     let mut output_command = use_signal(String::new);
@@ -30,7 +27,7 @@ pub fn ScheduleScreen() -> Element {
         let exe = std::env::current_exe()
             .map(|p| p.parent().unwrap().join("rsb-cli"))
             .unwrap_or_else(|_| PathBuf::from("rsb-cli"));
-            
+
         let key_part = if !key().is_empty() {
             format!(" --key \"{}\"", key())
         } else {
@@ -38,9 +35,19 @@ pub fn ScheduleScreen() -> Element {
         };
 
         if format() == "cron" {
-            output_command.set(format!("0 3 * * * {} backup {}{}", exe.display(), abs_config.display(), key_part));
+            output_command.set(format!(
+                "0 3 * * * {} backup {}{}",
+                exe.display(),
+                abs_config.display(),
+                key_part
+            ));
         } else {
-            output_command.set(format!("[Service]\nType=oneshot\nExecStart={} backup {}{}", exe.display(), abs_config.display(), key_part));
+            output_command.set(format!(
+                "[Service]\nType=oneshot\nExecStart={} backup {}{}",
+                exe.display(),
+                abs_config.display(),
+                key_part
+            ));
         }
     };
 
@@ -62,7 +69,9 @@ pub fn ScheduleScreen() -> Element {
                 }
                 Err(e) => {
                     status_message.set(format!("❌ Erro ao agendar: {}", e));
-                    record_schedule_operation(false, Some(e.to_string()), None).await.ok();
+                    record_schedule_operation(false, Some(e.to_string()), None)
+                        .await
+                        .ok();
                 }
             }
             is_loading.set(false);
@@ -76,35 +85,35 @@ pub fn ScheduleScreen() -> Element {
             div { class: "form-group",
                 label { class: "label-text", "{texts.config_file_label}" }
                 div { class: "flex gap-3",
-                    input { 
-                        class: "input-field", 
-                        r#type: "text", 
+                    input {
+                        class: "input-field",
+                        r#type: "text",
                         placeholder: "{texts.select_config_file_hint}",
-                        value: "{config_path.read().to_string_lossy()}", 
+                        value: "{config_path.read().to_string_lossy()}",
                         oninput: move |evt| config_path.set(PathBuf::from(evt.value())),
                         readonly: true
                     }
-                    button { 
-                        class: "btn-icon", 
-                        onclick: move |_| { 
-                            spawn(async move { 
-                                if let Some(h) = rfd::AsyncFileDialog::new().pick_file().await { 
-                                    config_path.set(h.path().to_path_buf()); 
+                    button {
+                        class: "btn-icon",
+                        onclick: move |_| {
+                            spawn(async move {
+                                if let Some(h) = rfd::AsyncFileDialog::new().pick_file().await {
+                                    config_path.set(h.path().to_path_buf());
                                     status_message.set(String::new());
-                                } 
-                            }); 
+                                }
+                            });
                         },
                         disabled: is_loading(),
-                        "📂" 
+                        "📂"
                     }
                 }
             }
 
             div { class: "form-group",
                 label { class: "label-text", "{texts.key_label_opt}" }
-                input { 
-                    class: "input-field", 
-                    r#type: "password", 
+                input {
+                    class: "input-field",
+                    r#type: "password",
                     placeholder: "{texts.key_label_opt}",
                     value: "{key}",
                     oninput: move |evt| key.set(evt.value()),
@@ -123,18 +132,18 @@ pub fn ScheduleScreen() -> Element {
                     option { value: "cron", "⏰ Cron (Linux/macOS)" }
                     option { value: "systemd", "🐧 Systemd Service (Linux)" }
                 }
-                p { class: "hint", if format() == "cron" { 
+                p { class: "hint", if format() == "cron" {
                     "Execute este comando no seu crontab para agendar o backup"
-                } else { 
+                } else {
                     "Copie este conteúdo para um ficheiro .service"
                 }}
             }
 
             if !status_message().is_empty() {
-                div { 
+                div {
                     class: "alert",
                     class: if status_message().starts_with("✅") { "alert-success" } else { "alert-error" },
-                    "{status_message}" 
+                    "{status_message}"
                 }
             }
 
@@ -149,20 +158,20 @@ pub fn ScheduleScreen() -> Element {
                     class: "btn-secondary flex-1",
                     onclick: handle_execute_schedule,
                     disabled: is_loading() || config_path().as_os_str().is_empty(),
-                    if is_loading() { 
-                        "⏳ Agendando..." 
-                    } else { 
-                        "⏰ Agendar Agora" 
+                    if is_loading() {
+                        "⏳ Agendando..."
+                    } else {
+                        "⏰ Agendar Agora"
                     }
                 }
             }
 
             div { class: "form-group",
                 label { class: "label-text", "📝 Comandos Agendados" }
-                textarea { 
-                    class: "textarea-field", 
-                    readonly: true, 
-                    value: "{output_command}", 
+                textarea {
+                    class: "textarea-field",
+                    readonly: true,
+                    value: "{output_command}",
                     style: "height: 120px; font-family: monospace; font-size: 0.85rem;"
                 }
             }
@@ -179,8 +188,8 @@ pub fn ScheduleScreen() -> Element {
                     p { class: "text-xs mb-2", "3. Execute: sudo systemctl enable rsb-backup.timer" }
                     p { class: "text-xs", "4. Inicie com: sudo systemctl start rsb-backup.timer" }
                 }
-                p { class: "text-xs mt-3 text-slate-600 dark:text-slate-400", 
-                    "ℹ️ {texts.schedule_hint}" 
+                p { class: "text-xs mt-3 text-slate-600 dark:text-slate-400",
+                    "ℹ️ {texts.schedule_hint}"
                 }
             }
         }

@@ -1,14 +1,10 @@
+use chrono::Local;
 use clap::{Parser, Subcommand};
+use rsb_core::utils::ensure_directory_exists;
+use rsb_core::{config, core};
 use std::fs;
 use std::path::PathBuf;
-use chrono::Local;
 use tracing::{info, warn, Level};
-use tracing_subscriber;
-use rsb_core::{config, core};
-use rsb_core::utils::ensure_directory_exists;
-use keyring::Entry;
-use rpassword;
-use atty;
 
 #[derive(Parser)]
 #[command(name = "rsb", version = "0.1.0", about = "Rust Shield Backup")]
@@ -138,25 +134,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::CreateProfile { name, source, dest } => {
-            // Validar que source existe
             if !source.exists() {
                 return Err(format!("Source path does not exist: {}", source.display()).into());
             }
             if !std::path::Path::new(&dest).exists() {
-                warn!("Destination path does not exist, creating: {}", dest.display());
-                ensure_directory_exists(dest.to_str().ok_or("Invalid path characters in destination")?)?;
+                warn!(
+                    "Destination path does not exist, creating: {}",
+                    dest.display()
+                );
+                ensure_directory_exists(
+                    dest.to_str()
+                        .ok_or("Invalid path characters in destination")?,
+                )?;
             }
-            
+
             config::create_profile(&name, &source, &dest)?;
             let config_file = format!("{}.toml", name);
             info!("✅ Profile '{}' created: {}", name, config_file);
             info!("📋 Next step, execute backup:");
             info!("   rsb backup {}", config_file);
         }
-        Commands::Backup { config, mode, key, dry_run, no_resume, report, healthcheck_url } => {
-            // Validar que config file existe
+        Commands::Backup {
+            config,
+            mode,
+            key,
+            dry_run,
+            no_resume,
+            report,
+            healthcheck_url,
+        } => {
             if !config.exists() {
-                eprintln!("❌ Error: Configuration file not found: {}", config.display());
+                eprintln!(
+                    "❌ Error: Configuration file not found: {}",
+                    config.display()
+                );
                 eprintln!();
                 eprintln!("📋 Create a new profile first:");
                 eprintln!("   rsb create-profile mybackup /path/to/source /path/to/destination");
@@ -171,8 +182,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             send_healthcheck(&healthcheck_url, "/start").await;
 
             let mut cfg = config::load_config(&config)?;
-            let profile_name = config.file_stem().and_then(|s| s.to_str()).unwrap_or("default");
-            
+            let profile_name = config
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("default");
+
             // Ask user: S3 or Local Storage?
             println!("\n💾 Backup Storage Type");
             println!("   1. S3 or S3-compatible (AWS, MinIO, Wasabi, etc.)");
@@ -180,11 +194,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("\nChoose storage type (1 or 2): ");
             use std::io::Write;
             std::io::stdout().flush()?;
-            
+
             let mut response = String::new();
             std::io::stdin().read_line(&mut response)?;
             let use_s3 = response.trim() == "1";
-            
+
             if use_s3 {
                 // Always prompt for S3 configuration when user chooses S3
                 // This allows updating existing configs or setting up new ones
@@ -202,10 +216,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cfg.s3_endpoint = None;
                 println!("✅ Using local storage. Starting backup...\n");
             }
-            
+
             let resume = !no_resume;
 
-            let mut report_data = match core::perform_backup(&cfg, &mode, key.as_deref(), dry_run, resume, None).await {
+            let mut report_data = match core::perform_backup(
+                &cfg,
+                &mode,
+                key.as_deref(),
+                dry_run,
+                resume,
+                None,
+            )
+            .await
+            {
                 Ok(data) => data,
                 Err(e) => {
                     send_healthcheck(&healthcheck_url, "/fail").await;
@@ -218,47 +241,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if report {
                 report_data.profile_path = config.to_string_lossy().to_string();
                 let html = rsb_core::report::generate_html(&report_data);
-                let filename = PathBuf::from(format!("rsb-report-backup-{}.html", Local::now().format("%Y%m%d-%H%M%S")));
+                let filename = PathBuf::from(format!(
+                    "rsb-report-backup-{}.html",
+                    Local::now().format("%Y%m%d-%H%M%S")
+                ));
                 fs::write(&filename, html)?;
                 info!("Report generated at: {}", filename.display());
             }
         }
-        Commands::Restore { config, snapshot, target, key, force, report } => {
-            let mut cfg = config::load_config(&config)?;
-            let profile_name = config.file_stem().and_then(|s| s.to_str()).unwrap_or("default");
+        Commands::Restore {
+            config,
+            snapshot,
+            target,
+            key,
+            force,
+            report,
+        } => {
+            let cfg = config::load_config(&config)?;
+            let profile_name = config
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("default");
 
-            let mut report_data = core::perform_restore(&cfg, snapshot.as_deref(), target, key.as_deref(), force, None).await?;
+            let mut report_data = core::perform_restore(
+                &cfg,
+                snapshot.as_deref(),
+                target,
+                key.as_deref(),
+                force,
+                None,
+            )
+            .await?;
             info!("Restore completed.");
 
             if report {
                 report_data.profile_path = config.to_string_lossy().to_string();
                 let html = rsb_core::report::generate_html(&report_data);
-                let filename = PathBuf::from(format!("rsb-report-restore-{}.html", Local::now().format("%Y%m%d-%H%M%S")));
+                let filename = PathBuf::from(format!(
+                    "rsb-report-restore-{}.html",
+                    Local::now().format("%Y%m%d-%H%M%S")
+                ));
                 fs::write(&filename, html)?;
                 info!("Report generated at: {}", filename.display());
             }
         }
-        Commands::Verify { config, snapshot, quiet, fast, report, key } => {
+        Commands::Verify {
+            config,
+            snapshot,
+            quiet,
+            fast,
+            report,
+            key,
+        } => {
             let mut cfg = config::load_config(&config)?;
 
             if let Some(k) = key {
                 cfg.encryption_key = Some(k);
             }
 
-            let mut report_data = core::perform_verify(&cfg, snapshot.as_deref(), quiet, fast, None).await?;
+            let mut report_data =
+                core::perform_verify(&cfg, snapshot.as_deref(), quiet, fast, None).await?;
             info!("Verification completed.");
 
             if report {
                 report_data.profile_path = config.to_string_lossy().to_string();
                 let html = rsb_core::report::generate_html(&report_data);
-                let filename = PathBuf::from(format!("rsb-report-verify-{}.html", Local::now().format("%Y%m%d-%H%M%S")));
+                let filename = PathBuf::from(format!(
+                    "rsb-report-verify-{}.html",
+                    Local::now().format("%Y%m%d-%H%M%S")
+                ));
                 fs::write(&filename, html)?;
                 info!("Report generated at: {}", filename.display());
             }
         }
-        Commands::Prune { config, keep_last, healthcheck_url } => {
+        Commands::Prune {
+            config,
+            keep_last,
+            healthcheck_url,
+        } => {
             send_healthcheck(&healthcheck_url, "/start").await;
-            let mut cfg = config::load_config(&config)?;
+            let cfg = config::load_config(&config)?;
 
             if let Err(e) = core::perform_prune(&cfg, keep_last).await {
                 send_healthcheck(&healthcheck_url, "/fail").await;
@@ -277,15 +339,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if format == "cron" {
                 println!("# Add this line to your crontab (crontab -e):");
-                println!("0 3 * * * {} backup {} --key \"YOUR_PASSWORD\"", exe_str, config_str);
+                println!(
+                    "0 3 * * * {} backup {} --key \"YOUR_PASSWORD\"",
+                    exe_str, config_str
+                );
             } else if format == "systemd" {
                 println!("# Example rsb-backup.service:");
-                println!("[Service]\nType=oneshot\nExecStart={} backup {} --key \"YOUR_PASSWORD\"", exe_str, config_str);
+                println!(
+                    "[Service]\nType=oneshot\nExecStart={} backup {} --key \"YOUR_PASSWORD\"",
+                    exe_str, config_str
+                );
             } else {
                 println!("Unknown format. Use 'cron' or 'systemd'.");
             }
         }
-        Commands::Watch { config, sync_to, key, interval, healthcheck_url } => {
+        Commands::Watch {
+            config,
+            sync_to,
+            key,
+            interval,
+            healthcheck_url,
+        } => {
             let mut cfg = config::load_config(&config)?;
             cfg.encryption_key = Some(key);
 
@@ -314,7 +388,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("🔐 Encryption: ENABLED");
             println!("\nPress Ctrl+C to stop\n");
 
-            let mut last_count = 0;
+            let last_count = 0;
             let mut total_changes = 0;
             let mut backups_count = 0;
 
@@ -329,11 +403,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("✅ Sync: {} new/modified files synchronized.", copied_count);
 
                             // Perform automatic backup
-                            match core::perform_backup(&cfg, "incremental", Some(&cfg.encryption_key.as_ref().unwrap()), false, false, None).await {
+                            match core::perform_backup(
+                                &cfg,
+                                "incremental",
+                                Some(cfg.encryption_key.as_ref().unwrap()),
+                                false,
+                                false,
+                                None,
+                            )
+                            .await
+                            {
                                 Ok(report) => {
                                     backups_count += 1;
-                                    println!("💾 Backup #{}: {} files total, {} processed",
-                                        backups_count, report.total_files, report.files_processed);
+                                    println!(
+                                        "💾 Backup #{}: {} files total, {} processed",
+                                        backups_count, report.total_files, report.files_processed
+                                    );
                                 }
                                 Err(e) => {
                                     eprintln!("❌ Backup error: {}", e);
@@ -346,7 +431,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                println!("📊 Total: {} changes detected, {} backups created", total_changes, backups_count);
+                println!(
+                    "📊 Total: {} changes detected, {} backups created",
+                    total_changes, backups_count
+                );
                 println!("---");
             }
         }
@@ -365,17 +453,18 @@ async fn sync_changed_files(src: &PathBuf, dst: &PathBuf) -> Result<usize, Strin
     }
 
     let mut copied_count = 0;
-    for entry in WalkDir::new(src)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
         let src_path = entry.path();
         if src_path.is_file() {
             let relative_path = src_path.strip_prefix(src).map_err(|e| e.to_string())?;
             let dst_path = dst.join(relative_path);
 
             if let Some(parent) = dst_path.parent() {
-                ensure_directory_exists(parent.to_str().ok_or("Invalid path characters in destination")?)?;
+                ensure_directory_exists(
+                    parent
+                        .to_str()
+                        .ok_or("Invalid path characters in destination")?,
+                )?;
             }
 
             let should_copy = if !dst_path.exists() {
@@ -383,12 +472,12 @@ async fn sync_changed_files(src: &PathBuf, dst: &PathBuf) -> Result<usize, Strin
             } else {
                 let src_meta = fs::metadata(src_path).map_err(|e| e.to_string())?;
                 let dst_meta = fs::metadata(&dst_path).map_err(|e| e.to_string())?;
-                src_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH) > dst_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)
+                src_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)
+                    > dst_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)
             };
 
             if should_copy {
-                fs::copy(src_path, &dst_path)
-                    .map_err(|e| format!("Error copying file: {}", e))?;
+                fs::copy(src_path, &dst_path).map_err(|e| format!("Error copying file: {}", e))?;
                 copied_count += 1;
             }
         }
@@ -401,7 +490,12 @@ async fn send_healthcheck(url: &Option<String>, suffix: &str) {
     if let Some(base_url) = url {
         let target = format!("{}{}", base_url, suffix);
         let client = reqwest::Client::new();
-        if let Err(e) = client.get(&target).timeout(std::time::Duration::from_secs(10)).send().await {
+        if let Err(e) = client
+            .get(&target)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
             warn!("Failed to send healthcheck to {}: {}", target, e);
         }
     }

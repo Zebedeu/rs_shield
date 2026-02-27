@@ -1,13 +1,13 @@
 use lettre::transport::smtp::SmtpTransport;
 use lettre::{Message, Transport};
 use serde::{Deserialize, Serialize};
-use tracing::{info, error};
+use tracing::{error, info};
 
 /// Email configuration for notifications
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct EmailConfig {
-    pub smtp_server: String,    // e.g., "smtp.gmail.com"
+    pub smtp_server: String,     // e.g., "smtp.gmail.com"
     pub smtp_port: u16,          // e.g., 587
     pub sender_email: String,    // e.g., "noreply@rs-shield.local"
     pub sender_password: String, // Password or API key
@@ -29,7 +29,6 @@ impl EmailNotification {
     #[allow(dead_code)]
     pub fn sync_success(files_count: usize, timestamp: &str) -> Self {
         let body_text = format!(
-
             "Synchronization Complete\n\
              =====================================\n\
              Files synchronized: {}\n\
@@ -51,7 +50,7 @@ impl EmailNotification {
              </body></html>",
             files_count, timestamp
         );
-        
+
         Self {
             subject: format!("RS Shield: ✅ Synchronization of {} file(s)", files_count),
             body_html,
@@ -68,10 +67,10 @@ impl EmailNotification {
              Name: {}\n\
              Time: {}\n\n\
              RS Shield System\n\
-             https://github.com/zebedeu/rs_shield",           
+             https://github.com/zebedeu/rs_shield",
             backup_name, timestamp
         );
-        
+
         let body_html = format!(
             "<html><body style=\"font-family: Arial, sans-serif;\">\
              <h2 style=\"color: #3b82f6;\">💾 Backup Created Successfully</h2>\
@@ -85,7 +84,7 @@ impl EmailNotification {
              </body></html>",
             backup_name, timestamp
         );
-        
+
         Self {
             subject: format!("RS Shield: 💾 Backup '{}' Created", backup_name),
             body_html,
@@ -104,7 +103,7 @@ impl EmailNotification {
              RS Shield System",
             error_msg, timestamp
         );
-        
+
         let body_html = format!(
             "<html><body style=\"font-family: Arial, sans-serif;\">\
              <h2 style=\"color: #ef4444;\">❌ Error Detected</h2>\
@@ -118,7 +117,7 @@ impl EmailNotification {
              </body></html>",
             error_msg, timestamp
         );
-        
+
         Self {
             subject: "RS Shield: ❌ Error in operation".to_string(),
             body_html,
@@ -138,7 +137,7 @@ impl EmailNotification {
              RS Shield System",
             percent, timestamp
         );
-        
+
         let body_html = format!(
             "<html><body style=\"font-family: Arial, sans-serif;\">\
              <h2 style=\"color: #f59e0b;\">⚠️ Alert: Low Battery</h2>\
@@ -153,7 +152,7 @@ impl EmailNotification {
              </body></html>",
             percent, timestamp
         );
-        
+
         Self {
             subject: format!("RS Shield: ⚠️ Alert: Low Battery ({:.0}%)", percent),
             body_html,
@@ -175,8 +174,12 @@ pub async fn send_email_notification(
         .subject(&notification.subject)
         .multipart(
             lettre::message::MultiPart::alternative()
-                .singlepart(lettre::message::SinglePart::plain(notification.body_text.clone()))
-                .singlepart(lettre::message::SinglePart::html(notification.body_html.clone()))
+                .singlepart(lettre::message::SinglePart::plain(
+                    notification.body_text.clone(),
+                ))
+                .singlepart(lettre::message::SinglePart::html(
+                    notification.body_html.clone(),
+                )),
         )?;
 
     // Create SMTP transport
@@ -184,12 +187,10 @@ pub async fn send_email_notification(
         SmtpTransport::starttls_relay(&config.smtp_server)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
             .port(config.smtp_port)
-            .credentials(
-                lettre::transport::smtp::authentication::Credentials::new(
-                    config.sender_email.clone().into(),
-                    config.sender_password.clone().into(),
-                )
-            )
+            .credentials(lettre::transport::smtp::authentication::Credentials::new(
+                config.sender_email.clone(),
+                config.sender_password.clone(),
+            ))
             .build()
     } else {
         SmtpTransport::builder_dangerous(&config.smtp_server)
@@ -223,8 +224,12 @@ pub fn send_email_notification_blocking(
         .subject(&notification.subject)
         .multipart(
             lettre::message::MultiPart::alternative()
-                .singlepart(lettre::message::SinglePart::plain(notification.body_text.clone()))
-                .singlepart(lettre::message::SinglePart::html(notification.body_html.clone()))
+                .singlepart(lettre::message::SinglePart::plain(
+                    notification.body_text.clone(),
+                ))
+                .singlepart(lettre::message::SinglePart::html(
+                    notification.body_html.clone(),
+                )),
         )?;
 
     // Create SMTP transport
@@ -232,12 +237,10 @@ pub fn send_email_notification_blocking(
         SmtpTransport::starttls_relay(&config.smtp_server)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
             .port(config.smtp_port)
-            .credentials(
-                lettre::transport::smtp::authentication::Credentials::new(
-                    config.sender_email.clone().into(),
-                    config.sender_password.clone().into(),
-                )
-            )
+            .credentials(lettre::transport::smtp::authentication::Credentials::new(
+                config.sender_email.clone(),
+                config.sender_password.clone(),
+            ))
             .build()
     } else {
         SmtpTransport::builder_dangerous(&config.smtp_server)
@@ -272,14 +275,18 @@ mod tests {
 
     #[test]
     fn test_create_backup_notification() {
-        let notif = EmailNotification::backup_created("backup-2026-02-07.tar.gz", "2026-02-07 14:30:00");
+        let notif =
+            EmailNotification::backup_created("backup-2026-02-07.tar.gz", "2026-02-07 14:30:00");
         assert!(notif.subject.contains("backup-2026-02-07.tar.gz"));
         assert!(notif.body_html.contains("💾"));
     }
 
     #[test]
     fn test_create_error_notification() {
-        let notif = EmailNotification::error("Permission denied when accessing file", "2026-02-07 14:30:00");
+        let notif = EmailNotification::error(
+            "Permission denied when accessing file",
+            "2026-02-07 14:30:00",
+        );
         assert!(notif.subject.contains("Error"));
         assert!(notif.body_html.contains("❌"));
     }

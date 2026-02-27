@@ -1,13 +1,12 @@
 /// Secure Credentials Manager
 /// Uses OS keyring/secrets to store master password
 /// And AES-256-GCM encryption for data at rest
-
 use super::encryption::{decrypt_credentials, encrypt_credentials, EncryptedCredentials};
 use super::SecureString;
+use crate::utils::ensure_directory_exists;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fmt;
-use crate::utils::ensure_directory_exists;
 
 const KEYRING_SERVICE: &str = "rsb-shield";
 const KEYRING_ACCOUNT: &str = "s3-master-password";
@@ -62,7 +61,9 @@ impl CredentialsManager {
 
         // Create directory if it doesn't exist
         if let Some(parent) = std::path::Path::new(file_path).parent() {
-            let parent_str = parent.to_str().ok_or("Invalid path characters in file path")?;
+            let parent_str = parent
+                .to_str()
+                .ok_or("Invalid path characters in file path")?;
             ensure_directory_exists(parent_str)?;
         }
 
@@ -90,12 +91,12 @@ impl CredentialsManager {
     /// Load and decrypt credentials from file
     pub fn load_encrypted(file_path: &str) -> Result<S3Credentials, String> {
         // Read file
-        let content = std::fs::read_to_string(file_path)
-            .map_err(|e| format!("Error reading file: {}", e))?;
+        let content =
+            std::fs::read_to_string(file_path).map_err(|e| format!("Error reading file: {}", e))?;
 
         // Deserialize encrypted data
-        let encrypted: EncryptedCredentials = serde_json::from_str(&content)
-            .map_err(|e| format!("Error deserializing: {}", e))?;
+        let encrypted: EncryptedCredentials =
+            serde_json::from_str(&content).map_err(|e| format!("Error deserializing: {}", e))?;
 
         // Get master password from keyring
         let master_password = Self::get_master_password_interactive()?;
@@ -233,11 +234,10 @@ impl CredentialsManager {
         #[cfg(feature = "cli")]
         {
             use rpassword::read_password;
-            
+
             println!("\n🔑 S3 Credentials not found. Please configure them.");
             println!("Get your credentials from: https://console.aws.amazon.com/iam\n");
 
-            // Get Access Key
             println!("Enter AWS Access Key ID:");
             let access_key = std::io::stdin()
                 .lines()
@@ -251,10 +251,9 @@ impl CredentialsManager {
                 return Err("Access key cannot be empty".to_string());
             }
 
-            // Get Secret Key
             println!("Enter AWS Secret Access Key (hidden for security):");
-            let secret_key = read_password()
-                .map_err(|e| format!("Error reading secret key: {}", e))?;
+            let secret_key =
+                read_password().map_err(|e| format!("Error reading secret key: {}", e))?;
 
             if secret_key.is_empty() {
                 return Err("Secret key cannot be empty".to_string());
@@ -266,7 +265,7 @@ impl CredentialsManager {
                 session_token: None,
             };
 
-            // Validate
+            // Validate credentials
             credentials.validate()?;
 
             // Ask if user wants to save them
@@ -300,36 +299,41 @@ impl CredentialsManager {
     }
 
     /// Create new master password
-    /// Automatically generate Master Password (for Desktop UI or CI/CD)
-    /// Uses user hash + timestamp to create a deterministic password
-    /// which is stored in keyring
+    ///
+    /// Automatically generates a deterministic master password for Desktop UI or CI/CD.
+    /// Uses username hash + timestamp to create a password that can be regenerated if needed.
+    /// The password is stored in the system keyring for secure access.
     pub fn generate_automatic_master_password() -> Result<String, String> {
         use std::time::{SystemTime, UNIX_EPOCH};
-        
-        // Get username
+
         let username = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "unknown".to_string());
-        
-        // Generate a deterministic hash based on username + approximate timestamp
-        // This same hash will be regenerated if necessary
+
+        // Generate deterministic hash based on username + timestamp
+        // This ensures the password can be regenerated consistently
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() / 86400; // Divide by seconds per day to have a more stable value
-        
+            .as_secs()
+            / 86400; // Divide by seconds per day to have a more stable value
+
         // Create password with mixed characters: uppercase, lowercase, number, special character
         let password = format!(
             "RsShield_{}_{}_{}_!",
             username.to_uppercase().chars().take(4).collect::<String>(),
             timestamp,
-            uuid::Uuid::new_v4().to_string().chars().take(8).collect::<String>()
+            uuid::Uuid::new_v4()
+                .to_string()
+                .chars()
+                .take(8)
+                .collect::<String>()
         );
-        
+
         // Save to keyring
         Self::save_master_password_to_keyring(&password)?;
         tracing::info!("🔐 Master Password automatically generated and saved to keyring");
-        
+
         Ok(password)
     }
 
@@ -351,7 +355,10 @@ impl CredentialsManager {
                 }
 
                 if password1.len() < 16 {
-                    println!("❌ Password too short ({} characters). Minimum 16.", password1.len());
+                    println!(
+                        "❌ Password too short ({} characters). Minimum 16.",
+                        password1.len()
+                    );
                     continue;
                 }
 
@@ -362,7 +369,9 @@ impl CredentialsManager {
                 let has_special = password1.chars().any(|c| !c.is_alphanumeric());
 
                 if !has_upper || !has_lower || !has_digit || !has_special {
-                    println!("❌ Weak password. Use: uppercase, lowercase, numbers, special characters");
+                    println!(
+                        "❌ Weak password. Use: uppercase, lowercase, numbers, special characters"
+                    );
                     continue;
                 }
 

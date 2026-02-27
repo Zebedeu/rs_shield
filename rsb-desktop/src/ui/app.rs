@@ -2,12 +2,24 @@ use dioxus::prelude::*;
 use dioxus_desktop::{use_window, LogicalSize};
 
 use crate::ui::{
-    backup_screen::BackupScreen, config_screen::ConfigScreen, i18n::{get_texts, Language, Theme},
-    restore_screen::RestoreScreen, shared::TabButton, verify_screen::VerifyScreen, schedule_screen::ScheduleScreen, prune_screen::PruneScreen,
-    create_profile_screen::CreateProfileScreen, realtime_sync_screen::RealtimeSyncScreen, integrations_screen::IntegrationScreen, profile_manager_screen::ProfileManagerScreen,
-    operations::OperationsManager,
-    metrics::{get_system_metrics, format_percentage_color, format_percentage_bg, format_bytes_gb, SystemMetrics},
     app_preferences::AppPreferences,
+    backup_screen::BackupScreen,
+    config_screen::ConfigScreen,
+    create_profile_screen::CreateProfileScreen,
+    i18n::{get_texts, Language, Theme},
+    integrations_screen::IntegrationScreen,
+    metrics::{
+        format_bytes_gb, format_percentage_bg, format_percentage_color, get_system_metrics,
+        SystemMetrics,
+    },
+    operations::OperationsManager,
+    profile_manager_screen::ProfileManagerScreen,
+    prune_screen::PruneScreen,
+    realtime_sync_screen::RealtimeSyncScreen,
+    restore_screen::RestoreScreen,
+    schedule_screen::ScheduleScreen,
+    shared::TabButton,
+    verify_screen::VerifyScreen,
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -42,19 +54,45 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    pub fn exclude_patterns(&self) -> String { (self.exclude_patterns)() }
-    pub fn s3_bucket(&self) -> String { (self.s3_bucket)() }
-    pub fn s3_region(&self) -> String { (self.s3_region)() }
-    pub fn s3_endpoint(&self) -> String { (self.s3_endpoint)() }
-    pub fn s3_access_key(&self) -> String { (self.s3_access_key)() }
-    pub fn s3_secret_key(&self) -> String { (self.s3_secret_key)() }
-    pub fn backup_mode(&self) -> String { (self.backup_mode)() }
-    pub fn language(&self) -> Language { (self.language)() }
-    pub fn theme(&self) -> Theme { (self.theme)() }
-    pub fn encrypt_patterns(&self) -> String { (self.encrypt_patterns)() }
-    pub fn pause_on_low_battery(&self) -> String { (self.pause_on_low_battery)() }
-    pub fn pause_on_high_cpu(&self) -> String { (self.pause_on_high_cpu)() }
-    pub fn compression_level(&self) -> String { (self.compression_level)() }
+    pub fn exclude_patterns(&self) -> String {
+        (self.exclude_patterns)()
+    }
+    pub fn s3_bucket(&self) -> String {
+        (self.s3_bucket)()
+    }
+    pub fn s3_region(&self) -> String {
+        (self.s3_region)()
+    }
+    pub fn s3_endpoint(&self) -> String {
+        (self.s3_endpoint)()
+    }
+    pub fn s3_access_key(&self) -> String {
+        (self.s3_access_key)()
+    }
+    pub fn s3_secret_key(&self) -> String {
+        (self.s3_secret_key)()
+    }
+    pub fn backup_mode(&self) -> String {
+        (self.backup_mode)()
+    }
+    pub fn language(&self) -> Language {
+        (self.language)()
+    }
+    pub fn theme(&self) -> Theme {
+        (self.theme)()
+    }
+    pub fn encrypt_patterns(&self) -> String {
+        (self.encrypt_patterns)()
+    }
+    pub fn pause_on_low_battery(&self) -> String {
+        (self.pause_on_low_battery)()
+    }
+    pub fn pause_on_high_cpu(&self) -> String {
+        (self.pause_on_high_cpu)()
+    }
+    pub fn compression_level(&self) -> String {
+        (self.compression_level)()
+    }
 }
 
 pub fn App() -> Element {
@@ -66,7 +104,6 @@ pub fn App() -> Element {
     let mut prune_count = use_signal(|| 0usize);
     let mut total_operations = use_signal(|| 0usize);
     let mut last_operation_time = use_signal(|| String::from("Nunca"));
-    
 
     let mut system_metrics = use_signal(|| SystemMetrics {
         cpu_usage: 0.0,
@@ -84,7 +121,7 @@ pub fn App() -> Element {
             let _ = crate::ui::operations::ensure_history_directory();
             let manager = OperationsManager::new();
             let history = manager.get_history();
-            
+
             backup_count.set(history.get_operations_count("Backup"));
             restore_count.set(history.get_operations_count("Restore"));
             verify_count.set(history.get_operations_count("Verify"));
@@ -103,10 +140,10 @@ pub fn App() -> Element {
             }
         });
     });
-    
+
     // Carregar preferências salvas
     let prefs = AppPreferences::load();
-    
+
     let app_config = AppConfig {
         exclude_patterns: use_signal(|| prefs.exclude_patterns.clone()),
         s3_bucket: use_signal(String::new),
@@ -136,7 +173,7 @@ pub fn App() -> Element {
             pause_on_high_cpu: app_config.pause_on_high_cpu(),
             compression_level: app_config.compression_level(),
         };
-        
+
         let _ = prefs.save();
     });
 
@@ -145,7 +182,7 @@ pub fn App() -> Element {
     let window = use_window();
     let mut started = use_signal(|| false);
 
-    use_effect(move || { 
+    use_effect(move || {
         if !started() {
             window.set_inner_size(LogicalSize::new(1200, 700));
             started.set(true);
@@ -154,7 +191,7 @@ pub fn App() -> Element {
 
     let theme_class = use_memo(move || match app_config.theme() {
         Theme::Dark => "dark",
-        Theme::Light => "", 
+        Theme::Light => "",
         Theme::System => "", // Handled by media query
     });
 
@@ -198,21 +235,21 @@ pub fn App() -> Element {
                         }
                     }
                 }
-                
-                aside { class: "w-80 bg-white dark:bg-slate-800 border-l border-slate-200 dark:border-slate-700 flex flex-col overflow-hidden shadow-lg", 
-                    div { class: "p-6 border-b border-slate-200 dark:border-slate-700", 
+
+                aside { class: "w-80 bg-white dark:bg-slate-800 border-l border-slate-200 dark:border-slate-700 flex flex-col overflow-hidden shadow-lg",
+                    div { class: "p-6 border-b border-slate-200 dark:border-slate-700",
                         h3 { class: "text-lg font-bold text-slate-900 dark:text-white mb-1", "{texts.reports_title}" }
                         p { class: "text-sm text-slate-500 dark:text-slate-400", "{texts.real_time_label}" }
                     }
-                    
-                    div { class: "flex-1 overflow-y-auto p-6 space-y-4", 
+
+                    div { class: "flex-1 overflow-y-auto p-6 space-y-4",
                         div { class: "bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-800 dark:to-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg p-4 shadow-sm",
                             h4 { class: "font-bold text-slate-900 dark:text-white mb-3 text-sm", "{texts.system_title}" }
-                            
+
                             div { class: "flex items-center gap-2 mb-2",
                                 span { class: "text-xs font-medium text-slate-600 dark:text-slate-300 w-8", "CPU" }
                                 div { class: "flex-1 bg-slate-200 dark:bg-slate-600 rounded-full h-1.5 overflow-hidden",
-                                    div { 
+                                    div {
                                         class: "h-full bg-gradient-to-r from-blue-400 to-blue-600 dark:from-blue-500 dark:to-blue-700",
                                         style: "width: {system_metrics().cpu_usage}%"
                                     }
@@ -224,7 +261,7 @@ pub fn App() -> Element {
                                 title: "{texts.used_label}: {format_bytes_gb(system_metrics().memory_used_gb)} / {texts.total_label}: {format_bytes_gb(system_metrics().memory_total_gb)}",
                                 span { class: "text-xs font-medium text-slate-600 dark:text-slate-300 w-8", "RAM" }
                                 div { class: "flex-1 {format_percentage_bg(system_metrics().memory_usage)} rounded-full h-1.5 overflow-hidden",
-                                    div { 
+                                    div {
                                         class: "h-full bg-gradient-to-r from-purple-400 to-purple-600 dark:from-purple-500 dark:to-purple-700",
                                         style: "width: {system_metrics().memory_usage}%"
                                     }
@@ -236,14 +273,14 @@ pub fn App() -> Element {
                                 title: "{texts.used_label}: {format_bytes_gb(system_metrics().disk_used_gb)} / {texts.total_label}: {format_bytes_gb(system_metrics().disk_total_gb)}",
                                 span { class: "text-xs font-medium text-slate-600 dark:text-slate-300 w-8", "DSK" }
                                 div { class: "flex-1 {format_percentage_bg(system_metrics().disk_usage)} rounded-full h-1.5 overflow-hidden",
-                                    div { 
+                                    div {
                                         class: "h-full bg-gradient-to-r from-amber-400 to-amber-600 dark:from-amber-500 dark:to-amber-700",
                                         style: "width: {system_metrics().disk_usage}%"
                                     }
                                 }
                                 span { class: "text-xs font-bold {format_percentage_color(system_metrics().disk_usage)} text-right whitespace-nowrap", "{system_metrics().disk_usage:.0}% ({system_metrics().disk_used_gb:.1}/{system_metrics().disk_total_gb:.1} GB)" }
                             }
-                        } 
+                        }
                         div { class: "bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-900/20 dark:to-emerald-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4 shadow-sm",
                             h4 { class: "font-bold text-green-900 dark:text-green-300 mb-3 text-sm", "{texts.activity_title}" }
                             div { class: "space-y-2",
@@ -279,7 +316,7 @@ pub fn App() -> Element {
                                 }
                             }
                         }
-                        
+
                         div { class: "bg-gradient-to-br from-amber-50 to-orange-50 dark:from-amber-900/20 dark:to-orange-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4 shadow-sm",
                             h4 { class: "font-bold text-amber-900 dark:text-amber-300 mb-2 text-sm", "{texts.alerts_title}" }
                             div { class: "flex items-start space-x-2",

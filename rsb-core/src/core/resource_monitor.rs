@@ -4,13 +4,17 @@ use std::thread;
 use std::time::Duration;
 
 use battery::units::ratio::percent;
-use sysinfo::{CpuExt, RefreshKind, System, SystemExt};
+use sysinfo::{RefreshKind, System};
 use tracing::{info, warn};
 
 pub fn spawn_resource_monitor(
     battery_threshold: Option<u8>,
     cpu_threshold: Option<u8>,
-) -> (Arc<AtomicBool>, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+) -> (
+    Arc<AtomicBool>,
+    Arc<AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
     let should_pause = Arc::new(AtomicBool::new(false));
     let running = Arc::new(AtomicBool::new(true));
 
@@ -18,10 +22,10 @@ pub fn spawn_resource_monitor(
     let running_clone = running.clone();
 
     let handle = thread::spawn(move || {
-        let mut system = System::new_with_specifics(RefreshKind::new().with_cpu(sysinfo::CpuRefreshKind::everything()));
+        let mut system = System::new_with_specifics(RefreshKind::everything());
         let battery_manager = battery::Manager::new().ok();
 
-        system.refresh_cpu();
+        system.refresh_cpu_all();
         thread::sleep(Duration::from_millis(500));
 
         while running_clone.load(Ordering::Relaxed) {
@@ -48,8 +52,8 @@ pub fn spawn_resource_monitor(
             // CPU check
             if !pause {
                 if let Some(threshold) = cpu_threshold {
-                    system.refresh_cpu();
-                    let usage = system.global_cpu_info().cpu_usage();
+                    system.refresh_cpu_all();
+                    let usage = system.global_cpu_usage();
                     if usage > threshold as f32 {
                         pause = true;
                         reason = format!("High CPU usage ({:.1}%)", usage);

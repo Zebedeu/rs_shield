@@ -1,21 +1,21 @@
+use crate::utils::ensure_directory_exists;
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tracing::{info, error};
-use chrono::Local;
-use crate::utils::ensure_directory_exists;
+use tracing::{error, info};
 
 /// Notification event structure for logging
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct NotificationLogEntry {
-    pub id: String,                  // UUID for tracking
-    pub timestamp: String,           // ISO 8601 format
-    pub event_type: String,          // "sync", "backup", "error", "battery", "webhook"
+    pub id: String,         // UUID for tracking
+    pub timestamp: String,  // ISO 8601 format
+    pub event_type: String, // "sync", "backup", "error", "battery", "webhook"
     pub title: String,
     pub message: String,
-    pub status: String,              // "success", "error", "warning", "info"
+    pub status: String,                // "success", "error", "warning", "info"
     pub extra_data: serde_json::Value, // Additional data
 }
 
@@ -29,11 +29,15 @@ impl NotificationLogger {
     /// Create a new logger with a specified directory
     pub fn new(log_dir: impl AsRef<Path>) -> std::io::Result<Self> {
         let log_dir = log_dir.as_ref().to_path_buf();
-        
+
         // Create directory if it doesn't exist
-        let log_dir_str = log_dir.to_str().ok_or(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid path characters"))?;
-        ensure_directory_exists(log_dir_str).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        
+        let log_dir_str = log_dir.to_str().ok_or(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Invalid path characters",
+        ))?;
+        ensure_directory_exists(log_dir_str)
+            .map_err(std::io::Error::other)?;
+
         Ok(Self { log_dir })
     }
 
@@ -110,7 +114,7 @@ impl NotificationLogger {
             let entry = entry?;
             let path = entry.path();
 
-            if path.extension().map_or(false, |ext| ext == "jsonl") {
+            if path.extension().is_some_and(|ext| ext == "jsonl") {
                 match fs::read_to_string(&path) {
                     Ok(content) => {
                         for line in content.lines() {
@@ -141,10 +145,7 @@ impl NotificationLogger {
     /// Filter logs by status
     pub fn filter_by_status(&self, status: &str) -> std::io::Result<Vec<NotificationLogEntry>> {
         let all = self.read_all_logs()?;
-        Ok(all
-            .into_iter()
-            .filter(|e| e.status == status)
-            .collect())
+        Ok(all.into_iter().filter(|e| e.status == status).collect())
     }
 
     /// Generate summary report
@@ -156,12 +157,12 @@ impl NotificationLogger {
         let errors = all.iter().filter(|e| e.status == "error").count();
         let warnings = all.iter().filter(|e| e.status == "warning").count();
 
-        let by_type: std::collections::HashMap<String, usize> = all
-            .iter()
-            .fold(std::collections::HashMap::new(), |mut map, e| {
-                *map.entry(e.event_type.clone()).or_insert(0) += 1;
-                map
-            });
+        let by_type: std::collections::HashMap<String, usize> =
+            all.iter()
+                .fold(std::collections::HashMap::new(), |mut map, e| {
+                    *map.entry(e.event_type.clone()).or_insert(0) += 1;
+                    map
+                });
 
         Ok(serde_json::json!({
             "total_notifications": total,
@@ -186,17 +187,15 @@ impl NotificationLogger {
             let entry = entry?;
             let path = entry.path();
 
-            if path.extension().map_or(false, |ext| ext == "jsonl") {
+            if path.extension().is_some_and(|ext| ext == "jsonl") {
                 if let Ok(metadata) = path.metadata() {
                     if let Ok(modified) = metadata.modified() {
-                        let age = now
-                            .timestamp()
-                            .saturating_sub(
-                                modified
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as i64
-                            );
+                        let age = now.timestamp().saturating_sub(
+                            modified
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64,
+                        );
 
                         if age > (days as i64 * 86400) {
                             fs::remove_file(&path)?;

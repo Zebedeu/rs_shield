@@ -1,11 +1,16 @@
 use dioxus::prelude::*;
 
 #[component]
-pub fn TabButton(label: String, icon: String, active: bool, onclick: EventHandler<MouseEvent>) -> Element { 
-    let active_class = if active { 
-        "nav-item active" 
-    } else { 
-        "nav-item" 
+pub fn TabButton(
+    label: String,
+    icon: String,
+    active: bool,
+    onclick: EventHandler<MouseEvent>,
+) -> Element {
+    let active_class = if active {
+        "nav-item active"
+    } else {
+        "nav-item"
     };
     rsx! {
         button {
@@ -18,13 +23,13 @@ pub fn TabButton(label: String, icon: String, active: bool, onclick: EventHandle
 }
 
 #[component]
-pub fn ProgressBar(progress: f64) -> Element { 
+pub fn ProgressBar(progress: f64) -> Element {
     let width_percent = (progress * 100.0).min(100.0).max(0.0);
     rsx! {
         div { class: "progress-container",
-            div { 
-                class: "progress-bar", 
-                style: "width: {width_percent}%;" 
+            div {
+                class: "progress-bar",
+                style: "width: {width_percent}%;"
             }
         }
     }

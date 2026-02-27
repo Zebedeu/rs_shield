@@ -1,11 +1,11 @@
-use super::manifest::{find_latest_snapshot};
-use super::types::{ChunkMetadata, FileMetadata, ProgressCallback};
 use super::cancellation::CancellationToken;
+use super::manifest::find_latest_snapshot;
+use super::types::{ChunkMetadata, FileMetadata, ProgressCallback};
 use crate::config::Config;
 use crate::crypto::decrypt_data;
 use crate::report::ReportData;
 use crate::storage::Storage;
-use crate::utils::{mmap_file, ensure_directory_exists_async};
+use crate::utils::{ensure_directory_exists_async, mmap_file};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::io;
@@ -24,7 +24,16 @@ pub async fn perform_restore(
     force: bool,
     on_progress: Option<ProgressCallback>,
 ) -> Result<ReportData, Box<dyn std::error::Error>> {
-    perform_restore_with_cancellation(config, snapshot_id, target_path, encryption_key, force, on_progress, None).await
+    perform_restore_with_cancellation(
+        config,
+        snapshot_id,
+        target_path,
+        encryption_key,
+        force,
+        on_progress,
+        None,
+    )
+    .await
 }
 
 pub async fn perform_restore_with_cancellation(
@@ -39,14 +48,14 @@ pub async fn perform_restore_with_cancellation(
     let start_time = Instant::now();
     let storage = super::storage_backend::get_storage(config).await;
 
-    let (manifest_path, manifest_content) = find_latest_snapshot(&*storage, snapshot_id, encryption_key).await?;
+    let (manifest_path, manifest_content) =
+        find_latest_snapshot(&*storage, snapshot_id, encryption_key).await?;
     info!("Restoring snapshot: {}", manifest_path);
 
     let manifest: HashMap<PathBuf, FileMetadata> = toml::from_str(&manifest_content)?;
 
-    let restore_root = target_path.unwrap_or_else(|| {
-        Path::new(&config.source_path).join("_restored")
-    });
+    let restore_root =
+        target_path.unwrap_or_else(|| Path::new(&config.source_path).join("_restored"));
 
     info!("Restoring to: {}", restore_root.display());
 
@@ -74,7 +83,11 @@ pub async fn perform_restore_with_cancellation(
 
         pb.set_message(format!("Restoring: {}", rel_path.display()));
         if let Some(cb) = &on_progress {
-            cb(current_files, total_files, format!("Restoring: {}", rel_path.display()));
+            cb(
+                current_files,
+                total_files,
+                format!("Restoring: {}", rel_path.display()),
+            );
         }
 
         let restore_file = restore_root.join(&rel_path);
@@ -84,10 +97,16 @@ pub async fn perform_restore_with_cancellation(
                 &*storage,
                 chunks,
                 &restore_file,
-                if metadata.encrypted { encryption_key } else { None },
+                if metadata.encrypted {
+                    encryption_key
+                } else {
+                    None
+                },
                 &metadata.hash,
                 metadata.compressed,
-            ).await {
+            )
+            .await
+            {
                 let msg = format!("Failed to restore multipart {}: {}", rel_path.display(), e);
                 error!("{}", msg);
                 errors.push(msg);
@@ -109,7 +128,10 @@ pub async fn perform_restore_with_cancellation(
             }
 
             if restore_file.exists() && !force {
-                let msg = format!("File already exists (use --force): {}", restore_file.display());
+                let msg = format!(
+                    "File already exists (use --force): {}",
+                    restore_file.display()
+                );
                 warn!("{}", msg);
                 errors.push(msg);
                 continue;
@@ -119,10 +141,16 @@ pub async fn perform_restore_with_cancellation(
                 &*storage,
                 &data_path,
                 &restore_file,
-                if metadata.encrypted { encryption_key } else { None },
+                if metadata.encrypted {
+                    encryption_key
+                } else {
+                    None
+                },
                 &metadata.hash,
                 metadata.compressed,
-            ).await {
+            )
+            .await
+            {
                 let msg = format!("Failed to restore {}: {}", rel_path.display(), e);
                 error!("{}", msg);
                 errors.push(msg);
@@ -137,7 +165,12 @@ pub async fn perform_restore_with_cancellation(
 
     pb.finish_with_message("Restore completed");
 
-    let status = if errors.is_empty() { "Success" } else { "Failure with errors" }.to_string();
+    let status = if errors.is_empty() {
+        "Success"
+    } else {
+        "Failure with errors"
+    }
+    .to_string();
 
     let report_data = ReportData {
         operation: "Restore".to_string(),
@@ -165,10 +198,13 @@ async fn restore_single_file(
     compressed: bool,
 ) -> io::Result<()> {
     if let Some(parent) = restore_path.parent() {
-        let parent_str = parent.to_str().ok_or(io::Error::new(io::ErrorKind::InvalidInput, "Invalid path characters"))?;
+        let parent_str = parent.to_str().ok_or(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid path characters",
+        ))?;
         ensure_directory_exists_async(parent_str)
             .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
     }
 
     let data = storage.read(backup_path).await?;
@@ -205,10 +241,13 @@ async fn restore_multipart_file(
     compressed: bool,
 ) -> io::Result<()> {
     if let Some(parent) = restore_path.parent() {
-        let parent_str = parent.to_str().ok_or(io::Error::new(io::ErrorKind::InvalidInput, "Invalid path characters"))?;
+        let parent_str = parent.to_str().ok_or(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid path characters",
+        ))?;
         ensure_directory_exists_async(parent_str)
             .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
     }
 
     let mut file = File::create(restore_path).await?;
@@ -243,7 +282,10 @@ async fn restore_multipart_file(
     let mapped = mmap_file(restore_path)?;
     let computed = crate::crypto::hash_file_content(&mapped)?;
     if computed != expected_full_hash {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Full file hash mismatch after restore"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Full file hash mismatch after restore",
+        ));
     }
 
     Ok(())
