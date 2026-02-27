@@ -16,7 +16,7 @@ jobs:
     name: Check MSRV (Minimum Supported Rust Version)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       
       # Test with the MSRV (defined in Cargo.toml)
       - uses: dtolnay/rust-toolchain@1.70
