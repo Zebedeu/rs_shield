@@ -239,13 +239,7 @@ pub async fn perform_backup_with_cancellation(
 
     let snapshot_path = if !dry_run {
         let snapshot_data = snapshot_manifest.lock().unwrap().clone();
-        write_manifest(
-            &*storage,
-            &snapshot_data,
-            encryption_key,
-            dry_run,
-        )
-        .await?
+        write_manifest(&*storage, &snapshot_data, encryption_key, dry_run).await?
     } else {
         "[Dry-run] No snapshot written".to_string()
     };
