@@ -5,46 +5,47 @@ license = "MIT OR Apache-2.0"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.0", features = ["derive"] }
-tokio = { version = "1", features = ["full"] }
-chrono = { version = "0.4", features = ["serde"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-toml = "1.0"
-walkdir = "2"
-zstd = "0.13"
-ring = "0.17"
-tracing = "0.1"
-rayon = "1.10"
-memmap2 = "0.9"
-blake3 = "1.5"
-regex = "1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ignore = "0.4"
-indicatif = "0.18"
-console = "0.16"
-aws-config = "1.1"
-aws-sdk-s3 = "1.15"
-async-trait = "0.1"
-glob = "0.3"
-maud = "0.27"
-sysinfo = "0.38"
-notify = "8.2"
-aws-credential-types = "1.2.11"
-lettre = "0.11"
-uuid = { version = "1.6", features = ["v4", "serde"] }
-reqwest = { version = "0.13", features = ["json"] }
-zeroize = { version = "1.7", features = ["derive"] }
-keyring = "2.1"
-base64 = "0.22"
-rand = "0.10"
-aes-gcm = "0.10"
-dirs = "6.0"
-pbkdf2 = "0.12"
-sha2 = "0.10"
-rpassword = "7.4"
-battery = "0.7.8"
-
+clap = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+walkdir = { workspace = true }
+zstd = { workspace = true }
+ring = { workspace = true }
+tracing = { workspace = true }
+rayon = { workspace = true }
+memmap2 = { workspace = true }
+blake3 = { workspace = true }
+regex = { workspace = true }
+tracing-subscriber = { workspace = true }
+ignore = { workspace = true }
+indicatif = { workspace = true }
+console = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+async-trait = { workspace = true }
+glob = { workspace = true }
+maud = { workspace = true }
+sysinfo = { workspace = true }
+notify = { workspace = true }
+aws-credential-types = { workspace = true }
+lettre = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+zeroize = { workspace = true }
+keyring = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+aes-gcm = { workspace = true }
+dirs = { workspace = true }
+pbkdf2 = { workspace = true }
+sha2 = { workspace = true }
+rpassword = { workspace = true }
+battery = { workspace = true }
+webauthn-rs = { workspace = true }
+soft-fido2 = { workspace = true }
 [features]
 # CLI feature enables interactive credential prompting
 cli = []

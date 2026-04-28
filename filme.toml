@@ -1,0 +1,7 @@
+source_path = "/Users/marciozebedeu/Movies/filmes novos/Ataque Brutal 2026 WEB-DL 1080p x264 DUAL 5.1"
+destination_path = "/Users/marciozebedeu/Desktop/dest"
+exclude_patterns = ["*.tmp", "node_modules"]
+backup_mode = "incremental"
+pause_on_low_battery = 20
+pause_on_high_cpu = 20
+compression_level = 3

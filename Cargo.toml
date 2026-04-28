@@ -5,7 +5,57 @@ members = [
     "rsb-desktop",
 ]
 resolver = "2"
+default-run = "rsb-cli"
 
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+walkdir = "2"
+clap = { version = "4.0", features = ["derive"] }
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.0"
+zstd = "0.13"
+ring = "0.17"
+rayon = "1.10"
+memmap2 = "0.9"
+blake3 = "1.5"
+regex = "1"
+ignore = "0.4"
+indicatif = "0.18"
+console = "0.16"
+aws-config = "1.1"
+aws-sdk-s3 = "1.15"
+async-trait = "0.1"
+glob = "0.3"
+maud = "0.27"
+sysinfo = "0.38"
+notify = "8.2"
+aws-credential-types = "1.2.11"
+lettre = "0.11"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+zeroize = { version = "1.7", features = ["derive"] }
+keyring = "2.1"
+base64 = "0.22"
+rand = "0.10"
+aes-gcm = "0.10"
+dirs = "6.0"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+rpassword = "7.4"
+battery = "0.7.8"
+webauthn-rs = "0.5.4"
+atty = "0.2.14"
+dioxus = { version = "0.7", features = ["desktop", "router"] }
+dioxus-desktop = "0.7"
+anyhow = "1.0"
+rfd = "0.17"
+open = "5.0"
+notify-rust = "4.11"
+soft-fido2 = { git = "https://github.com/pando85/soft-fido2.git", branch = "master" }
 [profile.release]
 debug = false
 lto = "thin"

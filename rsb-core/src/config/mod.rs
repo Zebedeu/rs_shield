@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
+use webauthn_rs::Webauthn;
 use std::fs;
 use std::io;
 use std::path::Path;
-
 use crate::utils::expand_path;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
