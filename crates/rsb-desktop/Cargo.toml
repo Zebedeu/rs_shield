@@ -50,6 +50,6 @@ battery = { workspace = true }
 rand = { workspace = true }
 open = { workspace = true }
 anyhow = { workspace = true }
-
+openssl = { workspace = true }
 # WEB
 web-sys = "0.3.98"

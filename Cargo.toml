@@ -10,7 +10,7 @@ resolver = "2"
 version = "0.1.0-alpha.7"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/rs-shield/rs-shield"
+repository = "https://github.com/rs-shield/rs_shield"
 authors = ["Marcio Zebedeu"]
 rust-version = "1.95.0"
 
@@ -117,7 +117,7 @@ regex = "1.10"
 hex = { version = "0.4", features = ["serde"] }
 num_cpus = "1.17.0"
 dashmap = "6.1"
-
+openssl = { version = "0.10", features = ["vendored"] }
 [profile.release]
 debug = false
 lto = "thin"
