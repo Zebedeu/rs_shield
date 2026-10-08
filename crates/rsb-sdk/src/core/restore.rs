@@ -9,10 +9,10 @@ use crate::storage::{validate_content_hash, validate_storage_path};
 use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info};
 
 pub async fn perform_restore(
@@ -422,12 +422,133 @@ impl VerifiedOutput {
     }
 }
 
-/// Size of the buffer used to stream decompressed data to disk.
+/// Size of the buffers used to stream blob / decompressed data to disk.
 const STREAM_BUF: usize = 1024 * 1024;
 
-/// Reads, decrypts, (streams-)decompresses and writes `blobs` in order to a
-/// temp file, verifying each chunk hash (when given) and the full-file hash
-/// before atomically replacing `target`.
+/// Process-wide memory budget (MiB) for blobs being restored concurrently.
+///
+/// Unencrypted blobs stream with constant memory (two `STREAM_BUF` buffers).
+/// Encrypted blobs must be held whole once (AES-GCM is authenticated as a
+/// single unit), so each reserves its size from this budget; concurrent
+/// restores (CLI + desktop, parallel callers) wait instead of stacking many
+/// large blobs in memory. A blob larger than the budget takes all of it and
+/// runs alone, so peak blob memory is max(budget, largest blob).
+pub const RESTORE_MEM_BUDGET_MIB: u32 = 512;
+static RESTORE_MEM_BUDGET: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(RESTORE_MEM_BUDGET_MIB as usize);
+
+/// Budget permits (MiB) needed to restore one blob of `blob_size` bytes.
+fn budget_permits(blob_size: Option<u64>, encrypted: bool) -> u32 {
+    const MIB: u64 = 1024 * 1024;
+    let buffers = (2 * STREAM_BUF as u64).div_ceil(MIB);
+    let held = if encrypted {
+        blob_size.unwrap_or(0).div_ceil(MIB)
+    } else {
+        0
+    };
+    (buffers + held).clamp(1, RESTORE_MEM_BUDGET_MIB as u64) as u32
+}
+
+/// Output side of a blob decode: feeds the optional per-chunk hasher and the
+/// verified temp file (which hashes the full file incrementally).
+struct BlobSink<'a> {
+    out: &'a mut VerifiedOutput,
+    chunk_hasher: Option<&'a mut blake3::Hasher>,
+}
+
+impl BlobSink<'_> {
+    async fn write(&mut self, data: &[u8]) -> io::Result<()> {
+        if let Some(h) = self.chunk_hasher.as_deref_mut() {
+            h.update(data);
+        }
+        self.out.write(data).await
+    }
+}
+
+/// Copies `src` to `sink`, zstd-decompressing on the fly when `compressed`.
+/// Memory is bounded by `inbuf` + `outbuf` whatever the blob size or the
+/// compression ratio (no decompression-bomb amplification).
+async fn decode_into<R>(
+    src: &mut R,
+    compressed: bool,
+    inbuf: &mut [u8],
+    outbuf: &mut [u8],
+    sink: &mut BlobSink<'_>,
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin + ?Sized,
+{
+    if !compressed {
+        loop {
+            let n = src.read(inbuf).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            sink.write(&inbuf[..n]).await?;
+        }
+    }
+
+    use zstd::stream::raw::{Decoder, InBuffer, Operation, OutBuffer};
+    let mut decoder = Decoder::new()?;
+    let mut saw_input = false;
+    let mut frame_complete = false;
+    loop {
+        let n = src.read(inbuf).await?;
+        if n == 0 {
+            break;
+        }
+        saw_input = true;
+        let mut consumed = 0;
+        loop {
+            let (used, produced, hint) = {
+                let mut input = InBuffer::around(&inbuf[consumed..n]);
+                let mut output = OutBuffer::around(&mut *outbuf);
+                let hint = decoder.run(&mut input, &mut output)?;
+                (input.pos(), output.pos(), hint)
+            };
+            consumed += used;
+            frame_complete = hint == 0;
+            if produced > 0 {
+                sink.write(&outbuf[..produced]).await?;
+            }
+            // Input exhausted and nothing left to flush for it.
+            if consumed == n && produced < outbuf.len() {
+                break;
+            }
+        }
+    }
+    if saw_input && !frame_complete {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "Truncated or corrupt compressed data",
+        ));
+    }
+    Ok(())
+}
+
+/// Reads a whole (encrypted) blob into one allocation sized from the
+/// object's metadata (no grow-and-copy, no collected intermediate buffers).
+async fn read_blob_exact(
+    storage: &dyn Storage,
+    data_path: &str,
+    size_hint: Option<u64>,
+) -> io::Result<Vec<u8>> {
+    // The hint comes from storage metadata: cap the up-front allocation.
+    const MAX_PREALLOC: u64 = 1024 * 1024 * 1024;
+    let cap = size_hint.unwrap_or(0).min(MAX_PREALLOC) as usize;
+    let mut buf = Vec::with_capacity(cap);
+    let mut reader = storage.read_stream(data_path).await?;
+    reader.read_to_end(&mut buf).await?;
+    Ok(buf)
+}
+
+/// Streams, decrypts, decompresses and writes `blobs` in order to a temp
+/// file next to `target`, verifying each chunk hash (when given) and the
+/// full-file hash before atomically replacing `target`.
+///
+/// Memory: unencrypted blobs stream storage -> zstd -> hasher -> file with
+/// constant memory; encrypted blobs are held once (decrypted in place) and
+/// then stream-decompressed. See [`RESTORE_MEM_BUDGET_MIB`].
 async fn restore_blobs(
     storage: &dyn Storage,
     blobs: &[(String, Option<&str>)],
@@ -440,33 +561,39 @@ async fn restore_blobs(
     let tmp = out.tmp.clone();
 
     let result = async {
+        let mut inbuf = vec![0u8; STREAM_BUF];
+        let mut outbuf = vec![0u8; STREAM_BUF];
         for (data_path, chunk_hash) in blobs {
-            let data = storage.read(data_path).await?;
-            let decrypted = match key {
-                Some(k) => k.decrypt(&data)?,
-                None => data,
-            };
             let mut chunk_hasher = chunk_hash.map(|_| blake3::Hasher::new());
-
-            if compressed {
-                // Stream-decode so a large blob is never held twice in memory.
-                let mut decoder = zstd::stream::read::Decoder::new(&decrypted[..])?;
-                let mut buf = vec![0u8; STREAM_BUF];
-                loop {
-                    let n = decoder.read(&mut buf)?;
-                    if n == 0 {
-                        break;
+            {
+                let mut sink = BlobSink {
+                    out: &mut out,
+                    chunk_hasher: chunk_hasher.as_mut(),
+                };
+                match key {
+                    Some(k) => {
+                        let size = storage.size(data_path).await?;
+                        let _permit = RESTORE_MEM_BUDGET
+                            .acquire_many(budget_permits(size, true))
+                            .await
+                            .map_err(io::Error::other)?;
+                        let blob = read_blob_exact(storage, data_path, size).await?;
+                        // Decrypted in place: one copy of the blob in memory.
+                        let plain = k.decrypt_owned(blob)?;
+                        let mut src: &[u8] = &plain;
+                        decode_into(&mut src, compressed, &mut inbuf, &mut outbuf, &mut sink)
+                            .await?;
                     }
-                    if let Some(h) = chunk_hasher.as_mut() {
-                        h.update(&buf[..n]);
+                    None => {
+                        let _permit = RESTORE_MEM_BUDGET
+                            .acquire_many(budget_permits(None, false))
+                            .await
+                            .map_err(io::Error::other)?;
+                        let mut src = storage.read_stream(data_path).await?;
+                        decode_into(&mut src, compressed, &mut inbuf, &mut outbuf, &mut sink)
+                            .await?;
                     }
-                    out.write(&buf[..n]).await?;
                 }
-            } else {
-                if let Some(h) = chunk_hasher.as_mut() {
-                    h.update(&decrypted);
-                }
-                out.write(&decrypted).await?;
             }
 
             if let (Some(expected), Some(h)) = (chunk_hash, chunk_hasher) {
