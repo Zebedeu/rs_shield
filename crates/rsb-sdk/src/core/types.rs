@@ -2,11 +2,15 @@
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 
-/// Maximum size before using multipart processing (4GB)
-pub const MULTIPART_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
+/// Maximum size before using multipart processing (64MB).
+///
+/// Files up to this size are read fully into memory (hashed and stored from
+/// the same buffer); larger files are streamed in `CHUNK_SIZE` pieces so
+/// neither backup nor restore holds a multi-GB file in memory.
+pub const MULTIPART_THRESHOLD: u64 = 64 * 1024 * 1024;
 
-/// Ideal chunk size for large files (512MB - good balance between memory and performance)
-pub const CHUNK_SIZE: usize = 512 * 1024 * 1024;
+/// Chunk size for large files (32MB per in-flight chunk and worker thread).
+pub const CHUNK_SIZE: usize = 32 * 1024 * 1024;
 
 /// Metadata for each chunk (used for very large files)
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

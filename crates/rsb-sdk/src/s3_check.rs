@@ -21,7 +21,9 @@ pub async fn verify_s3_connection(
     if !ep.is_empty() {
         let lower = ep.to_lowercase();
         let is_http = lower.starts_with("http://");
-        let is_loopback = lower.contains("localhost") || lower.contains("127.0.0.1");
+        // Exact host comparison on the parsed URL (not substring matching:
+        // `http://localhost.evil.com` must not count as loopback).
+        let is_loopback = crate::storage::is_loopback_endpoint(ep);
         if is_http && !is_loopback {
             return Err(
                 "Insecure endpoint: use https:// for non-local S3 endpoints (credentials would go in cleartext over http)."

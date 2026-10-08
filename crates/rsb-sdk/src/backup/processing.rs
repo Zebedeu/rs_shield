@@ -6,6 +6,7 @@ use crate::core::resource_monitor::spawn_resource_monitor;
 use crate::core::types::FileStatus;
 use crate::core::types::{FileMetadata, ProgressCallback};
 use crate::report::ReportData;
+use crate::storage::{LockKind, RepoLock, Storage};
 use crate::utils::expand_path;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -65,6 +66,51 @@ pub async fn perform_backup_with_cancellation(
 
     let storage = crate::core::storage_backend::get_storage(config).await;
 
+    // ====================== REPOSITORY LOCK ======================
+    // Shared lock: concurrent backups are fine, but prune (exclusive) must
+    // not garbage-collect data objects this backup writes before its
+    // manifest exists. Dry-runs write nothing and take no lock.
+    let repo_lock = if dry_run {
+        None
+    } else {
+        Some(RepoLock::acquire(storage.clone(), LockKind::Shared, "backup").await?)
+    };
+
+    let result = run_backup(
+        config,
+        source,
+        storage,
+        mode,
+        encryption_key,
+        dry_run,
+        max_threads,
+        on_progress,
+        cancellation_token,
+        start_time,
+    )
+    .await;
+
+    if let Some(lock) = repo_lock {
+        if let Err(e) = lock.release().await {
+            tracing::warn!("Failed to release repository lock after backup: {}", e);
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_backup(
+    config: &Config,
+    source: &Path,
+    storage: Arc<dyn Storage>,
+    mode: &str,
+    encryption_key: Option<&str>,
+    dry_run: bool,
+    max_threads: Option<usize>,
+    on_progress: Option<ProgressCallback>,
+    cancellation_token: Option<CancellationToken>,
+    start_time: Instant,
+) -> Result<ReportData, Box<dyn std::error::Error>> {
     debug!(
         "🚀 Starting backup{}: {} -> {} (mode: {})",
         if dry_run { " (DRY-RUN)" } else { "" },
@@ -74,7 +120,8 @@ pub async fn perform_backup_with_cancellation(
     );
 
     // ====================== DISCOVERY ======================
-    let files = discovery::discover_files(source, &config.exclude_patterns)?;
+    let (files, walk_errors) =
+        discovery::discover_files_with_errors(source, &config.exclude_patterns)?;
 
     if files.is_empty() {
         return Err(format!(
@@ -101,7 +148,12 @@ pub async fn perform_backup_with_cancellation(
     let (tx, mut rx) = mpsc::channel::<(PathBuf, FileMetadata)>(8192);
 
     let stats = Arc::new(Stats::new());
-    let errors_list = Arc::new(Mutex::new(Vec::new()));
+    // Walker errors (unreadable dirs, ...) make the backup incomplete:
+    // report them instead of claiming a clean success.
+    for _ in &walk_errors {
+        stats.inc_error();
+    }
+    let errors_list = Arc::new(Mutex::new(walk_errors));
 
     let (resource_paused, monitor_running, monitor_handle) =
         spawn_resource_monitor(config.pause_on_low_battery, config.pause_on_high_cpu);
