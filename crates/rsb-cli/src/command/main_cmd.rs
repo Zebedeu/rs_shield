@@ -271,7 +271,7 @@ pub enum Commands {
         #[arg(short = 'k', long)]
         key: Option<String>,
 
-        /// Poll interval in seconds
+        /// Quiet period in seconds: a backup starts once no change has arrived for this long
         #[arg(short = 'i', long, default_value = "2")]
         interval: u64,
 
