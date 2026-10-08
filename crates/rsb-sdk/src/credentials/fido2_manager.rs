@@ -11,6 +11,7 @@ use sha2::Sha256;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tracing::{debug, error, info};
 use webauthn_rs::prelude::{
     CreationChallengeResponse, Passkey, PasskeyAuthentication, PasskeyRegistration,
@@ -47,11 +48,43 @@ impl std::fmt::Debug for Fido2Credential {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Iterações PBKDF2 usadas pelos hashes de recovery codes antigos (sem versão).
+pub const LEGACY_RECOVERY_CODE_ITERATIONS: u32 = 100_000;
+/// Iterações PBKDF2 para novos hashes de recovery codes.
+pub const RECOVERY_CODE_ITERATIONS: u32 = 600_000;
+
+fn legacy_recovery_iterations() -> u32 {
+    LEGACY_RECOVERY_CODE_ITERATIONS
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserCredentials {
     pub credentials: Vec<Fido2Credential>,
     pub recovery_code_hashes: Vec<String>,
     pub salt: Vec<u8>, // Salt específico do usuário para os recovery codes
+    /// Iterações PBKDF2 com que `recovery_code_hashes` foram gerados.
+    /// Dados antigos (sem o campo) usavam 100k.
+    #[serde(default = "legacy_recovery_iterations")]
+    pub recovery_code_iterations: u32,
+}
+
+impl Default for UserCredentials {
+    fn default() -> Self {
+        Self {
+            credentials: Vec::new(),
+            recovery_code_hashes: Vec::new(),
+            salt: Vec::new(),
+            recovery_code_iterations: RECOVERY_CODE_ITERATIONS,
+        }
+    }
+}
+
+/// Material necessário para verificar um recovery code fora do lock do
+/// manager (o PBKDF2 é caro e não deve bloquear o runtime nem o mutex).
+#[derive(Debug, Clone)]
+pub struct RecoveryMaterial {
+    pub salt: Vec<u8>,
+    pub iterations: u32,
 }
 
 /// ==============================
@@ -71,12 +104,67 @@ struct PendingRegistration {
 /// ==============================
 
 #[derive(Clone)]
+struct PendingAuthentication {
+    auth_state: PasskeyAuthentication,
+    user_id: String,
+}
+
+/// Tempo de vida de um desafio pendente (registo ou autenticação).
+const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+/// Número máximo de desafios pendentes em simultâneo.
+const MAX_PENDING: usize = 64;
+
+#[derive(Clone)]
 pub struct Fido2Manager {
     webauthn: Webauthn,
     users: HashMap<String, UserCredentials>,
-    registration_state: Option<PendingRegistration>,
-    authentication_state: Option<(PasskeyAuthentication, String)>,
+    // Desafios pendentes indexados pelo próprio challenge (bytes), com TTL.
+    registration_states: HashMap<Vec<u8>, (PendingRegistration, Instant)>,
+    authentication_states: HashMap<Vec<u8>, (PendingAuthentication, Instant)>,
     rp_id: String,
+    /// Caminho de onde o estado foi carregado/guardado com sucesso. Impede
+    /// sobrescrever um ficheiro existente que este manager nunca leu.
+    loaded_path: Option<PathBuf>,
+}
+
+/// Extrai o challenge (bytes) do clientDataJSON enviado pelo browser.
+fn challenge_from_client_data(client_data_json: &[u8]) -> Option<Vec<u8>> {
+    #[derive(Deserialize)]
+    struct ClientData {
+        challenge: String,
+    }
+    let cd: ClientData = serde_json::from_slice(client_data_json).ok()?;
+    general_purpose::URL_SAFE_NO_PAD
+        .decode(cd.challenge.trim_end_matches('='))
+        .ok()
+}
+
+fn prune_pending<T>(map: &mut HashMap<Vec<u8>, (T, Instant)>) {
+    map.retain(|_, (_, created)| created.elapsed() < PENDING_TTL);
+    while map.len() >= MAX_PENDING {
+        let oldest = map
+            .iter()
+            .min_by_key(|(_, (_, created))| *created)
+            .map(|(k, _)| k.clone());
+        match oldest {
+            Some(k) => {
+                map.remove(&k);
+            }
+            None => break,
+        }
+    }
+}
+
+/// Comparação em tempo constante.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 // Keyring service name for the Data Encryption Key (DEK)
@@ -97,9 +185,10 @@ impl Fido2Manager {
         Ok(Self {
             webauthn,
             users: HashMap::new(),
-            registration_state: None,
-            authentication_state: None,
+            registration_states: HashMap::new(),
+            authentication_states: HashMap::new(),
             rp_id: rp_id.to_string(),
+            loaded_path: None,
         })
     }
 
@@ -138,9 +227,48 @@ impl Fido2Manager {
         }
     }
 
+    /// Gets the DEK from the Keyring WITHOUT creating it. Used when an encrypted
+    /// credential file already exists: generating a new DEK there would make the
+    /// file permanently unreadable (and a later save would overwrite it).
+    fn get_existing_dek() -> Result<Vec<u8>, Fido2Error> {
+        let entry = Entry::new(KEYRING_SERVICE_NAME, KEYRING_USERNAME)
+            .map_err(|e| Fido2Error::KeyringError(format!("Keyring error: {}", e)))?;
+
+        match entry.get_password() {
+            Ok(password_base64) => general_purpose::STANDARD
+                .decode(password_base64)
+                .map_err(|e| Fido2Error::EncryptionError(format!("Failed to decode DEK: {}", e))),
+            Err(keyring::Error::NoEntry) => Err(Fido2Error::KeyringError(
+                "Credential file exists but its encryption key (DEK) is missing from the keyring; \
+                 refusing to continue to avoid data loss"
+                    .to_string(),
+            )),
+            Err(e) => Err(Fido2Error::KeyringError(format!(
+                "Error accessing keyring: {}",
+                e
+            ))),
+        }
+    }
+
+    /// True if this manager has loaded (or written) the given path.
+    pub fn is_loaded_from(&self, path: &Path) -> bool {
+        self.loaded_path.as_deref() == Some(path)
+    }
+
     /// Save credentials of the form encrypted using AES-256-GCM and PBKDF2.
     /// Structure of the file: [16B Salt][12B Nonce][Encrypted Payload]
-    pub fn save_to_file(&self, path: &Path) -> Result<(), Fido2Error> {
+    pub fn save_to_file(&mut self, path: &Path) -> Result<(), Fido2Error> {
+        // Proteção contra perda de dados: nunca sobrescrever um ficheiro de
+        // credenciais existente (não vazio) que este manager não carregou com
+        // sucesso (ex.: load falhou e o erro foi ignorado pelo chamador).
+        let file_has_data = fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false);
+        if file_has_data && !self.is_loaded_from(path) {
+            return Err(Fido2Error::EncryptionError(format!(
+                "Refusing to overwrite {:?}: it was not loaded successfully by this process",
+                path
+            )));
+        }
+
         let plaintext = serde_json::to_vec(&self.users)
             .map_err(|e| Fido2Error::EncryptionError(format!("Serialize error: {}", e)))?;
         let mut rng = rand::rng();
@@ -150,7 +278,12 @@ impl Fido2Manager {
         rng.fill_bytes(&mut salt);
 
         // 2. Derive 32-byte key (256 bits) using PBKDF2-HMAC-SHA256
-        let dek = Self::get_or_create_dek()?;
+        // Se o ficheiro já existe, a DEK tem de existir (nunca criar uma nova).
+        let dek = if file_has_data {
+            Self::get_existing_dek()?
+        } else {
+            Self::get_or_create_dek()?
+        };
         let mut key = [0u8; 32];
         let iterations = 600_000; // Recommended iterations for PBKDF2
         pbkdf2_hmac::<Sha256>(&dek, &salt, iterations, &mut key);
@@ -183,17 +316,10 @@ impl Fido2Manager {
         final_payload.extend_from_slice(&nonce_bytes);
         final_payload.extend_from_slice(&ciphertext);
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                Fido2Error::EncryptionError(format!(
-                    "Failed to create storage directory {:?}: {}",
-                    parent, e
-                ))
-            })?;
-        }
-
-        fs::write(path, final_payload)
+        // Escrita atómica (temp + rename) com modo 0600.
+        crate::auth::secure_fs::write_private_atomic(path, &final_payload)
             .map_err(|e| Fido2Error::EncryptionError(format!("Failed to write file: {}", e)))?;
+        self.loaded_path = Some(path.to_path_buf());
         Ok(())
     }
 
@@ -214,8 +340,8 @@ impl Fido2Manager {
             let (salt, rest) = encrypted_data.split_at(16);
             let (nonce_bytes, ciphertext) = rest.split_at(12);
 
-            // Derive the same key
-            let dek = Self::get_or_create_dek()?;
+            // Derive the same key (get-only: nunca gerar uma DEK nova aqui)
+            let dek = Self::get_existing_dek()?;
 
             let mut key = [0u8; 32];
             let iterations = 600_000; // Must match the saving iterations
@@ -246,6 +372,7 @@ impl Fido2Manager {
 
             info!("Securely loaded {} credentials", self.users.len());
         }
+        self.loaded_path = Some(path.to_path_buf());
         Ok(())
     }
 
@@ -279,12 +406,19 @@ impl Fido2Manager {
                 Fido2Error::RegistrationFailed(format!("{:?}", e))
             })?;
 
-        self.registration_state = Some(PendingRegistration {
-            reg_state,
-            user_id: user_id.to_string(),
-            user_name: user_name.to_string(),
-            display_name: display_name.to_string(),
-        });
+        prune_pending(&mut self.registration_states);
+        self.registration_states.insert(
+            challenge.public_key.challenge.to_vec(),
+            (
+                PendingRegistration {
+                    reg_state,
+                    user_id: user_id.to_string(),
+                    user_name: user_name.to_string(),
+                    display_name: display_name.to_string(),
+                },
+                Instant::now(),
+            ),
+        );
 
         Ok(challenge)
     }
@@ -293,9 +427,12 @@ impl Fido2Manager {
         &mut self,
         reg_response: RegisterPublicKeyCredential,
     ) -> Result<Fido2Credential, Fido2Error> {
-        let pending = self
-            .registration_state
-            .take()
+        prune_pending(&mut self.registration_states);
+        let key = challenge_from_client_data(&reg_response.response.client_data_json)
+            .ok_or(Fido2Error::NoRegistrationInProgress)?;
+        let (pending, _) = self
+            .registration_states
+            .remove(&key)
             .ok_or(Fido2Error::NoRegistrationInProgress)?;
 
         let passkey = self
@@ -352,7 +489,17 @@ impl Fido2Manager {
                 Fido2Error::AuthenticationFailed(format!("{:?}", e))
             })?;
 
-        self.authentication_state = Some((auth_state, user_id.to_string()));
+        prune_pending(&mut self.authentication_states);
+        self.authentication_states.insert(
+            challenge.public_key.challenge.to_vec(),
+            (
+                PendingAuthentication {
+                    auth_state,
+                    user_id: user_id.to_string(),
+                },
+                Instant::now(),
+            ),
+        );
 
         Ok(challenge)
     }
@@ -363,10 +510,17 @@ impl Fido2Manager {
     ) -> Result<String, Fido2Error> {
         debug!("Finishing authentication");
 
-        let (auth_state, user_id) = self
-            .authentication_state
-            .take()
+        prune_pending(&mut self.authentication_states);
+        let key = challenge_from_client_data(&auth_response.response.client_data_json)
             .ok_or(Fido2Error::NoAuthenticationInProgress)?;
+        let (pending, _) = self
+            .authentication_states
+            .remove(&key)
+            .ok_or(Fido2Error::NoAuthenticationInProgress)?;
+        let PendingAuthentication {
+            auth_state,
+            user_id,
+        } = pending;
 
         let result = self
             .webauthn
@@ -376,39 +530,25 @@ impl Fido2Manager {
                 Fido2Error::AuthenticationFailed(format!("{:?}", e))
             })?;
 
-        let new_counter = result.counter();
-        let cred_id = result.cred_id();
+        let cred_id = result.cred_id().clone();
 
         // Find and update the specific credential
         let credential = self
-            .get_credential_mut(&user_id, cred_id)
+            .get_credential_mut(&user_id, &cred_id)
             .ok_or(Fido2Error::CredentialNotFound)?;
 
-        credential.counter = new_counter;
-        credential.last_used = Some(chrono::Local::now().to_rfc3339());
-
-        // Update counter within stored Passkey JSON
-        // This is necessary because the `credential_data` stores the Passkey,
-        // and the Passkey's internal counter needs to be updated for subsequent authentications.
-        let mut passkey_json: serde_json::Value =
-            serde_json::from_slice(&credential.credential_data)
-                .map_err(|e| Fido2Error::AuthenticationFailed(format!("Corrupted data: {}", e)))?;
-
-        if let Some(cred_obj) = passkey_json.get_mut("cred") {
-            if let Some(counter_val) = cred_obj.get_mut("counter") {
-                *counter_val = serde_json::Value::from(new_counter);
-            } else {
-                // If 'counter' field is missing, add it. This might happen with older formats.
-                cred_obj["counter"] = serde_json::Value::from(new_counter);
-            }
-        } else {
-            // If 'cred' field is missing, this indicates a serious data corruption.
+        // Atualiza o Passkey armazenado via API do webauthn-rs (contador, backup state)
+        let mut passkey: Passkey = serde_json::from_slice(&credential.credential_data)
+            .map_err(|e| Fido2Error::AuthenticationFailed(format!("Corrupted data: {}", e)))?;
+        if passkey.update_credential(&result).is_none() {
             return Err(Fido2Error::AuthenticationFailed(
-                "Corrupted Passkey data: 'cred' field missing".to_string(),
+                "Credential ID mismatch while updating passkey".to_string(),
             ));
         }
-        credential.credential_data = serde_json::to_vec(&passkey_json)
+        credential.credential_data = serde_json::to_vec(&passkey)
             .map_err(|e| Fido2Error::AuthenticationFailed(format!("Serialization error: {}", e)))?;
+        credential.counter = result.counter();
+        credential.last_used = Some(chrono::Local::now().to_rfc3339());
 
         info!("Authentication successful for {}", user_id);
 
@@ -429,9 +569,19 @@ impl Fido2Manager {
         })
     }
 
-    /// Gera novos códigos de recuperação para um usuário.
+    /// True se o utilizador existe (tem entrada registada).
+    pub fn user_exists(&self, user_id: &str) -> bool {
+        self.users.contains_key(user_id)
+    }
+
+    /// Gera novos códigos de recuperação para um usuário existente.
     /// Retorna os códigos em texto claro (deve ser exibido apenas uma vez).
     pub fn generate_backup_codes(&mut self, user_id: &str) -> Result<Vec<String>, Fido2Error> {
+        // Não criar utilizadores implicitamente.
+        if !self.user_exists(user_id) {
+            return Err(Fido2Error::CredentialNotFound);
+        }
+
         let mut rng = rand::rng();
         let mut plain_codes = Vec::new();
         let mut hashed_codes = Vec::new();
@@ -446,67 +596,80 @@ impl Fido2Manager {
                 .map(|_| rng.sample(rand::distr::Alphanumeric) as char)
                 .collect();
 
-            let mut hash = [0u8; 32];
-            pbkdf2::pbkdf2_hmac::<Sha256>(
-                code.as_bytes(),
+            hashed_codes.push(Self::compute_recovery_hash(
+                &code,
                 &salt,
-                crate::credentials::encryption::PBKDF2_ITERATIONS,
-                &mut hash,
-            );
-
+                RECOVERY_CODE_ITERATIONS,
+            ));
             plain_codes.push(code);
-            hashed_codes.push(general_purpose::STANDARD.encode(hash));
         }
 
-        let user_entry = self.users.entry(user_id.to_string()).or_default();
+        let user_entry = self
+            .users
+            .get_mut(user_id)
+            .ok_or(Fido2Error::CredentialNotFound)?;
         user_entry.recovery_code_hashes = hashed_codes;
         user_entry.salt = salt.to_vec();
+        user_entry.recovery_code_iterations = RECOVERY_CODE_ITERATIONS;
 
         Ok(plain_codes)
     }
 
-    /// Valida e consome um código de recuperação.
-    pub fn verify_backup_code(&mut self, user_id: &str, code: &str) -> bool {
+    /// Hash PBKDF2 de um recovery code (base64). Operação cara: em contexto
+    /// async, executar via `spawn_blocking`.
+    pub fn compute_recovery_hash(code: &str, salt: &[u8], iterations: u32) -> String {
+        let mut hash = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<Sha256>(code.as_bytes(), salt, iterations, &mut hash);
+        general_purpose::STANDARD.encode(hash)
+    }
+
+    /// Salt e iterações para verificar um recovery code deste utilizador,
+    /// ou `None` se não existir / não tiver códigos.
+    pub fn recovery_material(&self, user_id: &str) -> Option<RecoveryMaterial> {
+        let user = self.users.get(user_id)?;
+        if user.recovery_code_hashes.is_empty() {
+            return None;
+        }
+        let iterations = if user.recovery_code_iterations == 0 {
+            LEGACY_RECOVERY_CODE_ITERATIONS
+        } else {
+            user.recovery_code_iterations
+        };
+        Some(RecoveryMaterial {
+            salt: user.salt.clone(),
+            iterations,
+        })
+    }
+
+    /// Consome (remove) o hash indicado se existir. Comparação em tempo constante.
+    pub fn consume_recovery_hash(&mut self, user_id: &str, input_hash_encoded: &str) -> bool {
         let user_data = match self.users.get_mut(user_id) {
             Some(u) => u,
             None => return false,
         };
-
-        if user_data.recovery_code_hashes.is_empty() {
-            return false;
-        }
-
-        let mut input_hash = [0u8; 32];
-        pbkdf2::pbkdf2_hmac::<Sha256>(
-            code.as_bytes(),
-            &user_data.salt,
-            crate::credentials::encryption::PBKDF2_ITERATIONS,
-            &mut input_hash,
-        );
-        let input_hash_encoded = general_purpose::STANDARD.encode(input_hash);
-
-        // Comparação em tempo constante (antes: `position(==)` com timing-oracle).
-        fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-            if a.len() != b.len() {
-                return false;
+        let mut found = None;
+        for (i, h) in user_data.recovery_code_hashes.iter().enumerate() {
+            if ct_eq(h.as_bytes(), input_hash_encoded.as_bytes()) && found.is_none() {
+                found = Some(i);
             }
-            let mut diff = 0u8;
-            for (x, y) in a.iter().zip(b.iter()) {
-                diff |= x ^ y;
-            }
-            diff == 0
         }
-        if let Some(pos) = user_data
-            .recovery_code_hashes
-            .iter()
-            .position(|h| ct_eq(h.as_bytes(), input_hash_encoded.as_bytes()))
-        {
+        if let Some(pos) = found {
             user_data.recovery_code_hashes.remove(pos);
             info!("Recovery code used and invalidated for user: {}", user_id);
             return true;
         }
-
         false
+    }
+
+    /// Valida e consome um código de recuperação (síncrono).
+    /// O chamador DEVE persistir com `save_to_file` e tratar a falha.
+    pub fn verify_backup_code(&mut self, user_id: &str, code: &str) -> bool {
+        let material = match self.recovery_material(user_id) {
+            Some(m) => m,
+            None => return false,
+        };
+        let input_hash = Self::compute_recovery_hash(code, &material.salt, material.iterations);
+        self.consume_recovery_hash(user_id, &input_hash)
     }
 
     pub fn list_credentials(&self) -> Vec<Fido2Credential> {
@@ -612,5 +775,92 @@ mod tests {
     fn test_list_empty() {
         let mgr = create_manager();
         assert_eq!(mgr.list_credentials().len(), 0);
+    }
+    #[test]
+    fn test_generate_codes_refuses_unknown_user() {
+        let mut mgr = create_manager();
+        assert!(!mgr.user_exists("ghost"));
+        assert!(matches!(
+            mgr.generate_backup_codes("ghost"),
+            Err(Fido2Error::CredentialNotFound)
+        ));
+        // Não pode ter criado o utilizador implicitamente.
+        assert!(!mgr.user_exists("ghost"));
+    }
+
+    #[test]
+    fn test_legacy_recovery_hash_100k_still_verifies() {
+        // Regressão: hashes antigos (100k, sem campo de iterações) deixaram de
+        // validar quando o default passou para 600k.
+        let salt = vec![7u8; 16];
+        let legacy_hash = Fido2Manager::compute_recovery_hash(
+            "OLDCODE12345",
+            &salt,
+            LEGACY_RECOVERY_CODE_ITERATIONS,
+        );
+        let json = serde_json::json!({
+            "credentials": [],
+            "recovery_code_hashes": [legacy_hash],
+            "salt": salt,
+        });
+        let user: UserCredentials = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            user.recovery_code_iterations,
+            LEGACY_RECOVERY_CODE_ITERATIONS
+        );
+
+        let mut mgr = create_manager();
+        mgr.users.insert("alice".to_string(), user);
+
+        assert!(!mgr.verify_backup_code("alice", "WRONGCODE000"));
+        assert!(mgr.verify_backup_code("alice", "OLDCODE12345"));
+        // Uso único.
+        assert!(!mgr.verify_backup_code("alice", "OLDCODE12345"));
+    }
+
+    #[test]
+    fn test_new_recovery_codes_use_600k_and_are_single_use() {
+        let mut mgr = create_manager();
+        mgr.users
+            .insert("bob".to_string(), UserCredentials::default());
+        let codes = mgr.generate_backup_codes("bob").unwrap();
+        assert_eq!(codes.len(), 10);
+        assert_eq!(
+            mgr.users["bob"].recovery_code_iterations,
+            RECOVERY_CODE_ITERATIONS
+        );
+        // Serialização preserva a versão.
+        let roundtrip: UserCredentials =
+            serde_json::from_slice(&serde_json::to_vec(&mgr.users["bob"]).unwrap()).unwrap();
+        assert_eq!(roundtrip.recovery_code_iterations, RECOVERY_CODE_ITERATIONS);
+
+        assert!(mgr.verify_backup_code("bob", &codes[3]));
+        assert!(!mgr.verify_backup_code("bob", &codes[3]));
+        assert_eq!(mgr.users["bob"].recovery_code_hashes.len(), 9);
+    }
+
+    #[test]
+    fn test_save_refuses_to_overwrite_unloaded_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fido2_credentials.json");
+        std::fs::write(&path, b"existing-encrypted-data-not-loaded").unwrap();
+        let mut mgr = create_manager();
+        assert!(mgr.save_to_file(&path).is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"existing-encrypted-data-not-loaded"
+        );
+    }
+
+    #[test]
+    fn test_challenge_from_client_data() {
+        let challenge = vec![1u8, 2, 3, 250, 251];
+        let encoded = general_purpose::URL_SAFE_NO_PAD.encode(&challenge);
+        let cd = format!(
+            r#"{{"type":"webauthn.get","challenge":"{}","origin":"x"}}"#,
+            encoded
+        );
+        assert_eq!(challenge_from_client_data(cd.as_bytes()), Some(challenge));
+        assert_eq!(challenge_from_client_data(b"not json"), None);
     }
 }
