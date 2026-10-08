@@ -1,5 +1,5 @@
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use crate::core::chat_integrations::http_client;
+use serde::Deserialize;
 use tracing::{error, info};
 
 /// Response from Telegram getMe method
@@ -60,7 +60,7 @@ pub async fn validate_telegram_token(bot_token: &str) -> Result<TelegramBot, Str
     }
 
     let url = format!("https://api.telegram.org/bot{}/getMe", bot_token);
-    let client = Client::new();
+    let client = http_client()?;
 
     match client.get(&url).send().await {
         Ok(response) => match response.json::<TelegramGetMeResponse>().await {
@@ -83,11 +83,14 @@ pub async fn validate_telegram_token(bot_token: &str) -> Result<TelegramBot, Str
                 }
             }
             Err(e) => {
+                let e = e.without_url();
                 error!("❌ Failed to parse Telegram response: {}", e);
                 Err(format!("Failed to parse Telegram response: {}", e))
             }
         },
         Err(e) => {
+            // O URL contém o bot token — remover antes de registar/devolver.
+            let e = e.without_url();
             error!("❌ Failed to connect to Telegram: {}", e);
             Err(format!("Connection error: {}", e))
         }
@@ -101,7 +104,7 @@ pub async fn get_telegram_chat_id(bot_token: &str) -> Result<Vec<(i64, String)>,
     }
 
     let url = format!("https://api.telegram.org/bot{}/getUpdates", bot_token);
-    let client = Client::new();
+    let client = http_client()?;
 
     match client.get(&url).send().await {
         Ok(response) => match response.json::<TelegramUpdatesResponse>().await {
@@ -149,11 +152,11 @@ pub async fn get_telegram_chat_id(bot_token: &str) -> Result<Vec<(i64, String)>,
                     }
                 }
             }
-            Err(e) => Err(format!("❌ Failed to parse response: {}", e)),
+            Err(e) => Err(format!("❌ Failed to parse response: {}", e.without_url())),
         },
         Err(e) => Err(format!(
             "❌ Connection error: {}. Check your internet connection.",
-            e
+            e.without_url()
         )),
     }
 }

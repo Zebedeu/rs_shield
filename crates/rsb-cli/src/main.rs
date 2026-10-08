@@ -1,8 +1,9 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use chrono::Local;
 use clap::Parser;
 use rsb_cli::command::list_profiles_cmd::{ListProfilesCmd, OutputFormat};
-use rsb_cli::command::main_cmd::{Commands, ListProfilesFormat};
+use rsb_cli::command::main_cmd::{Commands, ListProfilesFormat, StorageChoice};
+use rsb_cli::helpers::{obtain_encryption_key, profile_name, resolve_profile_path, warn_secret_arg};
 use rsb_sdk::backup::diagnostic::{print_diagnostics, run_backup_diagnostics, sync_changed_files};
 use rsb_sdk::backup::perform_backup;
 use rsb_sdk::integrity::perform_verify;
@@ -12,6 +13,7 @@ use rsb_sdk::server::routes::check_fido2_auth;
 use rsb_sdk::utils::{calculate_retention_backups, ensure_directory_exists, send_healthcheck};
 use rsb_sdk::{config, core, credentials::Fido2Manager};
 use std::fs;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -63,19 +65,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )?;
             }
 
-            // Handle encryption password
+            // Handle encryption password: é guardada no keyring do SO (nunca no
+            // TOML). Sem TTY e sem -k, o perfil fica só com encrypt_patterns e a
+            // chave terá de vir de RSB_ENCRYPTION_KEY no momento do backup.
+            if password.is_some() {
+                warn_secret_arg("-k/--password");
+            }
             let encryption_pwd = if encrypt {
                 if let Some(pwd) = password {
                     Some(pwd)
-                } else {
+                } else if std::io::stdin().is_terminal() {
                     // Prompt for password if encryption enabled but not provided
                     use rpassword::prompt_password;
-                    let pwd = prompt_password("Enter encryption password: ")?;
-                    let confirm = prompt_password("Confirm password: ")?;
-                    if pwd != confirm {
-                        return Err("Passwords do not match".into());
+                    let pwd = prompt_password(
+                        "Enter encryption password (stored in OS keyring; empty = use RSB_ENCRYPTION_KEY at backup time): ",
+                    )?;
+                    if pwd.is_empty() {
+                        None
+                    } else {
+                        let confirm = prompt_password("Confirm password: ")?;
+                        if pwd != confirm {
+                            return Err("Passwords do not match".into());
+                        }
+                        Some(pwd)
                     }
-                    Some(pwd)
+                } else {
+                    None
                 }
             } else {
                 None
@@ -125,6 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             backup,
             mode,
             key,
+            storage,
             dry_run,
             no_resume,
             verify,
@@ -135,27 +151,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let _auth_token = check_fido2_auth().await?;
 
-            // Resolve config or backup path
-            let config_path = match (config, backup) {
-                (Some(c), _) => c.clone(),
-                (None, Some(b)) => b.clone(),
-                (None, None) => {
-                    // Try to auto-discover .toml in current dir
-                    let current = std::env::current_dir()?;
-                    let mut found = None;
-                    for entry in std::fs::read_dir(&current)? {
-                        let entry = entry?;
-                        let path = entry.path();
-                        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                            found = Some(path);
-                            break;
-                        }
-                    }
-                    found.ok_or_else(|| {
-                        anyhow!("No config found. Use --config <path> or --backup <path>")
-                    })?
-                }
-            };
+            // Resolve config or backup path (nunca Cargo.toml; erro se ambíguo)
+            let config_path = resolve_profile_path(config, backup)?;
 
             if !config_path.exists() {
                 eprintln!(
@@ -175,35 +172,88 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
 
-            send_healthcheck(&healthcheck_url, "/start").await;
-
             let mut cfg = config::load_config(&config_path)?;
 
-            println!("\n💾 Backup Storage Type");
-            println!("   1. S3 or S3-compatible (AWS, MinIO, Wasabi, etc.)");
-            println!("   2. Local storage (local filesystem)");
-            print!("\nChoose storage type (1 or 2): ");
-            use std::io::Write;
-            std::io::stdout().flush()?;
-
-            let mut response = String::new();
-            std::io::stdin().read_line(&mut response)?;
-            let use_s3 = response.trim() == "1";
-
-            if use_s3 {
-                println!("\n📦 Configuring S3 Storage");
-                println!("   Please provide bucket name, region, and endpoint URL...\n");
-                config::prompt_for_s3_config(&config_path)?;
-
-                cfg = config::load_config(&config_path)?;
-                println!("✅ S3 configuration updated. Starting backup...\n");
-            } else {
-                cfg.s3 = None;
-                cfg.s3_bucket = None;
-                cfg.s3_region = None;
-                cfg.s3_endpoint = None;
-                println!("✅ Using local storage. Starting backup...\n");
+            if let Some(level) = cfg.compression_level {
+                config::validate_compression_level(level)?;
             }
+
+            // Storage: --storage > configuração do perfil. Só se pergunta em
+            // modo interativo (TTY) quando o perfil não tem S3 configurado;
+            // em cron/systemd nunca se lê stdin.
+            let s3_configured = cfg
+                .s3
+                .as_ref()
+                .and_then(|s| s.bucket.as_ref())
+                .is_some()
+                || cfg.s3_bucket.is_some();
+            let interactive = std::io::stdin().is_terminal();
+            let choice = match storage {
+                Some(c) => c,
+                None if s3_configured => StorageChoice::S3,
+                None if interactive => {
+                    println!("\n💾 Backup Storage Type (profile has no S3 configured)");
+                    println!("   1. S3 or S3-compatible (AWS, MinIO, Wasabi, etc.)");
+                    println!("   2. Local storage (local filesystem) [default]");
+                    print!("\nChoose storage type (1 or 2): ");
+                    use std::io::Write;
+                    std::io::stdout().flush()?;
+
+                    let mut response = String::new();
+                    std::io::stdin().read_line(&mut response)?;
+                    if response.trim() == "1" {
+                        StorageChoice::S3
+                    } else {
+                        StorageChoice::Local
+                    }
+                }
+                None => StorageChoice::Local,
+            };
+
+            match choice {
+                StorageChoice::S3 => {
+                    if !s3_configured {
+                        if !interactive {
+                            return Err(
+                                "--storage s3 requested but the profile has no S3 configuration (run interactively to configure it)"
+                                    .into(),
+                            );
+                        }
+                        println!("\n📦 Configuring S3 Storage");
+                        println!("   Please provide bucket name, region, and endpoint URL...\n");
+                        config::prompt_for_s3_config(&config_path)?;
+                        cfg = config::load_config(&config_path)?;
+                        println!("✅ S3 configuration updated.");
+                    }
+                    println!("✅ Using S3 storage. Starting backup...\n");
+                }
+                StorageChoice::Local => {
+                    cfg.s3 = None;
+                    cfg.s3_bucket = None;
+                    cfg.s3_region = None;
+                    cfg.s3_endpoint = None;
+                    println!("✅ Using local storage. Starting backup...\n");
+                }
+            }
+
+            // Chave: falha (em vez de backup em claro) se o perfil exige cifra.
+            let profile = profile_name(&config_path);
+            let key = obtain_encryption_key(
+                key,
+                profile.as_deref(),
+                Some(&cfg),
+                cfg.encryption_required(),
+            );
+            let key = match key {
+                Ok(k) => k,
+                Err(e) => {
+                    // Sinalizar falha no healthcheck (ex.: cron sem chave).
+                    send_healthcheck(&healthcheck_url, "/fail").await;
+                    return Err(e.into());
+                }
+            };
+
+            send_healthcheck(&healthcheck_url, "/start").await;
 
             let resume = !no_resume;
             let backup_mode = mode.as_deref().unwrap_or("incremental");
@@ -261,7 +311,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         report_data.files_processed = verify_report.total_files;
                     }
                     Err(e) => {
-                        warn!("⚠️ Verification warning: {}", e);
+                        send_healthcheck(&healthcheck_url, "/fail").await;
+                        return Err(format!("❌ Backup verification failed: {}", e).into());
                     }
                 }
             }
@@ -296,8 +347,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let _auth_token = check_fido2_auth().await?;
 
+            // Funcionalidades ainda não implementadas: falhar em vez de ignorar
+            // silenciosamente (restauraria tudo / o snapshot errado).
+            if files.is_some() {
+                return Err(
+                    "❌ --files (selective restore) is not yet supported; omit it to restore the whole snapshot"
+                        .into(),
+                );
+            }
+            if date.is_some() {
+                return Err(
+                    "❌ --date is not yet supported; use --snapshot <ID> (see `rsb snapshots list`)"
+                        .into(),
+                );
+            }
+
+            if key.is_some() {
+                warn_secret_arg("--key");
+            }
+            let key = config::resolve_encryption_key(
+                key,
+                config.as_deref().and_then(profile_name).as_deref(),
+                None,
+            );
+
             // Either config or backup must be provided
-            let (cfg, profile_name) = if let Some(ref config_path) = config {
+            let (cfg, _profile_name) = if let Some(ref config_path) = config {
                 // Traditional mode: use config file
                 let cfg = config::load_config(&config_path)?;
                 let name = config_path
@@ -354,20 +429,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             };
 
-            // Log file pattern and date filtering (future enhancements)
-            if let Some(ref pattern) = files {
-                println!("📋 File pattern: {} (selective restore pending)", pattern);
-            }
-            if let Some(ref date_str) = date {
-                println!(
-                    "📅 Restoring from date: {} (date-based snapshot selection pending)",
-                    date_str
-                );
-            }
-
             // Clone target for potential later use in verification
             let target_for_verify = target.clone();
 
+            let key = key.or_else(|| cfg.encryption_key.clone());
             let mut report_data = core::perform_restore(
                 &cfg,
                 snapshot.as_deref(),
@@ -395,8 +460,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         report_data.files_processed = verify_report.files_processed;
                     }
                     Err(e) => {
-                        eprintln!("⚠️  Verification warning: {}", e);
                         eprintln!("   Files may have integrity issues. Please review manually.");
+                        return Err(format!("❌ Restore verification failed: {}", e).into());
                     }
                 }
             }
@@ -435,6 +500,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             key,
         } => {
             let _auth_token = check_fido2_auth().await?;
+
+            if key.is_some() {
+                warn_secret_arg("--key");
+            }
+            let key = config::resolve_encryption_key(
+                key,
+                config.as_deref().and_then(profile_name).as_deref(),
+                None,
+            );
 
             // Determine verification mode: config or backup path
             let (cfg, profile_path) = if let Some(config_path) = config {
@@ -504,26 +578,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _auth_token = check_fido2_auth().await?;
             send_healthcheck(&healthcheck_url, "/start").await;
 
-            // Resolve config or backup path
-            let config_path = match (config, backup) {
-                (Some(c), _) => c.clone(),
-                (None, Some(b)) => b.clone(),
-                (None, None) => {
-                    let current = std::env::current_dir()?;
-                    let mut found = None;
-                    for entry in std::fs::read_dir(&current)? {
-                        let entry = entry?;
-                        let path = entry.path();
-                        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                            found = Some(path);
-                            break;
-                        }
-                    }
-                    found.ok_or_else(|| {
-                        anyhow!("No config found. Use --config <path> or --backup <path>")
-                    })?
-                }
-            };
+            // Resolve config or backup path (nunca Cargo.toml; erro se ambíguo)
+            let config_path = resolve_profile_path(config, backup)?;
 
             let cfg = config::load_config(&config_path)?;
 
@@ -565,26 +621,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             backup,
             format,
         } => {
-            // Resolve config or backup path
-            let config_path = match (config, backup) {
-                (Some(c), _) => c.clone(),
-                (None, Some(b)) => b.clone(),
-                (None, None) => {
-                    let current = std::env::current_dir()?;
-                    let mut found = None;
-                    for entry in std::fs::read_dir(&current)? {
-                        let entry = entry?;
-                        let path = entry.path();
-                        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                            found = Some(path);
-                            break;
-                        }
-                    }
-                    found.ok_or_else(|| {
-                        anyhow!("No config found. Use --config <path> or --backup <path>")
-                    })?
-                }
-            };
+            // Resolve config or backup path (nunca Cargo.toml; erro se ambíguo)
+            let config_path = resolve_profile_path(config, backup)?;
 
             let abs_config = std::fs::canonicalize(&config_path).unwrap_or(config_path.clone());
             let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rsb"));
@@ -592,20 +630,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let exe_str = format!("\"{}\"", exe.display());
             let config_str = format!("\"{}\"", abs_config.display());
 
+            // Nunca gerar `--key` na linha de comando (visível em `ps`, crontab,
+            // journal). A chave vem de RSB_ENCRYPTION_KEY num ficheiro 0600.
+            let env_file = dirs::home_dir()
+                .map(|h| h.join(".rs-shield").join("rsb-backup.env"))
+                .unwrap_or_else(|| PathBuf::from("rsb-backup.env"));
+            let env_file_str = env_file.display().to_string();
+            let key_env = config::ENCRYPTION_KEY_ENV;
+
             if format == "cron" {
-                println!("# Add this line to your crontab (crontab -e):");
+                println!("# 1) Store the encryption key in a file readable only by you:");
                 println!(
-                    "0 3 * * * {} backup {} --key \"YOUR_PASSWORD\"",
-                    exe_str, config_str
+                    "#    (umask 077 && printf '{}=%s\\n' 'YOUR_KEY' > \"{}\")",
+                    key_env, env_file_str
                 );
-            } else if format == "systemd" {
-                println!("# Example rsb-backup.service:");
+                println!("# 2) Add this line to your crontab (crontab -e):");
                 println!(
-                    "[Service]\nType=oneshot\nExecStart={} backup {} --key \"YOUR_PASSWORD\"",
-                    exe_str, config_str
+                    "0 3 * * * set -a && . \"{}\" && set +a && {} backup {} --storage local",
+                    env_file_str, exe_str, config_str
+                );
+                println!("# (use --storage s3 if the profile backs up to S3)");
+            } else if format == "systemd" {
+                println!("# 1) Create {} with mode 0600 containing:", env_file_str);
+                println!("#    {}=YOUR_KEY", key_env);
+                println!("# 2) Example rsb-backup.service:");
+                println!(
+                    "[Service]\nType=oneshot\nEnvironmentFile={}\nExecStart={} backup {} --storage local",
+                    env_file_str, exe_str, config_str
                 );
             } else {
-                println!("Unknown format. Use 'cron' or 'systemd'.");
+                return Err("Unknown format. Use 'cron' or 'systemd'.".into());
             }
         }
         Commands::Watch {
@@ -618,28 +672,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let _auth_token = check_fido2_auth().await?;
 
-            // Resolve config or backup path
-            let config_path = match (config, backup) {
-                (Some(c), _) => c.clone(),
-                (None, Some(b)) => b.clone(),
-                (None, None) => {
-                    let current = std::env::current_dir()?;
-                    let mut found = None;
-                    for entry in std::fs::read_dir(&current)? {
-                        let entry = entry?;
-                        let path = entry.path();
-                        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                            found = Some(path);
-                            break;
-                        }
-                    }
-                    found.ok_or_else(|| {
-                        anyhow!("No config found. Use --config <path> or --backup <path>")
-                    })?
-                }
-            };
+            // Resolve config or backup path (nunca Cargo.toml; erro se ambíguo)
+            let config_path = resolve_profile_path(config, backup)?;
 
             let mut cfg = config::load_config(&config_path)?;
+            // Watch sempre cifra: sem chave disponível → erro (nunca em claro).
+            let profile = profile_name(&config_path);
+            let key = obtain_encryption_key(key, profile.as_deref(), Some(&cfg), true)?
+                .ok_or("Encryption key required")?;
             cfg.encryption_key = Some(key);
 
             if let Some(url) = healthcheck_url {
@@ -762,10 +802,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Verify recovery code
                 if fido2_manager.verify_backup_code(&user_id, &recovery_code) {
-                    // Save the updated manager (recovery code was consumed)
-                    if let Ok(path) = Fido2Manager::default_storage_path() {
-                        let _ = fido2_manager.save_to_file(&path);
-                    }
+                    // Save the updated manager (recovery code was consumed).
+                    // Se não for possível persistir o consumo, o código continuaria
+                    // reutilizável → não emitir token.
+                    let path = Fido2Manager::default_storage_path()
+                        .map_err(|e| format!("❌ Cannot locate credential storage: {}", e))?;
+                    fido2_manager.save_to_file(&path).map_err(|e| {
+                        format!(
+                            "❌ Failed to persist consumed recovery code ({}); no token issued",
+                            e
+                        )
+                    })?;
 
                     // Create and save token
                     let jwt_mgr = rsb_sdk::auth::JwtManager::from_env()?;
@@ -776,19 +823,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("🔑 User: {}", user_id);
                     println!("📋 Scopes: {:?}\n", scopes);
 
-                    let home = dirs::home_dir().ok_or("❌ Home directory not found")?;
-                    let rsb_dir = home.join(".rs-shield");
-                    let _ = fs::create_dir_all(&rsb_dir);
-
-                    let auth_file = rsb_dir.join("auth_token");
-                    fs::write(&auth_file, &token)?;
-
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let perms = std::fs::Permissions::from_mode(0o600);
-                        fs::set_permissions(&auth_file, perms)?;
-                    }
+                    let auth_file = save_auth_token(&token)?;
 
                     info!("✅ Authentication successful with recovery code!");
                     info!("📍 Token saved to: {}", auth_file.display());
@@ -813,19 +848,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("🔑 User: {}", claims.sub);
                                 println!("📋 Scopes: {:?}\n", claims.scopes);
 
-                                let home = dirs::home_dir().ok_or("❌ Home directory not found")?;
-                                let rsb_dir = home.join(".rs-shield");
-                                let _ = fs::create_dir_all(&rsb_dir);
-
-                                let auth_file = rsb_dir.join("auth_token");
-                                fs::write(&auth_file, &token)?;
-
-                                #[cfg(unix)]
-                                {
-                                    use std::os::unix::fs::PermissionsExt;
-                                    let perms = std::fs::Permissions::from_mode(0o600);
-                                    fs::set_permissions(&auth_file, perms)?;
-                                }
+                                let auth_file = save_auth_token(&token)?;
 
                                 info!("✅ Authentication successful!");
                                 info!("📍 Token saved to: {}", auth_file.display());
@@ -877,10 +900,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             json: output_json,
             repair,
         } => {
+            // --repair altera o backup: exige autenticação como os outros comandos mutáveis.
+            if repair {
+                let _auth_token = check_fido2_auth().await?;
+            }
             if !backup.exists() {
                 eprintln!("❌ Error: Backup path not found: {}", backup.display());
                 return Err(format!("Backup not found: {}", backup.display()).into());
             }
+            if key.is_some() {
+                warn_secret_arg("--key");
+            }
+            let key = config::resolve_encryption_key(key, None, None);
 
             println!("🔍 Diagnosing backup: {}\n", backup.display());
 
@@ -903,4 +934,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Grava o token de sessão em ~/.rs-shield/auth_token (dir 0700, ficheiro 0600
+/// criado já com essas permissões).
+fn save_auth_token(token: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let home = dirs::home_dir().ok_or("❌ Home directory not found")?;
+    let rsb_dir = home.join(".rs-shield");
+    config::create_dir_secure(&rsb_dir)?;
+    let auth_file = rsb_dir.join("auth_token");
+    config::write_file_secure(&auth_file, token.as_bytes())?;
+    Ok(auth_file)
 }

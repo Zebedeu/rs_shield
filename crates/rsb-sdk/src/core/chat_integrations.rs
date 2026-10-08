@@ -1,6 +1,57 @@
-use reqwest::Client;
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::{error, info};
+
+/// Timeout aplicado a todos os pedidos HTTP de notificações.
+pub const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Cliente HTTP com timeout (evita bloqueios indefinidos em webhooks lentos).
+pub fn http_client() -> Result<Client, String> {
+    Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e.without_url()))
+}
+
+/// Exige https para webhooks; http só é permitido para loopback (testes locais).
+pub fn validate_webhook_url(raw: &str) -> Result<Url, String> {
+    let url = Url::parse(raw).map_err(|_| "Invalid webhook URL".to_string())?;
+    match url.scheme() {
+        "https" => Ok(url),
+        "http" => {
+            let is_loopback = match url.host_str() {
+                Some(h) if h.eq_ignore_ascii_case("localhost") => true,
+                Some(h) => h
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false),
+                None => false,
+            };
+            if is_loopback {
+                Ok(url)
+            } else {
+                Err("Webhook URL must use https (http is only allowed for localhost)".to_string())
+            }
+        }
+        _ => Err("Webhook URL must use https".to_string()),
+    }
+}
+
+/// Versão redigida de um URL (mantém só esquema + host) para logs/histórico,
+/// pois o path/query de webhooks contém segredos (tokens).
+pub fn redact_url(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(url) => match url.host_str() {
+            Some(host) => format!("{}://{}/***", url.scheme(), host),
+            None => "***".to_string(),
+        },
+        Err(_) => "***".to_string(),
+    }
+}
 
 /// Configuration for chat integrations (Slack, Telegram, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,8 +215,9 @@ async fn send_slack_notification(
         ]),
     };
 
-    let client = Client::new();
-    match client.post(webhook_url).json(&slack_msg).send().await {
+    let url = validate_webhook_url(webhook_url)?;
+    let client = http_client()?;
+    match client.post(url).json(&slack_msg).send().await {
         Ok(response) => {
             if response.status().is_success() {
                 info!(
@@ -179,6 +231,8 @@ async fn send_slack_notification(
             }
         }
         Err(e) => {
+            // `without_url` evita vazar o segredo do webhook em logs/erros.
+            let e = e.without_url();
             error!("❌ [Slack] Connection error: {}", e);
             Err(Box::new(e))
         }
@@ -219,7 +273,7 @@ async fn send_telegram_notification(
     };
 
     let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-    let client = Client::new();
+    let client = http_client()?;
 
     match client.post(&url).json(&telegram_msg).send().await {
         Ok(response) => {
@@ -272,6 +326,8 @@ async fn send_telegram_notification(
             }
         }
         Err(e) => {
+            // O URL contém o bot token — nunca o incluir no erro.
+            let e = e.without_url();
             error!("❌ [Telegram] Connection error: {}", e);
             Err(format!("Connection error: {}", e).into())
         }
@@ -319,8 +375,9 @@ async fn send_discord_notification(
         }]),
     };
 
-    let client = Client::new();
-    match client.post(webhook_url).json(&discord_msg).send().await {
+    let url = validate_webhook_url(webhook_url)?;
+    let client = http_client()?;
+    match client.post(url).json(&discord_msg).send().await {
         Ok(response) => {
             if response.status().is_success() {
                 let color_str = format!("#{:06x}", color);
@@ -335,6 +392,7 @@ async fn send_discord_notification(
             }
         }
         Err(e) => {
+            let e = e.without_url();
             error!("❌ [Discord] Connection error: {}", e);
             Err(Box::new(e))
         }
@@ -378,6 +436,24 @@ mod tests {
             chat_id: "-1001234567890".to_string(),
         };
         matches!(telegram, ChatIntegration::Telegram { .. });
+    }
+
+    #[test]
+    fn test_webhook_url_requires_https() {
+        assert!(validate_webhook_url("https://hooks.slack.com/services/x").is_ok());
+        assert!(validate_webhook_url("http://127.0.0.1:8080/hook").is_ok());
+        assert!(validate_webhook_url("http://localhost/hook").is_ok());
+        assert!(validate_webhook_url("http://example.com/hook").is_err());
+        assert!(validate_webhook_url("ftp://example.com/hook").is_err());
+    }
+
+    #[test]
+    fn test_redact_url() {
+        assert_eq!(
+            redact_url("https://hooks.slack.com/services/T000/B000/SECRET"),
+            "https://hooks.slack.com/***"
+        );
+        assert_eq!(redact_url("not a url"), "***");
     }
 
     #[test]
