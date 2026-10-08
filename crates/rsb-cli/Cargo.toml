@@ -16,7 +16,6 @@ rsb-sdk = { path = "../rsb-sdk", features = ["cli"] }
 # CLI
 
 clap = { workspace = true }
-atty = { workspace = true }
 indicatif = { workspace = true }
 console = { workspace = true }
 rpassword = { workspace = true }

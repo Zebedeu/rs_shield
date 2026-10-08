@@ -148,16 +148,124 @@ pub fn write_config_secure(path: &std::path::Path, config: &Config) -> std::io::
         }
     }
     let toml_str = toml::to_string_pretty(config).map_err(std::io::Error::other)?;
-    std::fs::write(path, toml_str)?;
+    write_file_secure(path, toml_str.as_bytes())
+}
+
+/// Escreve um ficheiro criado já com modo 0600 (sem janela create-then-chmod).
+/// Se o ficheiro já existir, as permissões são também apertadas para 0600.
+pub fn write_file_secure(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(contents)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Cria um diretório (recursivamente) com modo 0700 em unix.
+pub fn create_dir_secure(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+        // Diretório pré-existente: garantir 0700.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+/// Variável de ambiente com a chave de cifra (preferida a `--key`, que fica
+/// visível em `ps` e no histórico da shell).
+pub const ENCRYPTION_KEY_ENV: &str = "RSB_ENCRYPTION_KEY";
+const KEYRING_SERVICE: &str = "rsb-shield";
+
+fn keyring_account(profile: &str) -> String {
+    format!("encryption-key:{}", profile)
+}
+
+/// Guarda a chave de cifra de um perfil no keyring do SO.
+pub fn store_encryption_key_in_keyring(profile: &str, key: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, &keyring_account(profile))
+        .map_err(|e| format!("Keyring unavailable: {}", e))?;
+    entry
+        .set_password(key)
+        .map_err(|e| format!("Failed to store key in keyring: {}", e))
+}
+
+/// Lê a chave de cifra de um perfil do keyring do SO (se existir).
+pub fn load_encryption_key_from_keyring(profile: &str) -> Option<String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, &keyring_account(profile)).ok()?;
+    entry.get_password().ok().filter(|k| !k.is_empty())
+}
+
+/// Resolve a chave de cifra por ordem: `explicit` (flag CLI, legado) →
+/// env `RSB_ENCRYPTION_KEY` → keyring do perfil → chave legada no TOML.
+/// Não faz prompt interativo (responsabilidade do chamador).
+pub fn resolve_encryption_key(
+    explicit: Option<String>,
+    profile: Option<&str>,
+    config: Option<&Config>,
+) -> Option<String> {
+    if let Some(k) = explicit.filter(|k| !k.is_empty()) {
+        return Some(k);
+    }
+    if let Ok(k) = std::env::var(ENCRYPTION_KEY_ENV) {
+        if !k.is_empty() {
+            return Some(k);
+        }
+    }
+    if let Some(p) = profile {
+        if let Some(k) = load_encryption_key_from_keyring(p) {
+            return Some(k);
+        }
+    }
+    config.and_then(|c| c.encryption_key.clone()).filter(|k| !k.is_empty())
+}
+
+/// Nível de compressão máximo suportado pelo zstd.
+pub const MAX_COMPRESSION_LEVEL: u8 = 22;
+
+/// Valida o nível de compressão (0 = sem compressão / default, 1..=22 zstd).
+pub fn validate_compression_level(level: u8) -> io::Result<()> {
+    if level > MAX_COMPRESSION_LEVEL {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid compression level {} (allowed: 0-{}; zstd levels are 1-22)",
+                level, MAX_COMPRESSION_LEVEL
+            ),
+        ));
     }
     Ok(())
 }
 
 impl Config {
+    /// O perfil exige cifra (encrypt_patterns definido e não vazio)?
+    pub fn encryption_required(&self) -> bool {
+        self.encrypt_patterns
+            .as_ref()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
+    }
+
     /// Retorna o número de threads a usar (com fallback inteligente)
     pub fn get_max_threads(&self) -> usize {
         if let Some(threads) = self.max_threads {
@@ -210,10 +318,25 @@ pub fn create_profile_with_options(
         default_exclude_patterns()
     };
 
-    if password.is_some() {
-        eprintln!(
-            "⚠️ encryption_key via TOML é legado e não será persistido. Forneça a chave via prompt (--encrypt) ou RSB_ENCRYPTION_KEY; o perfil guardará só encrypt_patterns."
-        );
+    if let Some(c) = compression {
+        validate_compression_level(c)?;
+    }
+
+    // A chave nunca vai para o TOML: se fornecida, guarda-se no keyring do SO
+    // (lida depois por `resolve_encryption_key`). Sem keyring, o utilizador
+    // deve usar RSB_ENCRYPTION_KEY ou o prompt interativo no backup.
+    if let Some(pwd) = password {
+        if !encrypt {
+            eprintln!("⚠️ Password provided without --encrypt; it will be ignored.");
+        } else {
+            match store_encryption_key_in_keyring(name, pwd) {
+                Ok(()) => println!("🔐 Encryption key stored in OS keyring for profile '{}'", name),
+                Err(e) => eprintln!(
+                    "⚠️ {} — the key was NOT saved. Provide it at backup time via {} or the interactive prompt.",
+                    e, ENCRYPTION_KEY_ENV
+                ),
+            }
+        }
     }
     let config = Config {
         source_path: source.to_string_lossy().into_owned(),
@@ -436,8 +559,7 @@ pub fn prompt_for_s3_config(config_path: &Path) -> io::Result<()> {
     config.s3 = Some(s3_config);
     config.s3_buckets = Some(known_buckets);
 
-    let toml_str = toml::to_string(&config).map_err(io::Error::other)?;
-    fs::write(config_path, toml_str)?;
+    write_config_secure(config_path, &config)?;
 
     println!("\n✅ S3 configuration updated:");
     println!("   Bucket:   {}", bucket_config.name);
