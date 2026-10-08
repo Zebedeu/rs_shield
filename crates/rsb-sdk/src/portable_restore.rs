@@ -174,7 +174,11 @@ pub fn validate_backup_structure(backup_path: &Path) -> BackupValidation {
     // Count files if structure valid
     if snapshots_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&snapshots_dir) {
-            validation.snapshots_count = entries.count();
+            validation.snapshots_count = entries
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .filter(|e| is_snapshot_manifest_name(&e.file_name().to_string_lossy()))
+                .count();
         }
 
         if validation.snapshots_count == 0 {
@@ -189,9 +193,14 @@ pub fn validate_backup_structure(backup_path: &Path) -> BackupValidation {
     }
 
     if data_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&data_dir) {
-            validation.data_files_count = entries.count();
-        }
+        // Data objects live under `data/clear/<hash>` and `data/enc/<hash>`;
+        // count the objects themselves, not the `clear`/`enc` subdirectories.
+        validation.data_files_count = walkdir::WalkDir::new(&data_dir)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| !is_temp_or_hidden(&e.file_name().to_string_lossy()))
+            .count();
 
         if validation.data_files_count == 0 {
             validation.warnings.push("No data files found".to_string());
@@ -199,6 +208,18 @@ pub fn validate_backup_structure(backup_path: &Path) -> BackupValidation {
     }
 
     validation
+}
+
+/// True for leftovers of an interrupted atomic write (`.<name>.rsb-tmp-<id>`)
+/// and other hidden files, which are not part of the backup contents.
+fn is_temp_or_hidden(name: &str) -> bool {
+    name.starts_with('.') || name.contains(crate::storage::TMP_MARKER)
+}
+
+/// True for a snapshot manifest file (`<timestamp>[-n].toml`), ignoring
+/// temp files from atomic writes and unrelated entries.
+fn is_snapshot_manifest_name(name: &str) -> bool {
+    !is_temp_or_hidden(name) && name.len() > ".toml".len() && name.ends_with(".toml")
 }
 
 /// Backup validation result structure

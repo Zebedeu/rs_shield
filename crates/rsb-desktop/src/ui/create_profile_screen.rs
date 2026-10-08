@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::ui::components::{
-    Button, ButtonSize, ButtonVariant, Card, CardVariant, Input, InputState, InputVariant,
+    Button, ButtonSize, ButtonVariant, Card, CardVariant, Input, InputVariant,
 };
 use crate::ui::{app::AppConfig, i18n::get_texts};
 use rsb_sdk::credentials::SecureString;

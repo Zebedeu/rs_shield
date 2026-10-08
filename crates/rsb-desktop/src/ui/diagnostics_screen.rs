@@ -21,14 +21,6 @@ enum DiagnosticStatus {
 }
 
 impl DiagnosticStatus {
-    fn color(&self) -> &'static str {
-        match self {
-            DiagnosticStatus::Healthy => "emerald",
-            DiagnosticStatus::Warning => "yellow",
-            DiagnosticStatus::Critical => "red",
-        }
-    }
-
     fn icon(&self) -> &'static str {
         match self {
             DiagnosticStatus::Healthy => "✅",
@@ -61,7 +53,7 @@ pub fn DiagnosticsScreen() -> Element {
             // - Database integrity
             // - Last backup status
 
-            let mut diags = vec![
+            let diags = vec![
                 DiagnosticInfo {
                     category: "Storage".to_string(),
                     status: DiagnosticStatus::Healthy,
@@ -166,7 +158,6 @@ pub fn DiagnosticsScreen() -> Element {
             div { class: "space-y-4",
                 for diag in diagnostics.read().iter() {
                     {
-                        let color = diag.status.color();
                         let icon = diag.status.icon();
                         let category = diag.category.clone();
                         let message = diag.message.clone();

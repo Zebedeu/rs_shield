@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dioxus::{logger::tracing, prelude::*};
+use dioxus::prelude::*;
 use dioxus_desktop::{LogicalSize, use_window};
 use rsb_sdk::metrics::system::{
     SystemMetrics, format_bytes_gb, format_percentage_color, get_system_metrics,
@@ -218,7 +218,7 @@ pub fn App() -> Element {
     let window = use_window();
     let mut started = use_signal(|| false);
 
-    let fido2_manager_arc = use_context_provider(|| {
+    use_context_provider(|| {
         let origin = "http://localhost:3000";
         let rp_id = "localhost";
         let mut mgr = rsb_sdk::credentials::Fido2Manager::new(origin, rp_id, "RSB Shield Desktop")
@@ -236,7 +236,7 @@ pub fn App() -> Element {
 
     use_context_provider(|| authenticated_user);
 
-    let mut logout = move |_| {
+    let logout = move |_| {
         authenticated_user.set(None);
         active_tab.set(ActiveTab::Backup);
     };

@@ -133,13 +133,6 @@ pub fn RestoreScreen() -> Element {
             let rst = restore_to();
             let snap = snapshot_id();
             let key_val = key();
-            let excludes_str = app_config.exclude_patterns();
-            let mode = app_config.backup_mode();
-            let s3_bucket = app_config.s3_bucket();
-            let s3_region = app_config.s3_region();
-            let s3_endpoint = app_config.s3_endpoint();
-            let s3_access_key = app_config.s3_access_key();
-            let s3_secret_key = app_config.s3_secret_key();
             let rst_for_record = rst.clone();
 
             let progress_cb = Arc::new(move |current: usize, total: usize, msg: String| {

@@ -23,7 +23,7 @@ struct IntegrityStatus {
 
 #[component]
 pub fn BackupIntegrityScreen() -> Element {
-    let mut app_config = use_context::<AppConfig>();
+    let app_config = use_context::<AppConfig>();
     let texts = get_texts(app_config.language());
     let mut backup_path = use_signal(|| PathBuf::new());
     let mut status_msg = use_signal(|| "🔍 Select a backup folder".to_string());
