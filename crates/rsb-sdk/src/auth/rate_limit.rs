@@ -46,6 +46,13 @@ impl RateLimiter {
         }
     }
 
+    /// Limpeza oportunista de janelas expiradas (evita crescimento sem limite).
+    pub async fn cleanup_expired(&self) {
+        let mut counters = self.counters.write().await;
+        let now = Utc::now();
+        counters.retain(|_, c| c.reset_at > now);
+    }
+
     pub async fn get_remaining(&self, user_id: &str) -> u32 {
         let counters = self.counters.read().await;
         let now = Utc::now();

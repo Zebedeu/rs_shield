@@ -5,7 +5,7 @@ pub mod provider;
 pub mod secure_string;
 pub mod web_authn;
 
-pub use credentials_manager::CredentialsManager;
+pub use credentials_manager::{CredentialsManager, S3Credentials};
 pub use fido2_manager::{Fido2Error, Fido2Manager};
 pub use provider::{
     CredentialsProvider, SharedCredentialsProvider, create_env_provider, create_static_provider,

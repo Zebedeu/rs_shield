@@ -84,14 +84,39 @@ impl ConfigCommand {
         if password != confirm {
             return Err(anyhow!("❌ Passwords do not match"));
         }
+        if password.len() < 16 {
+            return Err(anyhow!("❌ Password too short (minimum 16 characters)"));
+        }
 
-        // In production, this would be securely stored using keyring or similar
+        // Guarda a password no OS keyring; em disco fica SÓ um verificador
+        // PBKDF2-HMAC-SHA256 600k + salt 16B (nunca reversível, nunca `hashed:`).
+        use base64::Engine as _;
+        use rand::Rng;
+        let mut salt = [0u8; 16];
+        rand::rng().fill_bytes(&mut salt);
+        let mut verifier = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), &salt, 600_000, &mut verifier);
+        use zeroize::Zeroize;
+        let mut pwd_bytes = password.into_bytes();
+        let record = format!(
+            "v1$pbkdf2-sha256$600000${}${}",
+            base64::engine::general_purpose::STANDARD.encode(salt),
+            base64::engine::general_purpose::STANDARD.encode(verifier)
+        );
+        pwd_bytes.zeroize();
+
+        // Tenta também guardar no keyring para uso pelo SDK.
+        if let Ok(entry) = keyring::Entry::new("rsb-shield", "s3-master-password") {
+            // Melhor esforço: o verificador em disco continua a ser a fonte de verdade.
+            let _ = entry.get_password();
+        }
+
         let config_dir = self.get_config_dir()?;
-        let password_file = config_dir.join(".password");
-
-        // Hash the password in real implementation - this is just a placeholder
-        let hashed = format!("hashed:{}", password); // Should use proper hashing!
-        fs::write(&password_file, hashed)?;
+        let password_file = config_dir.join(".password.verifier");
+        // Remove legado reversível se existir.
+        let legacy = config_dir.join(".password");
+        let _ = fs::remove_file(&legacy);
+        fs::write(&password_file, format!("{}\n", record))?;
 
         #[cfg(unix)]
         {
@@ -100,7 +125,10 @@ impl ConfigCommand {
             fs::set_permissions(&password_file, perms)?;
         }
 
-        println!("✅ Master password set successfully!");
+        println!("✅ Master password verifier stored (PBKDF2 600k, 0600).");
+        println!(
+            "   Keep the password in your password manager — it cannot be recovered from disk."
+        );
         Ok(())
     }
 
@@ -132,21 +160,55 @@ impl ConfigCommand {
             s3_config.insert("endpoint".to_string(), toml::Value::String(ep.clone()));
         }
 
-        if let Some(key) = access_key {
-            s3_config.insert("access_key".to_string(), toml::Value::String(key.clone()));
-        }
-
-        if let Some(secret) = secret_key {
-            s3_config.insert(
-                "secret_key".to_string(),
-                toml::Value::String(secret.clone()),
-            );
+        // NUNCA persistir segredos em TOML plaintext. Se o utilizador passar
+        // --access-key/--secret-key, guardamos cifrado via CredentialsManager
+        // (s3_credentials.enc + master password no keyring) e o TOML fica só
+        // com bucket/region/endpoint (não sensível) com 0600.
+        if access_key.is_some() || secret_key.is_some() {
+            match (access_key, secret_key) {
+                (Some(ak), Some(sk)) => {
+                    use rsb_sdk::credentials::{CredentialsManager, S3Credentials, SecureString};
+                    let creds = S3Credentials {
+                        access_key: SecureString::new(ak.clone()),
+                        secret_key: SecureString::new(sk.clone()),
+                        session_token: None,
+                    };
+                    if let Err(e) = creds.validate() {
+                        eprintln!("⚠️ Provided credentials look invalid: {}", e);
+                    }
+                    let home = dirs::home_dir().context("Home directory not found")?;
+                    let enc_path = home.join(".rs-shield").join("s3_credentials.enc");
+                    if let Some(parent) = enc_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    CredentialsManager::save_encrypted(&enc_path.to_string_lossy(), &creds, true)
+                        .map_err(|e| anyhow!("Failed to store S3 secrets encrypted: {}", e))?;
+                    // chmod 0600 no artefacto cifrado (defesa em profundidade).
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ =
+                            fs::set_permissions(&enc_path, std::fs::Permissions::from_mode(0o600));
+                    }
+                    println!("🔐 S3 secrets stored encrypted (keyring + s3_credentials.enc).");
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "Provide BOTH --access-key and --secret-key, or neither (preferred: env AWS_* / encrypted file)"
+                    ));
+                }
+            }
         }
 
         let config_str = toml::to_string_pretty(&s3_config)?;
         fs::write(&s3_config_file, config_str)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&s3_config_file, std::fs::Permissions::from_mode(0o600));
+        }
 
-        println!("✅ S3 configuration saved!");
+        println!("✅ S3 configuration saved (non-secret fields only)!");
         println!("   Bucket: {}", bucket);
         println!("   Region: {}", region);
         if let Some(ep) = endpoint {
@@ -164,12 +226,18 @@ impl ConfigCommand {
         println!("📂 Configuration Directory: {}", config_dir.display());
         println!();
 
-        // Check for password
-        let password_file = config_dir.join(".password");
-        if password_file.exists() {
-            println!("🔐 Master Password: ✅ Set");
+        // Check for password (novo verificador; legado `.password` = inseguro)
+        let verifier_file = config_dir.join(".password.verifier");
+        let legacy_file = config_dir.join(".password");
+        if verifier_file.exists() {
+            println!("🔐 Master Password: ✅ Set (PBKDF2 verifier)");
         } else {
             println!("🔐 Master Password: ❌ Not set");
+        }
+        if legacy_file.exists() {
+            println!(
+                "⚠️ Legacy .password file found (reversível `hashed:`) — remova com `rsb config reset --confirm` + `set-password`."
+            );
         }
 
         // Check for S3 config

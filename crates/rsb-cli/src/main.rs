@@ -491,9 +491,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             keep_last,
             retention,
             dry_run,
+            confirm,
             quiet,
             healthcheck_url,
         } => {
+            if !dry_run && !confirm {
+                return Err(
+                    "Refusing destructive prune without --confirm (or preview with --dry-run). Re-run with --confirm to proceed."
+                        .into(),
+                );
+            }
             let _auth_token = check_fido2_auth().await?;
             send_healthcheck(&healthcheck_url, "/start").await;
 
@@ -761,7 +768,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // Create and save token
-                    let jwt_mgr = rsb_sdk::auth::JwtManager::new("rsb-shield-secret-key-256bit")?;
+                    let jwt_mgr = rsb_sdk::auth::JwtManager::from_env()?;
                     let scopes = vec!["backup".to_string(), "restore".to_string()];
                     let token = jwt_mgr.create_token(&user_id, scopes.clone(), 3600)?;
 
@@ -800,8 +807,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match login_flow.start(user_id.clone()).await {
                     Ok(token) => {
                         // Verify and save token
-                        let jwt_mgr =
-                            rsb_sdk::auth::JwtManager::new("rsb-shield-secret-key-256bit")?;
+                        let jwt_mgr = rsb_sdk::auth::JwtManager::from_env()?;
                         match jwt_mgr.verify_token(&token) {
                             Ok(claims) => {
                                 println!("🔑 User: {}", claims.sub);

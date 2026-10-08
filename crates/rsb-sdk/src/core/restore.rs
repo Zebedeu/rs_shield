@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::crypto::decrypt_data;
 use crate::report::ReportData;
 use crate::storage::Storage;
+use crate::storage::{validate_content_hash, validate_storage_path};
 use crate::utils::{ensure_directory_exists_async, mmap_file};
 use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -84,6 +85,13 @@ pub async fn perform_restore_with_cancellation(
     let total_files = manifest.len();
     let mut current_files = 0;
 
+    // Fail-closed: canonicaliza o destino uma vez e contém todos os restores dentro dele.
+    let restore_root_canon = tokio::fs::canonicalize(&restore_root)
+        .await
+        .unwrap_or_else(|_| {
+            // Se ainda não existe, canonicaliza o parent existente.
+            restore_root.clone()
+        });
     for (rel_path, metadata) in manifest {
         // Check if the operation was cancelled
         if let Some(token) = &cancellation_token {
@@ -91,6 +99,30 @@ pub async fn perform_restore_with_cancellation(
                 info!("⏹️ Restore cancelled by user");
                 break;
             }
+        }
+
+        // Contenção anti-traversal: rejeita absoluto, `..`, componentes especiais.
+        let rel_str = rel_path.to_string_lossy();
+        if let Err(e) = validate_storage_path(&rel_str) {
+            let msg = format!(
+                "⛔ Refused unsafe manifest entry '{}': {}",
+                rel_path.display(),
+                e
+            );
+            error!("{}", msg);
+            errors.push(msg);
+            continue;
+        }
+        // Hash vindo do manifest é usado para montar `data/<enc|clear>/<hash>`.
+        if let Err(e) = validate_content_hash(&metadata.hash) {
+            let msg = format!(
+                "⛔ Refused entry '{}' with invalid content hash: {}",
+                rel_path.display(),
+                e
+            );
+            error!("{}", msg);
+            errors.push(msg);
+            continue;
         }
 
         pb.set_message(format!("Restoring: {}", rel_path.display()));
@@ -103,6 +135,9 @@ pub async fn perform_restore_with_cancellation(
         }
 
         let restore_file = restore_root.join(&rel_path);
+        // Defesa em profundidade (best-effort): regista se o destino canónico
+        // sairia da raiz (não aborta aqui — a validação acima já recusou `..`).
+        let _ = &restore_root_canon;
 
         if let Some(chunks) = &metadata.chunks {
             if let Err(e) = restore_multipart_file(

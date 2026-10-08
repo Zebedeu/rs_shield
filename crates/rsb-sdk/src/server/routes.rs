@@ -39,6 +39,18 @@ pub fn create_auth_router<S: SessionStore + Clone + 'static>(state: AuthHandlerS
         .with_state(state)
 }
 
+/// Absolute audit log path outside the repo (fail-closed, no CWD dependence).
+pub fn default_audit_log_path() -> String {
+    if let Some(home) = dirs::home_dir() {
+        return home
+            .join(".rs-shield")
+            .join("audit.log")
+            .to_string_lossy()
+            .into_owned();
+    }
+    "audit.log".to_string()
+}
+
 /// Start auth server for integrated login flow
 pub async fn start_auth_server(
     port: u16,
@@ -58,10 +70,21 @@ pub async fn start_auth_server(
         }
     }
 
-    let jwt_mgr = JwtManager::new("rsb-shield-secret-key-256bit")?;
+    let jwt_mgr = JwtManager::from_env()?;
     let session_store = Arc::new(InMemorySessionStore::new());
     let rate_limiter = Arc::new(auth::RateLimiter::new(5, 60));
-    let audit_logger = Arc::new(auth::AuditLogger::new(Some("audit.log".to_string())));
+    let audit_logger = Arc::new(auth::AuditLogger::new(Some(default_audit_log_path())));
+    // Periodic cleanup of expired sessions + device flows (availability hygiene).
+    {
+        let store = session_store.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                let _ = store.cleanup_expired().await;
+            }
+        });
+    }
 
     let auth_state = AuthHandlerState {
         jwt_manager: Arc::new(jwt_mgr),
@@ -103,7 +126,9 @@ pub async fn check_fido2_auth() -> Result<String, Box<dyn std::error::Error>> {
     }
 
     // 1. Validação Local (JWT Signature & Expiration)
-    let jwt_mgr = auth::JwtManager::new("rsb-shield-secret-key-256bit")?;
+    // Fail-closed: a validação remota é obrigatória. Sem servidor não há
+    // como verificar revogação (JTI), então recusamos em vez de aceitar.
+    let jwt_mgr = auth::JwtManager::from_env()?;
     jwt_mgr
         .verify_token(trimmed_token)
         .map_err(|e| format!("❌ Session expired or invalid: {}", e))?;
@@ -119,9 +144,10 @@ pub async fn check_fido2_auth() -> Result<String, Box<dyn std::error::Error>> {
     match res {
         Ok(resp) if resp.status().is_success() => Ok(trimmed_token.to_string()),
         Ok(_) => Err("❌ Session revoked or expired on server. Please login again.".into()),
-        Err(_) => {
-            println!("⚠️ Auth server unreachable. Proceeding with local validation only.");
-            Ok(trimmed_token.to_string())
-        }
+        Err(e) => Err(format!(
+            "❌ Auth server unreachable, cannot verify revocation (fail-closed). Start the auth server and login again. ({})",
+            e
+        )
+        .into()),
     }
 }

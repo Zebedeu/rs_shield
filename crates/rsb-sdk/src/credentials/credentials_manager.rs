@@ -80,8 +80,20 @@ impl CredentialsManager {
         let encrypted_json = serde_json::to_string_pretty(&encrypted)
             .map_err(|e| format!("Error serializing encrypted data: {}", e))?;
 
-        std::fs::write(file_path, encrypted_json)
+        std::fs::write(file_path, &encrypted_json)
             .map_err(|e| format!("Error writing file: {}", e))?;
+        // 0600 best-effort mesmo cifrado (defesa em profundidade).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(file_path, std::fs::Permissions::from_mode(0o600));
+        }
+        // Limpa cópia plaintext do JSON da memória (antes ficava em RAM).
+        {
+            use zeroize::Zeroize;
+            let mut buf = encrypted_json.into_bytes();
+            buf.zeroize();
+        }
 
         tracing::info!("S3 credentials encrypted and saved to: {}", file_path);
         Ok(())
@@ -278,35 +290,18 @@ impl CredentialsManager {
     /// Uses username hash + timestamp to create a password that can be regenerated if needed.
     /// The password is stored in the system keyring for secure access.
     pub fn generate_automatic_master_password() -> Result<String, String> {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let username = std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "unknown".to_string());
-
-        // Generate deterministic hash based on username + timestamp
-        // This ensures the password can be regenerated consistently
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            / 86400; // Divide by seconds per day to have a more stable value
-
-        // Create password with mixed characters: uppercase, lowercase, number, special character
-        let password = format!(
-            "RsShield_{}_{}_{}_!",
-            username.to_uppercase().chars().take(4).collect::<String>(),
-            timestamp,
-            uuid::Uuid::new_v4()
-                .to_string()
-                .chars()
-                .take(8)
-                .collect::<String>()
-        );
+        // ANTES: formato previsível `RsShield_USER_dia_uuid8` (~32 bits efetivos).
+        // AGORA: 32 bytes CSPRNG (256 bits) em Base64 — sem estrutura fingerprintável.
+        use rand::Rng;
+        let mut buf = [0u8; 32];
+        rand::rng().fill_bytes(&mut buf);
+        let password = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, buf);
 
         // Save to keyring
         Self::save_master_password_to_keyring(&password)?;
-        tracing::info!("🔐 Master Password automatically generated and saved to keyring");
+        tracing::info!(
+            "🔐 Master Password automatically generated (256-bit CSPRNG) and saved to keyring"
+        );
 
         Ok(password)
     }

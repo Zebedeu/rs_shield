@@ -16,6 +16,16 @@ pub struct EncryptionKey {
     salt: [u8; 16],
 }
 
+impl Drop for EncryptionKey {
+    fn drop(&mut self) {
+        // LessSafeKey não expõe zeroize; limpamos o salt e deixamos o resto
+        // sair de escopo. O segredo principal (password) deve ser envolto em
+        // SecureString/zeroize no chamador — ver credentials_manager.
+        use zeroize::Zeroize;
+        self.salt.zeroize();
+    }
+}
+
 impl EncryptionKey {
     /// Derive the encryption key **only once** from the password
     pub fn new(password: &[u8]) -> io::Result<Self> {
@@ -35,15 +45,21 @@ impl EncryptionKey {
         );
 
         let unbound_key = UnboundKey::new(&AES_256_GCM, &derived_key).map_err(|_| {
+            use zeroize::Zeroize;
+            derived_key.zeroize();
             io::Error::new(ErrorKind::InvalidInput, "Failed to create encryption key")
         })?;
 
         debug!("🔑 Encryption key derived successfully (PBKDF2 executed only once)");
 
-        Ok(EncryptionKey {
+        let key = EncryptionKey {
             key: LessSafeKey::new(unbound_key),
             salt,
-        })
+        };
+        // Limpa cópia intermédia imediatamente após import para o key object.
+        use zeroize::Zeroize;
+        derived_key.zeroize();
+        Ok(key)
     }
 
     /// Encrypt data using the pre-derived key (very fast)
@@ -117,10 +133,18 @@ pub fn decrypt_data(encrypted: &[u8], password: &[u8]) -> io::Result<Vec<u8>> {
         &mut derived_key,
     );
 
-    let unbound_key = UnboundKey::new(&AES_256_GCM, &derived_key)
-        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "Failed to create decryption key"))?;
+    let unbound_key = UnboundKey::new(&AES_256_GCM, &derived_key).map_err(|_| {
+        use zeroize::Zeroize;
+        derived_key.zeroize();
+        io::Error::new(ErrorKind::InvalidInput, "Failed to create decryption key")
+    })?;
 
     let key = LessSafeKey::new(unbound_key);
+    // Limpa cópia intermédia; a chave viva fica só dentro de LessSafeKey.
+    {
+        use zeroize::Zeroize;
+        derived_key.zeroize();
+    }
 
     let nonce_arr: [u8; NONCE_LEN] = nonce_bytes
         .try_into()
@@ -132,8 +156,10 @@ pub fn decrypt_data(encrypted: &[u8], password: &[u8]) -> io::Result<Vec<u8>> {
 
     let plaintext = key
         .open_in_place(nonce, Aad::empty(), &mut in_out)
-        .map_err(|e| {
-            error!("GCM tag verification failed: {:?}", e);
+        .map_err(|_| {
+            // Mensagem genérica: o motivo (tag vs formato) não vai para logs
+            // para não virar oráculo de padding/tag para quem lê logs.
+            error!("Decryption failed (wrong password, corrupted data or invalid format)");
             io::Error::new(
                 ErrorKind::InvalidData,
                 "Decryption failed: wrong password, corrupted data or invalid format",

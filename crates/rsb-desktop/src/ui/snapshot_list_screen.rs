@@ -30,10 +30,10 @@ pub fn SnapshotListScreen() -> Element {
 
     rsx! {
         div { class: "card",
-            div { class: "flex justify-between items-center mb-6",
-                h2 { class: "text-2xl font-bold text-slate-900 dark:text-white", "📸 {texts.nav_snapshots}" }
+            div { class: "flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-4",
+                h2 { class: "text-xl font-bold text-slate-900 dark:text-white", "📸 {texts.nav_snapshots}" }
                 button {
-                    class: "btn-secondary py-2 px-4 flex items-center gap-2",
+                    class: "btn-secondary py-1.5 px-3 flex items-center gap-1 text-sm",
                     onclick: load_snapshots,
                     disabled: is_loading(),
                     if is_loading() { "⏳ ..." } else { "🔄 Refresh" }
@@ -41,30 +41,30 @@ pub fn SnapshotListScreen() -> Element {
             }
 
             if snapshots.read().is_empty() {
-                div { class: "text-center py-12 bg-slate-50 dark:bg-slate-800/50 rounded-lg border-2 border-dashed border-slate-200 dark:border-slate-700",
-                    span { class: "text-4xl mb-4 block", "📂" }
+                div { class: "text-center py-6 bg-slate-50 dark:bg-slate-800/50 rounded-lg border-2 border-dashed border-slate-200 dark:border-slate-700",
+                    span { class: "text-xl mb-2 block", "📂" }
                     p { class: "text-slate-500 dark:text-slate-400", "{texts.no_snapshots_found}" }
                 }
             } else {
                 div { class: "overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700",
                     table { class: "w-full text-sm text-left",
-                        thead { class: "text-xs text-slate-700 dark:text-slate-300 uppercase bg-slate-100 dark:bg-slate-800",
+                        thead { class: "text-[10px] text-slate-700 dark:text-slate-300 uppercase bg-slate-100 dark:bg-slate-800",
                             tr {
-                                th { class: "px-4 py-3", "{texts.snapshot_id_col}" }
-                                th { class: "px-4 py-3", "{texts.snapshot_date_col}" }
-                                th { class: "px-4 py-3", "{texts.snapshot_host_col}" }
-                                th { class: "px-4 py-3", "{texts.snapshot_files_col}" }
-                                th { class: "px-4 py-3 text-right", "{texts.snapshot_size_col}" }
+                                th { class: "px-3 py-2", "{texts.snapshot_id_col}" }
+                                th { class: "px-3 py-2", "{texts.snapshot_date_col}" }
+                                th { class: "px-3 py-2", "{texts.snapshot_host_col}" }
+                                th { class: "px-3 py-2", "{texts.snapshot_files_col}" }
+                                th { class: "px-3 py-2 text-right", "{texts.snapshot_size_col}" }
                             }
                         }
                         tbody { class: "divide-y divide-slate-200 dark:divide-slate-700",
                             for s in snapshots.read().iter() {
                                 tr { class: "bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors",
-                                    td { class: "px-4 py-3 font-mono text-indigo-600 dark:text-indigo-400", "{s.id}" }
-                                    td { class: "px-4 py-3 text-slate-600 dark:text-slate-400", "{s.created_at.format(\"%Y-%m-%d %H:%M:%S\")}" }
-                                    td { class: "px-4 py-3 text-slate-600 dark:text-slate-400", "{s.hostname}" }
-                                    td { class: "px-4 py-3 text-slate-600 dark:text-slate-400", "{s.files_count}" }
-                                    td { class: "px-4 py-3 text-right font-medium text-slate-900 dark:text-white", "{human_bytes(s.total_size)}" }
+                                    td { class: "px-3 py-2 font-mono text-indigo-600 dark:text-indigo-400", "{s.id}" }
+                                    td { class: "px-3 py-2 text-slate-600 dark:text-slate-400", "{s.created_at.format(\"%Y-%m-%d %H:%M:%S\")}" }
+                                    td { class: "px-3 py-2 text-slate-600 dark:text-slate-400", "{s.hostname}" }
+                                    td { class: "px-3 py-2 text-slate-600 dark:text-slate-400", "{s.files_count}" }
+                                    td { class: "px-3 py-2 text-right font-medium text-slate-900 dark:text-white", "{human_bytes(s.total_size)}" }
                                 }
                             }
                         }

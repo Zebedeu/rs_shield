@@ -214,6 +214,10 @@ pub enum Commands {
         #[arg(short = 'd', long)]
         dry_run: bool,
 
+        /// Confirm destructive deletion (required unless --dry-run)
+        #[arg(long)]
+        confirm: bool,
+
         /// Quiet mode
         #[arg(short = 'q', long)]
         quiet: bool,

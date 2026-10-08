@@ -14,10 +14,10 @@ pub fn TabButton(
     };
     rsx! {
         button {
-            class: active_class,
+            class: "{active_class} text-xs",
             onclick: onclick,
-            span { class: "text-lg", "{icon}" }
-            span { "{label}" }
+            span { class: "text-xs", "{icon}" }
+            span { class: "text-xs font-medium", "{label}" }
         }
     }
 }

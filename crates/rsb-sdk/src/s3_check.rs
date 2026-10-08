@@ -15,6 +15,26 @@ pub async fn verify_s3_connection(
         return Err("Required fields (Bucket, Region, Keys) not filled.".to_string());
     }
 
+    // Fail-closed TLS: http só para loopback (MinIO local). Qualquer host
+    // remoto em http transportaria `HeadBucket` + credenciais em claro.
+    let ep = endpoint.trim();
+    if !ep.is_empty() {
+        let lower = ep.to_lowercase();
+        let is_http = lower.starts_with("http://");
+        let is_loopback = lower.contains("localhost") || lower.contains("127.0.0.1");
+        if is_http && !is_loopback {
+            return Err(
+                "Insecure endpoint: use https:// for non-local S3 endpoints (credentials would go in cleartext over http)."
+                    .to_string(),
+            );
+        }
+        if !lower.starts_with("https://") && !lower.starts_with("http://") {
+            return Err(
+                "Endpoint must start with https:// (or http://localhost for tests).".to_string(),
+            );
+        }
+    }
+
     let credentials = Credentials::new(access_key, secret_key, None, None, "manual_test");
 
     let region_provider = Region::new(region.to_string());

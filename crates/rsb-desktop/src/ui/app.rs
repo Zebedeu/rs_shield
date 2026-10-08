@@ -262,14 +262,14 @@ pub fn App() -> Element {
 
 
 
-            aside { class: "w-72 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex flex-col p-6 flex-shrink-0 z-10 shadow-sm",
+            aside { class: "w-64 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex flex-col p-4 flex-shrink-0 z-10 shadow-sm",
 
 
-                div { class: "flex items-center gap-3 pb-6 mb-2 border-b border-slate-100 dark:border-slate-800 select-none",
-                    span { class: "text-2xl filter drop-shadow-sm flex-shrink-0", "🛡️" }
+                div { class: "flex items-center gap-2 pb-3 mb-2 border-b border-slate-100 dark:border-slate-800 select-none",
+                    span { class: "text-lg filter drop-shadow-sm flex-shrink-0", "🛡️" }
                     div { class: "flex flex-col min-w-0",
-                        span { class: "text-base font-bold tracking-tight text-slate-900 dark:text-white truncate", "RSB Shield" }
-                        span { class: "text-[11px] text-slate-400 dark:text-slate-500 font-medium truncate", "Secure Backup Solutions" }
+                        span { class: "text-sm font-semibold tracking-tight text-slate-900 dark:text-white truncate", "RSB Shield" }
+                        span { class: "text-[10px] text-slate-400 dark:text-slate-500 font-medium truncate", "Secure Backup Solutions" }
                     }
                 }
 
@@ -322,8 +322,8 @@ pub fn App() -> Element {
                         }
                     }
                 } else {
-                    div { class: "flex-1 flex flex-col items-center justify-center text-center p-4 bg-slate-50 dark:bg-slate-800/20 rounded-2xl border border-dashed border-slate-200 dark:border-slate-700 my-4",
-                        span { class: "text-3xl mb-3 opacity-60", "🔒" }
+                    div { class: "flex-1 flex flex-col items-center justify-center text-center p-4 bg-slate-50 dark:bg-slate-800/20 rounded-xl border border-dashed border-slate-200 dark:border-slate-700 my-4",
+                        span { class: "text-2xl mb-3 opacity-60", "🔒" }
                         p { class: "text-xs font-medium text-slate-400 dark:text-slate-500 px-2", "{texts.auth_required_msg}" }
                     }
                 }
@@ -334,15 +334,15 @@ pub fn App() -> Element {
             main { class: "flex flex-1 overflow-hidden bg-slate-50 dark:bg-slate-950",
 
                 // Conteúdo Principal (Painel Esquerdo)
-                div { class: "flex-1 overflow-y-auto px-6 sm:px-10 py-8 custom-scrollbar",
+                div { class: "flex-1 overflow-y-auto px-5 sm:px-8 py-6 custom-scrollbar",
                     div { class: "max-w-4xl mx-auto",
                         if is_logged_in {
-                            div { class: "mb-8 select-none",
-                                h1 { class: "text-2xl sm:text-3xl font-black tracking-tight text-slate-900 dark:text-white", "{texts.control_panel_title}" }
-                                p { class: "text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1.5 font-medium", "{texts.control_panel_subtitle}" }
+                            div { class: "mb-7 select-none",
+                                h1 { class: "text-lg sm:text-xl font-semibold tracking-tight text-slate-900 dark:text-white", "{texts.control_panel_title}" }
+                                p { class: "text-xs text-slate-500 dark:text-slate-400 mt-1 font-medium", "{texts.control_panel_subtitle}" }
                             }
 
-                            div { class: "bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/60 dark:border-slate-800/80 p-6 sm:p-8 shadow-xl shadow-slate-100/40 dark:shadow-none min-h-[500px]",
+                            div { class: "bg-white dark:bg-slate-900 rounded-xl border border-slate-200/60 dark:border-slate-800/80 p-4 sm:p-5 shadow-sm shadow-slate-100/30 dark:shadow-none min-h-[500px]",
                                 match *active_tab.read() {
                                     ActiveTab::CreateProfile => rsx! { CreateProfileScreen {} },
                                     ActiveTab::ProfileManager => rsx! { ProfileManagerScreen { active_tab } },
@@ -369,10 +369,10 @@ pub fn App() -> Element {
                 }
 
                 // Barra Lateral Direita com Cartões Coloridos e Vibrantes
-                aside { class: "w-80 bg-white dark:bg-slate-900 border-l border-slate-200/80 dark:border-slate-800/80 flex flex-col overflow-hidden flex-shrink-0 shadow-sm z-10",
+                aside { class: "w-64 bg-white dark:bg-slate-900 border-l border-slate-200/80 dark:border-slate-800/80 flex flex-col overflow-hidden flex-shrink-0 shadow-sm z-10",
 
                     // Cabeçalho do Aside
-                    div { class: "p-6 border-b border-slate-100 dark:border-slate-800/60 bg-white dark:bg-slate-900 select-none",
+                    div { class: "p-4 border-b border-slate-100 dark:border-slate-800/60 bg-white dark:bg-slate-900 select-none",
                         h3 { class: "text-[11px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500 mb-1.5", "{texts.reports_title}" }
                         p { class: "text-sm font-bold text-slate-800 dark:text-slate-200 flex items-center gap-2",
                             span { class: "w-2 h-2 rounded-full bg-emerald-500 inline-block animate-pulse shadow-xs shadow-emerald-500/50" }
@@ -381,10 +381,10 @@ pub fn App() -> Element {
                     }
 
                     // Lista de Widgets
-                    div { class: "flex-1 overflow-y-auto p-5 space-y-5 custom-scrollbar bg-slate-50/50 dark:bg-slate-950/20",
+                    div { class: "flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar bg-slate-50/50 dark:bg-slate-950/20",
 
                         // 1. CARD COLORIDO: Métricas do Sistema (Fundo suave Slate com foco interno)
-                        div { class: "bg-slate-50/80 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-800/60 rounded-xl p-4 shadow-2xs",
+                        div { class: "bg-slate-50/80 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-800/60 rounded-xl p-4 shadow-sm",
                             h4 { class: "font-extrabold text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2 select-none",
                                 "📊 {texts.system_title}"
                             }

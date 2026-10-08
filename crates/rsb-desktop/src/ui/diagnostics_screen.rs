@@ -105,7 +105,7 @@ pub fn DiagnosticsScreen() -> Element {
     });
 
     rsx! {
-        div { class: "space-y-6",
+        div { class: "space-y-4",
             // Loading overlay
             LoadingOverlay {
                 is_visible: is_loading(),
@@ -114,10 +114,10 @@ pub fn DiagnosticsScreen() -> Element {
             }
 
             // Header
-            div { class: "flex justify-between items-center",
-                h2 { class: "text-2xl font-bold text-slate-900 dark:text-white", "🔧 {texts.diagnostics_title}" }
-                button {
-                    class: "btn-primary py-2 px-4 flex items-center gap-2",
+                div { class: "flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2",
+                    h2 { class: "text-lg font-bold text-slate-900 dark:text-white", "🔧 {texts.diagnostics_title}" }
+                    button {
+                        class: "btn-primary py-1.5 px-2 flex items-center gap-1 text-sm",
                     onclick: move |_| run_diagnostics(()),
                     disabled: is_loading(),
                     if is_loading() { "{texts.diagnostics_running}" } else { "{texts.diagnostics_run}" }
@@ -130,13 +130,13 @@ pub fn DiagnosticsScreen() -> Element {
             }
 
             // Diagnostics summary
-            div { class: "grid grid-cols-3 gap-4",
+                div { class: "grid grid-cols-1 sm:grid-cols-3 gap-2",
                 {
                     let healthy = diagnostics.read().iter().filter(|d| d.status == DiagnosticStatus::Healthy).count();
                     rsx! {
-                        div { class: "p-4 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800/50 rounded-lg",
-                            p { class: "text-sm font-semibold text-emerald-900 dark:text-emerald-100", "{texts.diagnostics_healthy}" }
-                            p { class: "text-2xl font-bold text-emerald-700 dark:text-emerald-400 mt-2", "{healthy}" }
+                        div { class: "p-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800/50 rounded-lg",
+                               p { class: "text-xs font-semibold text-emerald-900 dark:text-emerald-100", "{texts.diagnostics_healthy}" }
+                               p { class: "text-lg font-bold text-emerald-700 dark:text-emerald-400 mt-2", "{healthy}" }
                         }
                     }
                 }
@@ -145,8 +145,8 @@ pub fn DiagnosticsScreen() -> Element {
                     let warnings = diagnostics.read().iter().filter(|d| d.status == DiagnosticStatus::Warning).count();
                     rsx! {
                         div { class: "p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800/50 rounded-lg",
-                            p { class: "text-sm font-semibold text-yellow-900 dark:text-yellow-100", "{texts.diagnostics_warnings}" }
-                            p { class: "text-2xl font-bold text-yellow-700 dark:text-yellow-400 mt-2", "{warnings}" }
+                               p { class: "text-xs font-semibold text-yellow-900 dark:text-yellow-100", "{texts.diagnostics_warnings}" }
+                               p { class: "text-lg font-bold text-yellow-700 dark:text-yellow-400 mt-2", "{warnings}" }
                         }
                     }
                 }
@@ -155,8 +155,8 @@ pub fn DiagnosticsScreen() -> Element {
                     let critical = diagnostics.read().iter().filter(|d| d.status == DiagnosticStatus::Critical).count();
                     rsx! {
                         div { class: "p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50 rounded-lg",
-                            p { class: "text-sm font-semibold text-red-900 dark:text-red-100", "{texts.diagnostics_critical}" }
-                            p { class: "text-2xl font-bold text-red-700 dark:text-red-400 mt-2", "{critical}" }
+                               p { class: "text-xs font-semibold text-red-900 dark:text-red-100", "{texts.diagnostics_critical}" }
+                               p { class: "text-lg font-bold text-red-700 dark:text-red-400 mt-2", "{critical}" }
                         }
                     }
                 }
@@ -173,18 +173,18 @@ pub fn DiagnosticsScreen() -> Element {
                         let details = diag.details.clone();
 
                         rsx! {
-                            div {
-                                key: "{category}",
-                                class: "p-4 border rounded-lg transition-all",
-                                class: if diag.status == DiagnosticStatus::Healthy {
+                                div {
+                                    key: "{category}",
+                                    class: "p-3 border rounded-lg transition-all",
+                                    class: if diag.status == DiagnosticStatus::Healthy {
                                     "bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800/50"
                                 } else if diag.status == DiagnosticStatus::Warning {
                                     "bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800/50"
                                 } else {
                                     "bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800/50"
                                 },
-                                div { class: "flex items-start gap-3",
-                                    span { class: "text-2xl flex-shrink-0 mt-1", "{icon}" }
+                                div { class: "flex items-start gap-2",
+                                    span { class: "text-lg flex-shrink-0 mt-1", "{icon}" }
                                     div { class: "flex-1",
                                         h3 { class: "font-semibold text-sm", class: if diag.status == DiagnosticStatus::Healthy {
                                             "text-emerald-900 dark:text-emerald-100"

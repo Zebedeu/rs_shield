@@ -707,7 +707,7 @@ pub fn RealtimeSyncScreen() -> Element {
             }
 
             // Notification settings
-            div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-4 mb-4 border border-slate-200 dark:border-slate-700",
+            div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-3 mb-3 border border-slate-200 dark:border-slate-700",
                 div { class: "flex items-center justify-between",
                     div { class: "flex items-center gap-3",
                         span { class: "text-lg", "🔔" }
@@ -741,8 +741,8 @@ pub fn RealtimeSyncScreen() -> Element {
             }
 
             // Webhook Notifications Configuration
-            div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-4 mb-4 border border-slate-200 dark:border-slate-700",
-                div { class: "flex items-center justify-between mb-4",
+            div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-3 mb-3 border border-slate-200 dark:border-slate-700",
+                div { class: "flex items-center justify-between mb-3",
                     div { class: "flex items-center gap-3",
                         span { class: "text-lg", "🔗" }
                         div {
@@ -795,8 +795,8 @@ pub fn RealtimeSyncScreen() -> Element {
             }
 
             // Ignore patterns configuration
-            div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-4 mb-4 border border-slate-200 dark:border-slate-700",
-                div { class: "flex items-center justify-between mb-4",
+            div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-3 mb-3 border border-slate-200 dark:border-slate-700",
+                div { class: "flex items-center justify-between mb-3",
                     div { class: "flex items-center gap-3",
                         span { class: "text-lg", "🚫" }
                         div {
@@ -916,21 +916,21 @@ pub fn RealtimeSyncScreen() -> Element {
 
             // Statistics panel
             div { class: "grid grid-cols-4 gap-3 mb-4",
-                div { class: "bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4",
+                div { class: "bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3",
                     p { class: "text-xs text-blue-600 dark:text-blue-400 font-medium", "Files Synced" }
-                    p { class: "text-2xl font-bold text-blue-900 dark:text-blue-300", "{files_synced}" }
+                    p { class: "text-xl font-bold text-blue-900 dark:text-blue-300", "{files_synced}" }
                 }
-                div { class: "bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4",
+                div { class: "bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-3",
                     p { class: "text-xs text-green-600 dark:text-green-400 font-medium", "Changes Detected" }
-                    p { class: "text-2xl font-bold text-green-900 dark:text-green-300", "{files_changed}" }
+                    p { class: "text-xl font-bold text-green-900 dark:text-green-300", "{files_changed}" }
                 }
-                div { class: "bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg p-4",
+                div { class: "bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg p-3",
                     p { class: "text-xs text-purple-600 dark:text-purple-400 font-medium", "Backups Created" }
-                    p { class: "text-2xl font-bold text-purple-900 dark:text-purple-300", "{backups_created}" }
+                    p { class: "text-xl font-bold text-purple-900 dark:text-purple-300", "{backups_created}" }
                 }
-                div { class: "bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4",
+                div { class: "bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3",
                     p { class: "text-xs text-red-600 dark:text-red-400 font-medium", "Errors" }
-                    p { class: "text-2xl font-bold text-red-900 dark:text-red-300", "{sync_errors}" }
+                    p { class: "text-xl font-bold text-red-900 dark:text-red-300", "{sync_errors}" }
                 }
             }
 
@@ -955,8 +955,8 @@ pub fn RealtimeSyncScreen() -> Element {
                     }
 
                     // Last sync
-                    div { class: "grid grid-cols-2 gap-4 mb-6",
-                        div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-4 border border-slate-200 dark:border-slate-700",
+                    div { class: "grid grid-cols-2 gap-3 mb-5",
+                        div { class: "bg-slate-50 dark:bg-slate-900/50 rounded-lg p-3 border border-slate-200 dark:border-slate-700",
                             p { class: "text-xs text-slate-600 dark:text-slate-400 font-medium mb-1", "⏱️ Last Sync" }
                             p { class: "text-lg font-bold text-slate-900 dark:text-slate-100", "{last_sync_time}" }
                         }

@@ -33,6 +33,44 @@ pub struct DeviceFlowStatus {
     pub user_code: String,
     pub user_id: String,
     pub access_token: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub attempts: u32,
+}
+
+impl DeviceFlowStatus {
+    pub fn new(user_code: String, user_id: String, ttl_secs: i64) -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            user_code,
+            user_id,
+            access_token: None,
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(ttl_secs),
+            attempts: 0,
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        chrono::Utc::now() > self.expires_at
+    }
+}
+
+/// Entropia adequada para user_code: 8 chars de alfabeto de 32 símbolos
+/// (~40 bits) em vez de 6 hex (~24 bits). Evita 0/O/1/I confusos.
+fn generate_user_code() -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let mut buf = [0u8; 8];
+    rand::rng().fill_bytes(&mut buf);
+    buf.iter()
+        .map(|b| ALPHABET[(b % 32) as usize] as char)
+        .collect()
+}
+
+fn prune_expired_device_flows(flows: &mut HashMap<String, DeviceFlowStatus>) {
+    let now = chrono::Utc::now();
+    flows.retain(|_, f| f.expires_at > now);
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -52,12 +90,15 @@ fn error_response(status: StatusCode, message: &str) -> (StatusCode, Json<ErrorR
     )
 }
 
-fn extract_ip_from_headers(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "127.0.0.1".to_string())
+fn extract_ip_from_headers(_headers: &HeaderMap) -> String {
+    // Servidor faz bind em 127.0.0.1 sem proxy confiável à frente:
+    // `x-forwarded-for` seria spoofável e envenenaria a trilha de auditoria.
+    // Registamos loopback; se um dia houver proxy, validar a origem aqui.
+    "127.0.0.1".to_string()
+}
+
+fn rate_key(user_id: &str, ip: &str) -> String {
+    format!("{}|{}", user_id.trim().to_lowercase(), ip)
 }
 
 fn extract_user_agent_from_headers(headers: &HeaderMap) -> String {
@@ -84,13 +125,18 @@ pub async fn auth_start<S: SessionStore + Clone>(
         ));
     }
 
-    // Rate Limiting check
-    if !state.rate_limiter.is_allowed(&req.user_id).await {
+    // Rate Limiting check (chave: user+ip para impedir bypass por rotação de user_id)
+    let client_ip = extract_ip_from_headers(&headers);
+    if !state
+        .rate_limiter
+        .is_allowed(&rate_key(&req.user_id, &client_ip))
+        .await
+    {
         state
             .audit_logger
             .log_auth_failure(
                 &req.user_id,
-                &extract_ip_from_headers(&headers),
+                &client_ip,
                 &extract_user_agent_from_headers(&headers),
                 "Rate limit exceeded",
             )
@@ -116,10 +162,11 @@ pub async fn auth_start<S: SessionStore + Clone>(
             ))
         }
         Err(credentials::fido2_manager::Fido2Error::CredentialNotFound) => {
-            warn!("User not found for authentication: {}", req.user_id);
+            // Resposta genérica para não permitir enumeração de user_id (401 vs 404).
+            warn!("Auth attempt for unknown user (generic response)");
             Err(error_response(
-                StatusCode::NOT_FOUND,
-                "User not registered. Please register your Security Keykey first.",
+                StatusCode::UNAUTHORIZED,
+                "Invalid credentials",
             ))
         }
         Err(e) => {
@@ -144,6 +191,19 @@ pub async fn auth_finish<S: SessionStore + Clone>(
         return Err(error_response(
             StatusCode::BAD_REQUEST,
             "user_id is required",
+        ));
+    }
+
+    // Rate-limit também no finish (antes cobria só o start).
+    let client_ip = extract_ip_from_headers(&headers);
+    if !state
+        .rate_limiter
+        .is_allowed(&format!("finish|{}", rate_key(&req.user_id, &client_ip)))
+        .await
+    {
+        return Err(error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many authentication attempts. Please try again later.",
         ));
     }
 
@@ -276,7 +336,7 @@ pub struct RefreshTokenRequest {
     pub refresh_token: String,
 }
 
-/// POST /api/auth/refresh - Refresh access token
+/// POST /api/auth/refresh - Refresh access token (com rotação e revogação)
 pub async fn auth_refresh<S: SessionStore + Clone>(
     State(state): State<AuthHandlerState<S>>,
     headers: HeaderMap,
@@ -284,18 +344,46 @@ pub async fn auth_refresh<S: SessionStore + Clone>(
 ) -> Result<Json<AuthResponse>, (StatusCode, Json<ErrorResponse>)> {
     info!("Token refresh requested");
 
+    let client_ip = extract_ip_from_headers(&headers);
+    // Rate-limit por IP para o endpoint de refresh.
+    if !state
+        .rate_limiter
+        .is_allowed(&format!("refresh|{}", client_ip))
+        .await
+    {
+        return Err(error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many refresh attempts. Please try again later.",
+        ));
+    }
+
     let claims = state
         .jwt_manager
         .verify_token(&req.refresh_token)
         .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "Invalid refresh token"))?;
 
-    let user_id = &claims.sub;
+    // O refresh só é válido se a sessão original ainda existir e não estiver revogada.
+    // Sem isto, um token roubado renovava para sempre (jti novo sem revogar o antigo).
+    match state.session_store.get(&claims.jti).await {
+        Ok(Some(_)) => {}
+        _ => {
+            return Err(error_response(
+                StatusCode::UNAUTHORIZED,
+                "Session not found or revoked",
+            ));
+        }
+    }
+
+    let user_id = claims.sub.clone();
+
+    // Revoga a sessão antiga antes de emitir a nova (rotação, sem extensão indefinida).
+    let _ = state.session_store.revoke(&claims.jti).await;
 
     // Create new access token
     let scopes = vec!["backup".to_string(), "restore".to_string()];
     let new_token = state
         .jwt_manager
-        .create_token(user_id, scopes.clone(), EXPIRE_DATE)
+        .create_token(&user_id, scopes.clone(), EXPIRE_DATE)
         .map_err(|_| {
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -304,14 +392,17 @@ pub async fn auth_refresh<S: SessionStore + Clone>(
         })?;
 
     // Create new session
-    let jti = uuid::Uuid::new_v4().to_string();
+    let new_jti = state
+        .jwt_manager
+        .extract_jti(&new_token)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let session = Session {
         user_id: user_id.clone(),
-        jti: jti.clone(),
+        jti: new_jti,
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::seconds(EXPIRE_DATE),
         revoked: false,
-        ip_address: Some(extract_ip_from_headers(&headers)),
+        ip_address: Some(client_ip),
         user_agent: Some(extract_user_agent_from_headers(&headers)),
         fido2_counter: 0,
         scopes,
@@ -319,7 +410,7 @@ pub async fn auth_refresh<S: SessionStore + Clone>(
 
     let _ = state.session_store.save(session).await;
 
-    info!("Token refreshed for user: {}", user_id);
+    info!("Token refreshed (rotated) for user: {}", user_id);
 
     Ok(Json(AuthResponse {
         access_token: new_token,
@@ -347,6 +438,19 @@ pub async fn auth_recovery<S: SessionStore + Clone>(
         return Err(error_response(
             StatusCode::BAD_REQUEST,
             "user_id and recovery_code are required",
+        ));
+    }
+
+    // Rate-limit no recovery (antes sem limite → brute-force de códigos).
+    let client_ip = extract_ip_from_headers(&headers);
+    if !state
+        .rate_limiter
+        .is_allowed(&format!("recovery|{}", rate_key(&req.user_id, &client_ip)))
+        .await
+    {
+        return Err(error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many recovery attempts. Please try again later.",
         ));
     }
 
@@ -434,53 +538,21 @@ pub async fn auth_logout<S: SessionStore + Clone>(
 }
 
 /// POST /api/auth/localhost-callback - Callback para CLI via localhost
+///
+/// SEGURANÇA: este endpoint existia mintando JWT sem prova
+/// (`{"user_id":"admin"}` bastava). Agora está DESATIVADO por defeito:
+/// retorna 410 Gone. Reative apenas com prova FIDO2 completa via
+/// `/api/auth/finish` + device flow.
 pub async fn auth_localhost_callback<S: SessionStore + Clone>(
-    State(state): State<AuthHandlerState<S>>,
-    headers: HeaderMap,
-    Json(payload): Json<serde_json::Value>,
+    State(_state): State<AuthHandlerState<S>>,
+    _headers: HeaderMap,
+    _payload: Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    info!("Localhost callback received");
-
-    let user_id = payload
-        .get("user_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| error_response(StatusCode::BAD_REQUEST, "user_id required"))?;
-
-    let scopes = vec!["backup".to_string(), "restore".to_string()];
-    let token = state
-        .jwt_manager
-        .create_token(user_id, scopes.clone(), EXPIRE_DATE)
-        .map_err(|e| {
-            warn!("Failed to create token: {:?}", e);
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create token")
-        })?;
-
-    let jti = state
-        .jwt_manager
-        .extract_jti(&token)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    let session = Session {
-        user_id: user_id.to_string(),
-        jti,
-        created_at: Utc::now(),
-        expires_at: Utc::now() + chrono::Duration::seconds(EXPIRE_DATE),
-        revoked: false,
-        ip_address: Some(extract_ip_from_headers(&headers)),
-        user_agent: Some(extract_user_agent_from_headers(&headers)),
-        fido2_counter: 0,
-        scopes,
-    };
-
-    let _ = state.session_store.save(session).await;
-
-    info!("Token issued for CLI callback: {}", user_id);
-
-    Ok(Json(json!({
-        "access_token": token,
-        "expires_in": EXPIRE_DATE,
-        "token_type": "Bearer"
-    })))
+    warn!("Blocked unauthenticated localhost-callback mint attempt");
+    Err(error_response(
+        StatusCode::GONE,
+        "Direct token minting is disabled. Authenticate via FIDO2 device flow.",
+    ))
 }
 
 /// GET /api/auth/verify - Verificar se token é válido
@@ -579,16 +651,13 @@ pub async fn device_flow_start<S: SessionStore + Clone>(
     Json(req): Json<DeviceFlowStartRequest>,
 ) -> Json<DeviceFlowStartResponse> {
     let device_code = uuid::Uuid::new_v4().to_string();
-    let user_code = uuid::Uuid::new_v4().to_string()[..6].to_uppercase();
+    let user_code = generate_user_code();
 
     let mut flows = state.device_flows.lock().await;
+    prune_expired_device_flows(&mut flows);
     flows.insert(
         device_code.clone(),
-        DeviceFlowStatus {
-            user_code: user_code.clone(),
-            user_id: req.user_id.clone(),
-            access_token: None,
-        },
+        DeviceFlowStatus::new(user_code.clone(), req.user_id.clone(), 900),
     );
     info!(
         "Device flow started: device_code={}, user_code={}",
@@ -722,7 +791,8 @@ pub async fn device_flow_token<S: SessionStore + Clone>(
     State(state): State<AuthHandlerState<S>>,
     Json(req): Json<DeviceFlowTokenRequest>,
 ) -> Json<DeviceFlowTokenResponse> {
-    let flows = state.device_flows.lock().await;
+    let mut flows = state.device_flows.lock().await;
+    prune_expired_device_flows(&mut flows);
 
     if let Some(flow) = flows.get(&req.device_code) {
         if let Some(ref token) = flow.access_token {
@@ -744,23 +814,53 @@ pub async fn device_flow_token<S: SessionStore + Clone>(
 /// POST /api/auth/device/lookup-code - Lookup device flow by user code
 pub async fn device_flow_lookup_code<S: SessionStore + Clone>(
     State(state): State<AuthHandlerState<S>>,
+    headers: HeaderMap,
     Json(req): Json<DeviceFlowLookupRequest>,
 ) -> Result<Json<DeviceFlowLookupResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Rate-limit por IP: antes sem throttle → brute-force do código curto.
+    let client_ip = extract_ip_from_headers(&headers);
+    if !state
+        .rate_limiter
+        .is_allowed(&format!("lookup|{}", client_ip))
+        .await
+    {
+        return Err(error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many attempts. Please try again later.",
+        ));
+    }
+
     let user_code = req.user_code.to_uppercase(); // Ensure uppercase for comparison
 
-    let flows = state.device_flows.lock().await;
+    let mut flows = state.device_flows.lock().await;
+    prune_expired_device_flows(&mut flows);
 
-    // Find the device_code associated with the user_code
-    let (device_code, flow_status) = flows
-        .iter()
+    // Resposta genérica (sem distinguir inexistente vs expirado) + atraso
+    // para dificultar enumeração online.
+    let found = flows
+        .iter_mut()
         .find(|(_, flow_status)| flow_status.user_code == user_code)
-        .map(|(device_code, flow_status)| (device_code.clone(), flow_status.clone()))
-        .ok_or_else(|| {
-            error_response(
+        .map(|(device_code, flow_status)| {
+            flow_status.attempts = flow_status.attempts.saturating_add(1);
+            (device_code.clone(), flow_status.clone())
+        });
+    let (device_code, flow_status) = match found {
+        Some(v) => v,
+        None => {
+            return Err(error_response(
                 StatusCode::NOT_FOUND,
                 "Invalid or expired user code. Please check your terminal.",
-            )
-        })?;
+            ));
+        }
+    };
+    // Limite de tentativas por código.
+    if flow_status.attempts > 10 {
+        flows.remove(&device_code);
+        return Err(error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many attempts for this code.",
+        ));
+    }
 
     info!(
         "User code lookup successful: user_code={}, device_code={}, user_id={}",
@@ -851,16 +951,13 @@ pub async fn device_flow_start_api<S: SessionStore + Clone>(
     State(state): State<AuthHandlerState<S>>,
 ) -> Json<DeviceFlowStartResponse> {
     let device_code = uuid::Uuid::new_v4().to_string();
-    let user_code = uuid::Uuid::new_v4().to_string()[..6].to_uppercase();
+    let user_code = generate_user_code();
 
     let mut flows = state.device_flows.lock().await;
+    prune_expired_device_flows(&mut flows);
     flows.insert(
         device_code.clone(),
-        DeviceFlowStatus {
-            user_code: user_code.clone(),
-            user_id: "cli-user".to_string(),
-            access_token: None,
-        },
+        DeviceFlowStatus::new(user_code.clone(), "cli-user".to_string(), 900),
     );
 
     Json(DeviceFlowStartResponse {

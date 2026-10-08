@@ -34,10 +34,13 @@ impl fmt::Debug for EncryptedCredentials {
     }
 }
 
+/// Iterações PBKDF2 unificadas (600k) — o elo fraco de 100k foi eliminado.
+pub const PBKDF2_ITERATIONS: u32 = 600_000;
+
 /// Derive key from master password using PBKDF2
 fn derive_key_from_password(password: &str, salt: &[u8]) -> [u8; 32] {
     let mut key = [0u8; 32];
-    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, 100_000, &mut key);
+    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, PBKDF2_ITERATIONS, &mut key);
     key
 }
 
@@ -53,7 +56,7 @@ pub fn encrypt_credentials(
     rng.fill_bytes(&mut salt);
 
     // Derive key from master password
-    let key_bytes = derive_key_from_password(master_password, &salt);
+    let mut key_bytes = derive_key_from_password(master_password, &salt);
     let key = Key::<Aes256Gcm>::from(key_bytes);
 
     // Generate unique nonce (12 bytes for GCM)
@@ -66,6 +69,9 @@ pub fn encrypt_credentials(
     let ciphertext = cipher
         .encrypt(nonce, Payload::from(json.as_bytes()))
         .map_err(|e| format!("Encryption failed: {}", e))?;
+    // Limpa material de chave as soon as possible (defesa em profundidade).
+    use zeroize::Zeroize;
+    key_bytes.zeroize();
 
     // Encode in base64 for storage
     let cipher_b64 = BASE64.encode(&ciphertext);
@@ -105,7 +111,7 @@ pub fn decrypt_credentials(
     }
 
     // Derive key
-    let key_bytes = derive_key_from_password(master_password, &salt);
+    let mut key_bytes = derive_key_from_password(master_password, &salt);
     let key = Key::<Aes256Gcm>::from(key_bytes);
 
     // Decrypt
@@ -114,6 +120,8 @@ pub fn decrypt_credentials(
     let plaintext = cipher
         .decrypt(nonce, Payload::from(ciphertext.as_ref()))
         .map_err(|e| format!("Decryption failed (incorrect password?): {}", e))?;
+    use zeroize::Zeroize;
+    key_bytes.zeroize();
 
     // Convert to string
     String::from_utf8(plaintext).map_err(|e| format!("Invalid JSON: {}", e))

@@ -107,21 +107,27 @@ async fn load_s3_credentials_securely(
         Err(e) => warn!("Interactive credential prompt failed: {}", e),
     }
 
-    // 4. Config file (deprecated)
-    if let Some(s3) = config.s3.as_ref() {
-        if let (Some(ak), Some(sk)) = (&s3.access_key, &s3.secret_key) {
-            if !ak.is_empty() && !sk.is_empty() {
-                warn!("⚠️ Using credentials from config file (not recommended for security)");
-                return Ok(aws_credential_types::Credentials::new(
-                    ak.clone(),
-                    sk.clone(),
-                    None,
-                    None,
-                    "rsb-config",
-                ));
+    // 4. Config file REMOVIDO por segurança (era plaintext sem chmod).
+    // Para migração legada, o operador pode optar explicitamente com
+    // RSB_ALLOW_CONFIG_CREDS=1 — e mesmo assim alertamos.
+    if std::env::var("RSB_ALLOW_CONFIG_CREDS").as_deref() == Ok("1") {
+        if let Some(s3) = config.s3.as_ref() {
+            if let (Some(ak), Some(sk)) = (&s3.access_key, &s3.secret_key) {
+                if !ak.is_empty() && !sk.is_empty() {
+                    warn!(
+                        "⚠️ SECURITY: using S3 secrets from TOML because RSB_ALLOW_CONFIG_CREDS=1. Migrate to env/s3_credentials.enc and unset the flag."
+                    );
+                    return Ok(aws_credential_types::Credentials::new(
+                        ak.clone(),
+                        sk.clone(),
+                        None,
+                        None,
+                        "rsb-config-legacy-optin",
+                    ));
+                }
             }
         }
     }
 
-    Err("No S3 credentials found. Please provide them via env vars or encrypted file.".to_string())
+    Err("No S3 credentials found. Provide AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or run `rsb config s3-credentials` (encrypted).".to_string())
 }

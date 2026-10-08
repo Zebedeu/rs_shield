@@ -19,6 +19,6 @@ pub use email_notifications::{EmailConfig, EmailNotification};
 pub use notification_history::{HistorySummary, NotificationHistory, NotificationHistoryEntry};
 pub use notification_logger::NotificationLogger;
 pub use notifications::{NotificationEvent, NotificationManager, NotificationPayload, TestResults};
-pub use prune::perform_prune;
+pub use prune::{perform_prune, perform_prune_by_age, plan_prune_by_count};
 pub use restore::perform_restore;
 pub use telegram_validator::{get_telegram_chat_id, validate_telegram_token};

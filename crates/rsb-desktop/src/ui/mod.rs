@@ -2,6 +2,9 @@ pub mod app;
 pub mod app_preferences;
 mod backup_integrity_screen;
 mod backup_screen;
+#[allow(dead_code)]
+mod component_showcase;
+pub mod components;
 mod config_screen;
 mod create_profile_screen;
 mod diagnostics_screen;

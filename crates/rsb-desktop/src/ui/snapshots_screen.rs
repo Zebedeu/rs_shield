@@ -63,7 +63,7 @@ pub fn SnapshotsScreen() -> Element {
     });
 
     rsx! {
-        div { class: "space-y-6",
+        div { class: "space-y-3",
             // Loading overlay
             LoadingOverlay {
                 is_visible: is_loading(),
@@ -72,10 +72,10 @@ pub fn SnapshotsScreen() -> Element {
             }
 
             // Header
-            div { class: "flex justify-between items-center",
-                h2 { class: "text-2xl font-bold text-slate-900 dark:text-white", "📸 {texts.nav_snapshots}" }
+            div { class: "flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3",
+                h2 { class: "text-lg font-bold text-slate-900 dark:text-white", "📸 {texts.nav_snapshots}" }
                 button {
-                    class: "btn-secondary py-2 px-4 flex items-center gap-2",
+                    class: "btn-secondary py-1 px-2 flex items-center gap-1 text-sm",
                     onclick: move |_| load_snapshots(()),
                     disabled: is_loading(),
                     if is_loading() { "{texts.snapshots_loading}" } else { "{texts.snapshots_refresh}" }
@@ -84,13 +84,13 @@ pub fn SnapshotsScreen() -> Element {
 
             // Error message
             if let Some(error) = error_msg.read().as_ref() {
-                div { class: "p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50 rounded-lg text-red-700 dark:text-red-300 text-sm",
+                div { class: "p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50 rounded-lg text-red-700 dark:text-red-300 text-sm",
                     "{error}"
                 }
             }
 
             // Mode selector
-            div { class: "flex gap-2 mb-4",
+            div { class: "flex flex-wrap gap-2 mb-3",
                 button {
                     class: if *mode.read() == SnapshotMode::List { "btn-primary" } else { "btn-secondary" },
                     onclick: move |_| mode.set(SnapshotMode::List),
@@ -153,19 +153,19 @@ fn SnapshotsListView(
     rsx! {
         div { class: "space-y-4",
             if snapshots.is_empty() {
-                div { class: "text-center py-12 bg-slate-50 dark:bg-slate-800/50 rounded-lg border-2 border-dashed border-slate-200 dark:border-slate-700",
-                    span { class: "text-4xl mb-4 block", "📂" }
+                div { class: "text-center py-6 bg-slate-50 dark:bg-slate-800/50 rounded-lg border-2 border-dashed border-slate-200 dark:border-slate-700",
+                    span { class: "text-xl mb-2 block", "📂" }
                     p { class: "text-slate-500 dark:text-slate-400", "{texts.snapshots_no_found}" }
                 }
             } else {
-                div { class: "grid gap-4",
+                div { class: "grid gap-2",
                     for snapshot in snapshots {
                         {
                             let id_for_show = snapshot.id.clone();
                             let id_for_delete = snapshot.id.clone();
                             rsx! {
-                                div { key: "{snapshot.id}", class: "p-4 bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-800/50 dark:to-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg hover:shadow-md transition-shadow",
-                                    div { class: "flex items-start justify-between mb-3",
+                                div { key: "{snapshot.id}", class: "p-2 bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-800/50 dark:to-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg hover:shadow-md transition-shadow",
+                                    div { class: "flex items-start justify-between mb-2",
                                         div { class: "flex-1",
                                             h3 { class: "font-semibold text-slate-900 dark:text-white text-sm", "📸 {snapshot.id}" }
                                             p { class: "text-xs text-slate-500 dark:text-slate-400 mt-1", "{texts.snapshots_created}: {snapshot.created_at}" }
@@ -183,7 +183,7 @@ fn SnapshotsListView(
                                             }
                                         }
                                     }
-                                    div { class: "flex gap-4 text-xs",
+                                    div { class: "flex flex-wrap gap-3 text-xs",
                                         div { class: "flex items-center gap-1 text-slate-600 dark:text-slate-400",
                                             span { "📄" }
                                             span { "{snapshot.file_count} {texts.snapshots_files}" }
@@ -217,8 +217,8 @@ fn SnapshotsDiffView(
     let texts = get_texts(app_config.language());
 
     rsx! {
-        div { class: "space-y-6",
-            div { class: "grid grid-cols-2 gap-6",
+        div { class: "space-y-4",
+            div { class: "grid grid-cols-2 gap-3",
                 div { class: "space-y-2",
                     label { class: "block text-sm font-semibold text-slate-700 dark:text-slate-300", "{texts.snapshots_from}" }
                     select {
@@ -253,13 +253,13 @@ fn SnapshotsDiffView(
             }
 
             button {
-                class: "btn-primary w-full",
+                class: "btn-primary w-full text-sm py-1.5",
                 onclick: move |_| on_compare.call(()),
                 "{texts.snapshots_compare_button}"
             }
 
             if let Some(result) = diff_result {
-                div { class: "p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/50 rounded-lg text-blue-900 dark:text-blue-100 text-sm font-mono whitespace-pre-wrap overflow-auto max-h-96",
+                div { class: "p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/50 rounded-lg text-blue-900 dark:text-blue-100 text-sm font-mono whitespace-pre-wrap overflow-auto max-h-96",
                     "{result}"
                 }
             }
@@ -275,20 +275,20 @@ fn SnapshotsDetailsView(snapshot_id: Option<String>, on_back: EventHandler<()>) 
     rsx! {
         div { class: "space-y-4",
             button {
-                class: "btn-secondary py-2 px-4 flex items-center gap-2",
+                class: "btn-secondary py-1 px-2 flex items-center gap-2 text-sm",
                 onclick: move |_| on_back.call(()),
                 "{texts.snapshots_back_button}"
             }
 
             if let Some(id) = snapshot_id {
-                div { class: "p-6 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-lg",
+                div { class: "p-4 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-lg",
                     h3 { class: "font-semibold text-slate-900 dark:text-white mb-4", "📸 Snapshot Details: {id}" }
                     div { class: "space-y-3 text-sm text-slate-600 dark:text-slate-400",
                         p { "Loading details..." }
                     }
                 }
             } else {
-                div { class: "text-center py-12 bg-slate-50 dark:bg-slate-800/50 rounded-lg",
+                div { class: "text-center py-10 bg-slate-50 dark:bg-slate-800/50 rounded-lg",
                     p { class: "text-slate-500 dark:text-slate-400", "Selecione um snapshot para visualizar detalhes" }
                 }
             }

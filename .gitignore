@@ -24,6 +24,8 @@
 *.log
 logs/
 rsb-report-backup-*
+rsb-report-restore-*
+rsb-report-verify-*
 copilot-instructions.md
 .instructions.md
 GEMINI.md
@@ -45,3 +47,8 @@ Thumbs.db
 *.enc
 *.json
 rsb-report-restore-*
+# Node / desktop tooling
+node_modules/
+
+# Local backup profiles (personal paths)
+ebedeu.toml

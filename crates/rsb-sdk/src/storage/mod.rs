@@ -29,12 +29,76 @@ impl LocalStorage {
             base_path: PathBuf::from(path),
         }
     }
+
+    /// Fail-closed join: rejeita paths absolutos, `..` e separadores que
+    /// escapem de `base_path`. Retorna o path contido ou erro.
+    fn safe_join(&self, rel: &str) -> io::Result<PathBuf> {
+        validate_storage_path(rel)?;
+        Ok(self.base_path.join(rel))
+    }
+}
+
+/// Valida um path relativo de storage/restore.
+///
+/// Rejeita: vazio, absoluto, `..`, backslash (Windows escape), NUL,
+/// e qualquer componente `ParentDir`/`RootDir`/`Prefix`.
+pub fn validate_storage_path(rel: &str) -> io::Result<()> {
+    use std::path::Component;
+    if rel.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Empty storage path",
+        ));
+    }
+    if rel.contains('\0') || rel.contains('\\') {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Invalid characters in storage path",
+        ));
+    }
+    let p = PathBuf::from(rel);
+    if p.is_absolute() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Absolute paths are not allowed in storage/restore",
+        ));
+    }
+    for comp in p.components() {
+        match comp {
+            Component::Normal(_) => {}
+            _ => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "Path traversal detected (.. or root/prefix not allowed)",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Valida hash de conteúdo (hex minúsculo, 64 chars BLAKE3) para impedir
+/// `../` via `metadata.hash` em `data/<enc|clear>/<hash>`.
+pub fn validate_content_hash(hash: &str) -> io::Result<()> {
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        // Aceita também maiúsculas? Não — normaliza para minúsculas na escrita,
+        // rejeita o resto para não virar vetor de traversal.
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "Invalid content hash (expected 64 lowercase hex chars)",
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait]
 impl Storage for LocalStorage {
     async fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        let full_path = self.base_path.join(path);
+        let full_path = self.safe_join(path)?;
         if let Some(parent) = full_path.parent() {
             let parent_str = parent.to_string_lossy().to_string();
             ensure_directory_exists_async(&parent_str)
@@ -47,16 +111,17 @@ impl Storage for LocalStorage {
     }
 
     async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
-        let full_path = self.base_path.join(path);
+        let full_path = self.safe_join(path)?;
         fs::read(full_path).await
     }
 
     async fn exists(&self, path: &str) -> io::Result<bool> {
-        let full_path = self.base_path.join(path);
+        let full_path = self.safe_join(path)?;
         Ok(full_path.exists())
     }
 
     async fn list(&self, prefix: &str) -> io::Result<Vec<String>> {
+        validate_storage_path(prefix)?;
         let dir = self.base_path.join(prefix);
         let mut results = Vec::new();
 
@@ -86,7 +151,7 @@ impl Storage for LocalStorage {
     }
 
     async fn delete(&self, path: &str) -> io::Result<()> {
-        let full_path = self.base_path.join(path);
+        let full_path = self.safe_join(path)?;
         fs::remove_file(full_path).await
     }
 }
@@ -113,6 +178,16 @@ impl S3Storage {
 
         let force_path_style = endpoint.is_some();
         if let Some(e) = endpoint {
+            // Mesma política do s3_check: http só em loopback, senão warn alto.
+            let lower = e.to_lowercase();
+            if lower.starts_with("http://")
+                && !(lower.contains("localhost") || lower.contains("127.0.0.1"))
+            {
+                tracing::warn!(
+                    "Insecure S3 endpoint '{}': credentials would go in cleartext. Use https://.",
+                    e
+                );
+            }
             config_loader = config_loader.endpoint_url(e);
         }
 

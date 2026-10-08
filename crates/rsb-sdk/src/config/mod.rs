@@ -16,13 +16,28 @@ pub const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[
     "_restored",
 ];
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct S3Config {
     pub bucket: Option<String>,
     pub region: Option<String>,
     pub endpoint: Option<String>,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
+}
+
+impl std::fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Config")
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field(
+                "access_key",
+                &self.access_key.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field("secret_key", &"***REDACTED***")
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -32,7 +47,7 @@ pub struct S3BucketConfig {
     pub endpoint: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     pub source_path: String,
     pub destination_path: String,
@@ -40,6 +55,9 @@ pub struct Config {
     #[serde(default = "default_exclude_patterns")]
     pub exclude_patterns: Vec<String>,
 
+    /// LEGADO: manter por compatibilidade de leitura, mas NUNCA escrever
+    /// segredos aqui — usar keyring/env/`s3_credentials.enc` + `--key` via
+    /// prompt (rpassword). `create_profile_with_options` já não persiste.
     pub encryption_key: Option<String>,
 
     #[serde(default = "default_backup_mode")]
@@ -83,6 +101,60 @@ fn default_exclude_patterns() -> Vec<String> {
 
 fn default_channel_buffer() -> usize {
     8192
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("source_path", &self.source_path)
+            .field("destination_path", &self.destination_path)
+            .field("exclude_patterns", &self.exclude_patterns)
+            .field(
+                "encryption_key",
+                &self.encryption_key.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field("backup_mode", &self.backup_mode)
+            .field("s3_bucket", &self.s3_bucket)
+            .field("s3_region", &self.s3_region)
+            .field("s3_endpoint", &self.s3_endpoint)
+            .field("s3", &self.s3)
+            .field("s3_buckets", &self.s3_buckets)
+            .field("encrypt_patterns", &self.encrypt_patterns)
+            .field("pause_on_low_battery", &self.pause_on_low_battery)
+            .field("pause_on_high_cpu", &self.pause_on_high_cpu)
+            .field("compression_level", &self.compression_level)
+            .field("max_threads", &self.max_threads)
+            .field("channel_buffer_size", &self.channel_buffer_size)
+            .finish()
+    }
+}
+
+/// Escreve TOML com 0600 e recusa persistir segredos em claro.
+/// Retorna erro se `encryption_key`/`secret_key` estiverem presentes —
+/// o chamador deve mover para keyring/enc antes de gravar.
+pub fn write_config_secure(path: &std::path::Path, config: &Config) -> std::io::Result<()> {
+    if config.encryption_key.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Refusing to write encryption_key to TOML (use keyring/env/prompt instead)",
+        ));
+    }
+    if let Some(s3) = config.s3.as_ref() {
+        if s3.access_key.is_some() || s3.secret_key.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Refusing to write S3 secrets to TOML (use env or s3_credentials.enc)",
+            ));
+        }
+    }
+    let toml_str = toml::to_string_pretty(config).map_err(std::io::Error::other)?;
+    std::fs::write(path, toml_str)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 impl Config {
@@ -138,11 +210,16 @@ pub fn create_profile_with_options(
         default_exclude_patterns()
     };
 
+    if password.is_some() {
+        eprintln!(
+            "⚠️ encryption_key via TOML é legado e não será persistido. Forneça a chave via prompt (--encrypt) ou RSB_ENCRYPTION_KEY; o perfil guardará só encrypt_patterns."
+        );
+    }
     let config = Config {
         source_path: source.to_string_lossy().into_owned(),
         destination_path: dest.to_string_lossy().into_owned(),
         exclude_patterns,
-        encryption_key: password.map(|p| p.to_string()),
+        encryption_key: None,
         backup_mode: mode.unwrap_or("full").to_string(),
 
         s3_bucket: s3_bucket.map(|s| s.to_string()),
@@ -171,10 +248,8 @@ pub fn create_profile_with_options(
         channel_buffer_size: 8192,
     };
 
-    let toml_str = toml::to_string_pretty(&config).map_err(io::Error::other)?;
     let filename = format!("{}.toml", name);
-
-    fs::write(&filename, toml_str)?;
+    write_config_secure(std::path::Path::new(&filename), &config)?;
     println!("✅ Profile '{}' created successfully!", name);
     println!("   Source: {}", config.source_path);
     println!("   Dest:   {}", config.destination_path);
@@ -194,6 +269,23 @@ pub fn load_config(path: &Path) -> io::Result<Config> {
     config.destination_path = expand_path(&config.destination_path)
         .to_string_lossy()
         .into_owned();
+
+    // Avisos fail-open controlado: segredos em TOML continuam a ser lidos por
+    // compatibilidade, mas alertamos e recomendamos migração.
+    if config.encryption_key.is_some() {
+        eprintln!(
+            "⚠️ '{}' contém encryption_key em claro (legado). Migre para prompt/env RSB_ENCRYPTION_KEY e remova do TOML.",
+            path.display()
+        );
+    }
+    if let Some(s3) = config.s3.as_ref() {
+        if s3.access_key.is_some() || s3.secret_key.is_some() {
+            eprintln!(
+                "⚠️ '{}' contém segredos S3 em claro (legado). Migre para AWS_* env ou s3_credentials.enc.",
+                path.display()
+            );
+        }
+    }
 
     Ok(config)
 }

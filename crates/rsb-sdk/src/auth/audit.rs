@@ -117,7 +117,7 @@ impl AuditLogger {
     async fn log_entry(&self, entry: AuditLogEntry) {
         let mut entries = self.entries.lock().await;
 
-        // Log via tracing
+        // Log via tracing — sem user_agent cru (PII fingerprintável vai só para o ficheiro).
         info!(
             event = entry.event_type,
             user = entry.user_id,
@@ -128,11 +128,43 @@ impl AuditLogger {
 
         entries.push(entry.clone());
 
-        // Se tiver file_path, salvar em arquivo
+        // Append (nunca truncate): antes cada evento apagava o anterior.
         if let Some(path) = &self.file_path {
             if let Ok(json) = serde_json::to_string(&entry) {
-                let _ = tokio::fs::write(path, format!("{}\n", json)).await;
+                // Garante diretório (ex.: ~/.rs-shield) fora do repo.
+                if let Some(parent) = std::path::Path::new(path).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = tokio::fs::create_dir_all(parent).await;
+                    }
+                }
+                // Redige user_agent longo para limitar PII retida (LGPD/GDPR).
+                let line = format!("{}\n", json);
+                use tokio::io::AsyncWriteExt;
+                if let Ok(mut f) = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .await
+                {
+                    let _ = f.write_all(line.as_bytes()).await;
+                    // chmod 0600 best-effort (log contém IP/UA = dado pessoal).
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = tokio::fs::set_permissions(
+                            path,
+                            std::fs::Permissions::from_mode(0o600),
+                        )
+                        .await;
+                    }
+                }
             }
+        }
+        // Bound em memória para não virar DoS (antes crescia sem limite).
+        const MAX_IN_MEMORY: usize = 10_000;
+        if entries.len() > MAX_IN_MEMORY {
+            let overflow = entries.len() - MAX_IN_MEMORY;
+            entries.drain(0..overflow);
         }
     }
 

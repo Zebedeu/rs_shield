@@ -22,7 +22,7 @@ use zeroize::Zeroize;
 /// CREDENTIAL STRUCT
 /// ==============================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Fido2Credential {
     pub user_id: String,
     pub user_name: String,
@@ -31,6 +31,20 @@ pub struct Fido2Credential {
     pub created_at: String,
     pub last_used: Option<String>,
     pub counter: u32,
+}
+
+impl std::fmt::Debug for Fido2Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fido2Credential")
+            .field("user_id", &self.user_id)
+            .field("user_name", &self.user_name)
+            .field("display_name", &self.display_name)
+            .field("credential_data", &"***REDACTED***")
+            .field("created_at", &self.created_at)
+            .field("last_used", &self.last_used)
+            .field("counter", &self.counter)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -433,7 +447,12 @@ impl Fido2Manager {
                 .collect();
 
             let mut hash = [0u8; 32];
-            pbkdf2::pbkdf2_hmac::<Sha256>(code.as_bytes(), &salt, 100_000, &mut hash);
+            pbkdf2::pbkdf2_hmac::<Sha256>(
+                code.as_bytes(),
+                &salt,
+                crate::credentials::encryption::PBKDF2_ITERATIONS,
+                &mut hash,
+            );
 
             plain_codes.push(code);
             hashed_codes.push(general_purpose::STANDARD.encode(hash));
@@ -458,13 +477,29 @@ impl Fido2Manager {
         }
 
         let mut input_hash = [0u8; 32];
-        pbkdf2::pbkdf2_hmac::<Sha256>(code.as_bytes(), &user_data.salt, 100_000, &mut input_hash);
+        pbkdf2::pbkdf2_hmac::<Sha256>(
+            code.as_bytes(),
+            &user_data.salt,
+            crate::credentials::encryption::PBKDF2_ITERATIONS,
+            &mut input_hash,
+        );
         let input_hash_encoded = general_purpose::STANDARD.encode(input_hash);
 
+        // Comparação em tempo constante (antes: `position(==)` com timing-oracle).
+        fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+            if a.len() != b.len() {
+                return false;
+            }
+            let mut diff = 0u8;
+            for (x, y) in a.iter().zip(b.iter()) {
+                diff |= x ^ y;
+            }
+            diff == 0
+        }
         if let Some(pos) = user_data
             .recovery_code_hashes
             .iter()
-            .position(|h| h == &input_hash_encoded)
+            .position(|h| ct_eq(h.as_bytes(), input_hash_encoded.as_bytes()))
         {
             user_data.recovery_code_hashes.remove(pos);
             info!("Recovery code used and invalidated for user: {}", user_id);

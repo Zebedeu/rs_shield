@@ -7,7 +7,7 @@ use aws_credential_types::provider::{self, ProvideCredentials};
 use std::sync::Arc;
 
 /// Represents different credential sources
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum CredentialSource {
     /// Static credentials provided directly
     Static {
@@ -17,6 +17,20 @@ pub enum CredentialSource {
     },
     /// Credentials from environment variables (for backward compatibility)
     Environment,
+}
+
+impl std::fmt::Debug for CredentialSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static { .. } => f
+                .debug_struct("CredentialSource::Static")
+                .field("access_key", &"***REDACTED***")
+                .field("secret_key", &"***REDACTED***")
+                .field("session_token", &"***REDACTED***")
+                .finish(),
+            Self::Environment => write!(f, "CredentialSource::Environment"),
+        }
+    }
 }
 
 /// Provider wrapper that handles credential resolution

@@ -2,6 +2,9 @@ use dioxus::prelude::*;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::ui::components::{
+    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Card, CardVariant, EmptyState,
+};
 use crate::ui::error_handler::format_user_error;
 
 /// Estrutura simplificada de um perfil
@@ -84,10 +87,7 @@ pub fn ProfileManagerScreen(mut active_tab: Signal<crate::ui::app::ActiveTab>) -
     let mut handle_delete = move |profile_name: String, profile_path: PathBuf| {
         match ProfileManager::delete_profile(&profile_path) {
             Ok(()) => {
-                status_msg.set(format!(
-                    "✅ Profile '{}' deleted successfully!",
-                    profile_name
-                ));
+                status_msg.set(format!("Profile '{}' deleted successfully!", profile_name));
                 status_type.set("success");
                 to_delete.set(None);
                 profiles.set(ProfileManager::list_profiles());
@@ -105,54 +105,68 @@ pub fn ProfileManagerScreen(mut active_tab: Signal<crate::ui::app::ActiveTab>) -
             show_status.set(false);
         });
     };
-
-    let (bg_class, text_class) = if status_type() == "success" {
+    let (status_bg_class, status_icon) = if status_type() == "success" {
         (
-            "bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800",
-            "text-green-800 dark:text-green-300",
+            "bg-emerald-50 dark:bg-emerald-900/20 border-emerald-500",
+            "✅",
         )
     } else {
-        (
-            "bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800",
-            "text-red-800 dark:text-red-300",
-        )
+        ("bg-red-50 dark:bg-red-900/20 border-red-500", "❌")
     };
-
     rsx! {
-        div { class: "flex flex-col h-full gap-6 p-6 bg-slate-50 dark:bg-slate-900",
-            div {
-                h1 { class: "text-3xl font-bold text-slate-900 dark:text-slate-100 mb-2", "📋 Profile Management" }
-                p { class: "text-slate-600 dark:text-slate-400",
-                    "View and manage your backup profiles"
-                }
+        div { class: "flex flex-col h-full gap-4 p-4 bg-slate-50 dark:bg-slate-900",
+            // Header
+            div { class: "space-y-2",
+                h1 { class: "text-2xl font-bold text-slate-900 dark:text-slate-100", "📋 Profile Management" }
+                p { class: "text-slate-600 dark:text-slate-400", "View and manage your backup profiles" }
             }
 
+            // Status message
             if show_status() {
-                div { class: "p-4 rounded-lg {bg_class} border {text_class}",
-                    p { "{status_msg}" }
+                div {
+                    class: format!("flex items-start gap-3 p-4 rounded-lg border-l-4 {}", status_bg_class),
+
+                    span {
+                        class: "text-xl flex-shrink-0",
+                        "{status_icon}"
+                    }
+
+                    p {
+                        class: "text-sm text-slate-700 dark:text-slate-300",
+                        "{status_msg}"
+                    }
                 }
             }
 
+            // Profiles list or empty state
             if profiles().is_empty() {
-                div { class: "flex flex-col items-center justify-center flex-1 gap-4",
-                    div { class: "text-6xl", "📭" }
-                    p { class: "text-xl font-semibold text-slate-600 dark:text-slate-400", "No profiles created" }
-                    p { class: "text-slate-500 dark:text-slate-500", "Create your first profile in the 'Create Profile' tab" }
+                Card { variant: CardVariant::Outlined, class: "flex-1".to_string(),
+                    EmptyState {
+                        icon: "📭".to_string(),
+                        title: "No profiles created".to_string(),
+                        description: "Create your first profile to get started with backups".to_string(),
+                        action_label: None,
+                        on_action: None,
+                    }
                 }
             } else {
                 div { class: "grid gap-4 flex-1 overflow-y-auto",
                     for profile in profiles() {
-                        div { class: "p-4 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm",
+                        Card { variant: CardVariant::Elevated,
                             div { class: "flex items-start justify-between gap-4",
-                                div { class: "flex-1",
-                                    h3 { class: "text-lg font-semibold text-slate-900 dark:text-slate-100", "📦 {profile.name}" }
-                                    p { class: "text-xs text-slate-500 dark:text-slate-400 mt-1", "Path: {profile.path.display()}" }
-                                    p { class: "text-xs text-slate-500 dark:text-slate-400 mt-1", "{profile.created}" }
+                                div { class: "flex-1 space-y-2",
+                                    div { class: "flex items-center gap-2",
+                                        span { class: "text-base", "📦" }
+                                        h3 { class: "text-base font-semibold text-slate-900 dark:text-slate-100", "{profile.name}" }
+                                    }
+                                    p { class: "text-xs text-slate-600 dark:text-slate-400", "Path: {profile.path.display()}" }
+                                    Badge { variant: BadgeVariant::Neutral, "{profile.created}" }
                                 }
-                                button {
-                                    class: "btn btn-sm btn-error",
+                                Button {
+                                    variant: ButtonVariant::Danger,
+                                    size: ButtonSize::SM,
                                     onclick: move |_| to_delete.set(Some(profile.clone())),
-                                    "🗑️ Delete"
+                                    "Delete"
                                 }
                             }
                         }
@@ -160,39 +174,55 @@ pub fn ProfileManagerScreen(mut active_tab: Signal<crate::ui::app::ActiveTab>) -
                 }
             }
 
+            // Delete confirmation modal
             if let Some(profile) = to_delete() {
-                    div { class: "fixed inset-0 bg-black/50 flex items-center justify-center z-50",
-                        div { class: "bg-white dark:bg-slate-800 rounded-lg p-6 max-w-md shadow-xl",
-                            h2 { class: "text-xl font-bold text-slate-900 dark:text-slate-100 mb-4",
-                                "⚠️ Confirm Deletion"
+                div { class: "fixed inset-0 bg-black/20 dark:bg-black/50 backdrop-blur-sm flex items-center justify-center z-50",
+                    Card { variant: CardVariant::Elevated, class: "max-w-md w-full mx-4".to_string(),
+                        div { class: "space-y-4",
+                            div { class: "space-y-2",
+                                h2 { class: "text-xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2",
+                                    span { "⚠️" }
+                                    "Confirm Deletion"
+                                }
+                                p { class: "text-slate-600 dark:text-slate-400",
+                                    "Are you sure you want to delete the profile \"{profile.name}\"? This action cannot be undone."
+                                }
                             }
-                            p { class: "text-slate-600 dark:text-slate-400 mb-4",
-                                "Are you sure you want to delete the profile \"{profile.name}\"? This action cannot be undone."
-                            }
-                            div { class: "flex gap-3 justify-end",
-                                button {
-                                    class: "btn btn-outline",
+
+                            div { class: "flex flex-col sm:flex-row gap-3",
+                                Button {
+                                    variant: ButtonVariant::Secondary,
+                                    size: ButtonSize::MD,
+                                    class: "flex-1".to_string(),
                                     onclick: move |_| to_delete.set(None),
                                     "Cancel"
                                 }
-                                button {
-                                    class: "btn btn-error",
+                                Button {
+                                    variant: ButtonVariant::Danger,
+                                    size: ButtonSize::MD,
+                                    class: "flex-1".to_string(),
                                     onclick: move |_| handle_delete(profile.name.clone(), profile.path.clone()),
-                                    "🗑️ Delete Permanently"
+                                    "Delete"
                                 }
                             }
                         }
                     }
+                }
             }
 
-            div { class: "flex gap-4 pt-4 border-t border-slate-200 dark:border-slate-700",
-                button {
-                    class: "btn btn-success flex-1",
+            // Footer actions
+            div { class: "flex flex-col sm:flex-row gap-3 pt-4 border-t border-slate-200 dark:border-slate-700",
+                Button {
+                    variant: ButtonVariant::Success,
+                    size: ButtonSize::MD,
+                    class: "flex-1".to_string(),
                     onclick: move |_| active_tab.set(crate::ui::app::ActiveTab::CreateProfile),
                     "➕ Create New Profile"
                 }
-                button {
-                    class: "btn btn-primary flex-1",
+                Button {
+                    variant: ButtonVariant::Secondary,
+                    size: ButtonSize::MD,
+                    class: "flex-1".to_string(),
                     onclick: move |_| profiles.set(ProfileManager::list_profiles()),
                     "🔄 Refresh"
                 }
