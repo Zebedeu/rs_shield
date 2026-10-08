@@ -1,4 +1,4 @@
-use super::key_cache::DecryptionKeyCache;
+use crate::crypto::KeyCache;
 use super::manifest::{parse_snapshot_timestamp, read_manifest_cached, sort_snapshots_newest_first};
 use crate::config::Config;
 use crate::core::types::FileMetadata;
@@ -155,7 +155,7 @@ async fn prune_locked(
         return Ok(());
     }
 
-    let cache = encryption_key.map(|k| DecryptionKeyCache::new(k.as_bytes()));
+    let cache = encryption_key.map(|k| KeyCache::new(k.as_bytes()));
     let mut keep_hashes = HashSet::new();
     for snap in keep_snapshots {
         // Any unreadable manifest aborts GC (fail-closed: we cannot know

@@ -1,5 +1,5 @@
 use super::cancellation::CancellationToken;
-use super::key_cache::DecryptionKeyCache;
+use crate::crypto::KeyCache;
 use super::manifest::find_latest_snapshot_cached;
 use super::types::{FileMetadata, ProgressCallback};
 use crate::config::Config;
@@ -80,7 +80,7 @@ pub async fn restore_from_storage(
     validate_backup_structure(storage).await?;
 
     // One PBKDF2 per salt for the whole restore instead of one per blob.
-    let key_cache = encryption_key.map(|k| DecryptionKeyCache::new(k.as_bytes()));
+    let key_cache = encryption_key.map(|k| KeyCache::new(k.as_bytes()));
 
     let (manifest_path, manifest_content) =
         find_latest_snapshot_cached(storage, snapshot_id, key_cache.as_ref()).await?;
@@ -186,7 +186,7 @@ async fn restore_entry(
     restore_root_canon: &Path,
     rel_path: &Path,
     metadata: &FileMetadata,
-    key_cache: Option<&DecryptionKeyCache>,
+    key_cache: Option<&KeyCache>,
     force: bool,
 ) -> Result<(), String> {
     // Contenção anti-traversal: rejeita absoluto, `..`, componentes especiais.
@@ -432,7 +432,7 @@ async fn restore_blobs(
     storage: &dyn Storage,
     blobs: &[(String, Option<&str>)],
     target: &Path,
-    key: Option<&DecryptionKeyCache>,
+    key: Option<&KeyCache>,
     expected_full_hash: &str,
     compressed: bool,
 ) -> io::Result<()> {

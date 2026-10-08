@@ -1,5 +1,5 @@
 // manifest.rs - Performance + reliability version
-use super::key_cache::DecryptionKeyCache;
+use crate::crypto::KeyCache;
 use super::types::{ChunkMetadata, FileMetadata};
 use crate::crypto::encrypt_data_with_key;
 use crate::storage::Storage;
@@ -162,7 +162,7 @@ pub async fn read_manifest(
     path: &str,
     key: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let cache = key.map(|k| DecryptionKeyCache::new(k.as_bytes()));
+    let cache = key.map(|k| KeyCache::new(k.as_bytes()));
     read_manifest_cached(storage, path, cache.as_ref()).await
 }
 
@@ -171,7 +171,7 @@ pub async fn read_manifest(
 pub async fn read_manifest_cached(
     storage: &dyn Storage,
     path: &str,
-    cache: Option<&DecryptionKeyCache>,
+    cache: Option<&KeyCache>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let raw = storage.read(path).await?;
 
@@ -266,7 +266,7 @@ pub async fn find_latest_snapshot(
     snapshot_id: Option<&str>,
     key: Option<&str>,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let cache = key.map(|k| DecryptionKeyCache::new(k.as_bytes()));
+    let cache = key.map(|k| KeyCache::new(k.as_bytes()));
     find_latest_snapshot_cached(storage, snapshot_id, cache.as_ref()).await
 }
 
@@ -274,7 +274,7 @@ pub async fn find_latest_snapshot(
 pub async fn find_latest_snapshot_cached(
     storage: &dyn Storage,
     snapshot_id: Option<&str>,
-    cache: Option<&DecryptionKeyCache>,
+    cache: Option<&KeyCache>,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
     if let Some(id) = snapshot_id {
         let id = validate_snapshot_id(id)?;
