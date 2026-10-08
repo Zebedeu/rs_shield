@@ -507,12 +507,18 @@ where
                 (input.pos(), output.pos(), hint)
             };
             consumed += used;
-            frame_complete = hint == 0;
+            // Only calls that made progress tell us about the frame: once a
+            // frame ends, an extra empty call reports the next frame's hint.
+            if used > 0 || produced > 0 {
+                frame_complete = hint == 0;
+            }
             if produced > 0 {
                 sink.write(&outbuf[..produced]).await?;
             }
-            // Input exhausted and nothing left to flush for it.
-            if consumed == n && produced < outbuf.len() {
+            // Input exhausted and the decoder has nothing more to flush. A
+            // short (non-full) output is NOT enough: zstd may return early at
+            // block boundaries while still holding decoded data.
+            if consumed == n && produced == 0 {
                 break;
             }
         }

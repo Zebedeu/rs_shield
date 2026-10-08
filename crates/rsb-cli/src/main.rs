@@ -498,6 +498,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             fast,
             report,
             key,
+            repair,
         } => {
             let _auth_token = check_fido2_auth().await?;
 
@@ -544,9 +545,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Using fast verification mode (hash only, no decryption)");
             }
 
-            let mut report_data =
-                perform_verify(&cfg, snapshot.as_deref(), quiet, use_fast, None, None).await?;
-            println!("✅ Verification completed.");
+            if repair && use_fast {
+                println!("--repair performs a full check; ignoring --quick/--fast");
+            }
+            let mut report_data = rsb_sdk::integrity::perform_verify_with_repair(
+                &cfg,
+                snapshot.as_deref(),
+                quiet,
+                use_fast,
+                repair,
+                None,
+                None,
+            )
+            .await?;
+            let failed = report_data.files_with_errors > 0 || !report_data.errors.is_empty();
 
             if report {
                 report_data.profile_path = profile_path;
@@ -558,6 +570,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fs::write(&filename, html)?;
                 println!("📄 Report generated at: {}", filename.display());
             }
+
+            // Scripts/healthchecks dependem do exit code: problemas → falha.
+            if failed {
+                for e in &report_data.errors {
+                    eprintln!("  ❌ {}", e);
+                }
+                return Err(format!(
+                    "❌ Verification found problems ({} file(s) with errors)",
+                    report_data.files_with_errors
+                )
+                .into());
+            }
+            println!("✅ Verification completed.");
         }
         Commands::Prune {
             config,

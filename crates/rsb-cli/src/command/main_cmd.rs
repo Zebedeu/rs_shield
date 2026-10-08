@@ -204,6 +204,10 @@ pub enum Commands {
         /// Decryption key (DEPRECATED: visible in `ps`/history; prefer env RSB_ENCRYPTION_KEY or prompt)
         #[arg(short = 'k', long)]
         key: Option<String>,
+
+        /// Delete objects proven corrupt (forces a full check) so the next backup re-uploads them
+        #[arg(long)]
+        repair: bool,
     },
 
     /// Delete old snapshots
