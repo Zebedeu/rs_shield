@@ -37,24 +37,25 @@ pub struct CachedEncryptionKey {
 }
 
 impl CachedEncryptionKey {
-    /// Creates a cached encryption key from a password
+    /// Creates a cached encryption key from a password.
+    ///
+    /// If a password is given and key derivation fails, an error is returned:
+    /// the backup must never silently fall back to writing unencrypted data.
     pub fn new(password: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
-        let key =
-            password.and_then(
-                |pwd| match crate::crypto::EncryptionKey::new(pwd.as_bytes()) {
-                    Ok(k) => {
-                        debug!(
-                            "✅ Pre-derived encryption key (saved ~{:?} PBKDF2 iterations)",
-                            600_000
-                        );
-                        Some(std::sync::Arc::new(k))
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to pre-derive encryption key: {}", e);
-                        None
-                    }
-                },
-            );
+        let key = match password {
+            Some(pwd) => {
+                let k = crate::crypto::EncryptionKey::new(pwd.as_bytes()).map_err(|e| {
+                    tracing::error!("Failed to pre-derive encryption key: {}", e);
+                    format!("Failed to derive encryption key; aborting backup: {}", e)
+                })?;
+                debug!(
+                    "✅ Pre-derived encryption key (saved ~{:?} PBKDF2 iterations)",
+                    crate::crypto::PBKDF2_ITERATIONS
+                );
+                Some(std::sync::Arc::new(k))
+            }
+            None => None,
+        };
 
         Ok(Self { key })
     }
@@ -76,5 +77,11 @@ mod tests {
     fn test_cached_encryption_key_none() {
         let key = CachedEncryptionKey::new(None).unwrap();
         assert!(!key.is_some());
+    }
+
+    #[test]
+    fn test_cached_encryption_key_some() {
+        let key = CachedEncryptionKey::new(Some("password")).unwrap();
+        assert!(key.is_some());
     }
 }
