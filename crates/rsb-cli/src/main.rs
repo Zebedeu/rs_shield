@@ -786,28 +786,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut fido2_manager =
                     Fido2Manager::new("http://localhost:3000", "localhost", "RSB CLI")?;
 
-                // Try to load existing credentials
-                if let Ok(path) = Fido2Manager::default_storage_path() {
-                    if path.exists() {
-                        match fido2_manager.load_from_file(&path) {
-                            Ok(_) => {
-                                // Loaded successfully
-                            }
-                            Err(e) => {
-                                warn!("⚠️ Could not load existing credentials: {}", e);
-                            }
-                        }
-                    }
+                // Sem credenciais carregadas não há códigos para verificar;
+                // falhar aqui evita mascarar erros de keyring/ficheiro.
+                let cred_path = Fido2Manager::default_storage_path()
+                    .map_err(|e| format!("❌ Cannot locate credential storage: {}", e))?;
+                if !cred_path.exists() {
+                    return Err("❌ No FIDO2 credentials found; recovery is not possible".into());
                 }
+                fido2_manager
+                    .load_from_file(&cred_path)
+                    .map_err(|e| format!("❌ Could not load credentials: {}", e))?;
 
                 // Verify recovery code
                 if fido2_manager.verify_backup_code(&user_id, &recovery_code) {
                     // Save the updated manager (recovery code was consumed).
                     // Se não for possível persistir o consumo, o código continuaria
                     // reutilizável → não emitir token.
-                    let path = Fido2Manager::default_storage_path()
-                        .map_err(|e| format!("❌ Cannot locate credential storage: {}", e))?;
-                    fido2_manager.save_to_file(&path).map_err(|e| {
+                    fido2_manager.save_to_file(&cred_path).map_err(|e| {
                         format!(
                             "❌ Failed to persist consumed recovery code ({}); no token issued",
                             e
@@ -817,7 +812,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Create and save token
                     let jwt_mgr = rsb_sdk::auth::JwtManager::from_env()?;
                     let scopes = vec!["backup".to_string(), "restore".to_string()];
-                    let token = jwt_mgr.create_token(&user_id, scopes.clone(), 3600)?;
+                    let token = jwt_mgr.create_token(&user_id, scopes.clone(), 1800)?;
+                    // check_fido2_auth só aceita tokens cujo jti esteja no registo
+                    // de sessões persistido.
+                    let claims = jwt_mgr.verify_token(&token)?;
+                    rsb_sdk::auth::SessionRegistry::default_registry()?
+                        .record_claims(&claims)?;
 
                     println!("\n✅ Recovery code verified successfully!");
                     println!("🔑 User: {}", user_id);

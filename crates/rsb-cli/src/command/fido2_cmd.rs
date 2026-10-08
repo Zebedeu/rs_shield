@@ -99,8 +99,12 @@ impl Fido2Command {
         match self {
             Self::Register { .. } => {
                 info!("🔐 Starting Auth registration flow...");
-                fido2_web::run_server(manager, Html(include_str!("../assets/fido2_auth.html")))
-                    .await
+                fido2_web::run_server_with_mode(
+                    manager,
+                    Html(include_str!("../assets/fido2_auth.html")),
+                    fido2_web::ServerMode::Register,
+                )
+                .await
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
             }
 

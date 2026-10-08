@@ -86,10 +86,18 @@ pub fn LoginScreen(on_login: EventHandler<String>) -> Element {
             let mut mgr = fido2_manager_arc_clone.lock().await;
 
             if mgr.verify_backup_code(&id, &code) {
-                if let Ok(path) = Fido2Manager::default_storage_path() {
-                    let _ = mgr.save_to_file(&path);
+                // O código só fica consumido se for persistido; caso contrário
+                // continuaria reutilizável, por isso o login falha.
+                let saved = Fido2Manager::default_storage_path()
+                    .map_err(|e| e.to_string())
+                    .and_then(|path| mgr.save_to_file(&path).map_err(|e| e.to_string()));
+                match saved {
+                    Ok(()) => on_login.call(id),
+                    Err(e) => error_msg.set(format!(
+                        "❌ Não foi possível registar o uso do código de recuperação: {}",
+                        e
+                    )),
                 }
-                on_login.call(id);
             } else {
                 error_msg.set("❌ Código de recuperação inválido ou já utilizado.".into());
             }

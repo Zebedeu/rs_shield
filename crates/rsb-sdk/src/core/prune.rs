@@ -12,7 +12,7 @@ use tracing::{info, warn};
 pub async fn perform_prune(
     config: &Config,
     keep_last: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let deleted = plan_prune_by_count(config, keep_last).await?;
     if deleted.is_empty() {
         info!("Nothing to prune.");
@@ -25,7 +25,7 @@ pub async fn perform_prune(
 pub async fn plan_prune_by_count(
     config: &Config,
     keep_last: usize,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     // Fail before touching storage: keep_last == 0 would delete everything.
     check_keep_last(keep_last)?;
     let storage = super::storage_backend::get_storage(config).await;
@@ -33,7 +33,7 @@ pub async fn plan_prune_by_count(
     select_by_count(snapshots, keep_last)
 }
 
-fn check_keep_last(keep_last: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn check_keep_last(keep_last: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if keep_last == 0 {
         return Err(
             "Refusing to prune with keep_last = 0: that would delete every snapshot. \
@@ -48,7 +48,7 @@ fn check_keep_last(keep_last: usize) -> Result<(), Box<dyn std::error::Error>> {
 pub fn select_by_count(
     mut snapshots: Vec<String>,
     keep_last: usize,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     check_keep_last(keep_last)?;
     if snapshots.len() <= keep_last {
         return Ok(vec![]);
@@ -80,7 +80,7 @@ pub fn select_by_age(
 pub async fn perform_prune_by_age(
     config: &Config,
     retention_days: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let storage = super::storage_backend::get_storage(config).await;
     let snapshots = list_snapshots(&*storage).await?;
     let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
@@ -94,7 +94,7 @@ pub async fn perform_prune_by_age(
     apply_prune_deletion(config, &to_delete).await
 }
 
-async fn list_snapshots(storage: &dyn Storage) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+async fn list_snapshots(storage: &dyn Storage) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     let mut snapshots = storage.list("snapshots").await?;
     snapshots.retain(|s| s.ends_with(".toml"));
     Ok(snapshots)
@@ -103,7 +103,7 @@ async fn list_snapshots(storage: &dyn Storage) -> Result<Vec<String>, Box<dyn st
 async fn apply_prune_deletion(
     config: &Config,
     delete_snapshots: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let storage = super::storage_backend::get_storage(config).await;
     prune_with_storage(storage, config.encryption_key.as_deref(), delete_snapshots).await
 }
@@ -115,7 +115,7 @@ pub async fn prune_with_storage(
     storage: Arc<dyn Storage>,
     encryption_key: Option<&str>,
     delete_snapshots: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let lock = RepoLock::acquire(storage.clone(), LockKind::Exclusive, "prune").await?;
     let result = prune_locked(&*storage, encryption_key, delete_snapshots).await;
     if let Err(e) = lock.release().await {
@@ -128,7 +128,7 @@ async fn prune_locked(
     storage: &dyn Storage,
     encryption_key: Option<&str>,
     delete_snapshots: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut deleted_count = 0;
 
     // 1) Delete the snapshot manifests first. If we crash afterwards the
@@ -160,7 +160,9 @@ async fn prune_locked(
     for snap in keep_snapshots {
         // Any unreadable manifest aborts GC (fail-closed: we cannot know
         // what it references).
-        let content = read_manifest_cached(storage, &snap, cache.as_ref()).await?;
+        let content = read_manifest_cached(storage, &snap, cache.as_ref())
+            .await
+            .map_err(|e| e.to_string())?;
         let manifest: HashMap<PathBuf, FileMetadata> = toml::from_str(&content)?;
 
         for metadata in manifest.values() {
