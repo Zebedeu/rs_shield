@@ -56,6 +56,11 @@ impl ChangeQueue {
         self.changes.read().await.iter().cloned().collect()
     }
 
+    /// Removes and returns every queued change (the queue is left empty).
+    pub async fn take_all(&self) -> Vec<FileChange> {
+        std::mem::take(&mut *self.changes.write().await).into()
+    }
+
     pub async fn clear(&self) {
         self.changes.write().await.clear();
     }
@@ -84,33 +89,54 @@ impl RealtimeWatcher {
     pub async fn start_watching(&mut self, root_path: &Path) -> NotifyResult<()> {
         let queue = self.queue.clone();
         let root = root_path.to_path_buf();
+        // The notify callback runs on notify's own thread, outside the tokio
+        // runtime: spawn through an explicit handle (tokio::spawn would panic).
+        let rt = tokio::runtime::Handle::current();
 
         let mut watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 match res {
                     Ok(event) => {
+                        let change_type = match event.kind {
+                            notify::EventKind::Create(_) => ChangeType::Created,
+                            notify::EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
+                                ChangeType::Renamed
+                            }
+                            notify::EventKind::Modify(_) => ChangeType::Modified,
+                            notify::EventKind::Remove(_) => ChangeType::Deleted,
+                            // Ignore accesses and unknown events
+                            _ => return,
+                        };
                         let queue_clone = queue.clone();
-                        tokio::spawn(async move {
+                        rt.spawn(async move {
                             for path in &event.paths {
-                                if let Ok(metadata) = std::fs::metadata(path) {
-                                    let change_type = match event.kind {
-                                        notify::EventKind::Create(_) => ChangeType::Created,
-                                        notify::EventKind::Modify(_) => ChangeType::Modified,
-                                        notify::EventKind::Remove(_) => ChangeType::Deleted,
-                                        notify::EventKind::Access(_) => return, // Ignorar acessos
-                                        _ => return,
-                                    };
+                                // Deleted paths (and the old side of a rename)
+                                // no longer exist: record them with size 0
+                                // instead of silently dropping them.
+                                let size = match std::fs::symlink_metadata(path) {
+                                    Ok(metadata) => metadata.len(),
+                                    Err(_)
+                                        if matches!(
+                                            change_type,
+                                            ChangeType::Deleted | ChangeType::Renamed
+                                        ) =>
+                                    {
+                                        0
+                                    }
+                                    // Created/modified then removed before we
+                                    // looked: nothing to sync.
+                                    Err(_) => continue,
+                                };
 
-                                    let change = FileChange {
-                                        path: path.clone(),
-                                        change_type,
-                                        timestamp: Utc::now(),
-                                        size: metadata.len(),
-                                        hash: None, // Calculated later
-                                    };
+                                let change = FileChange {
+                                    path: path.clone(),
+                                    change_type: change_type.clone(),
+                                    timestamp: Utc::now(),
+                                    size,
+                                    hash: None, // Calculated later
+                                };
 
-                                    queue_clone.add_change(change).await;
-                                }
+                                queue_clone.add_change(change).await;
                             }
                         });
                     }
@@ -289,19 +315,17 @@ impl RealtimeSync {
         }
     }
 
+    /// Drains the queue and returns the changes that are not ignored.
+    ///
+    /// Previously this only *copied* the queue, so the same changes were
+    /// returned (and counted) on every batch forever.
     pub async fn process_batch(&self) -> Vec<FileChange> {
-        let changes = self.queue.get_changes().await;
-        let mut processed = Vec::new();
-
-        for change in changes {
-            if self.should_ignore(&change.path) {
-                continue;
-            }
-
-            processed.push(change);
-        }
-
-        processed
+        self.queue
+            .take_all()
+            .await
+            .into_iter()
+            .filter(|change| !self.should_ignore(&change.path))
+            .collect()
     }
 
     fn should_ignore(&self, path: &Path) -> bool {
@@ -366,24 +390,64 @@ pub async fn sync_all_files(src: &Path, dst: &Path) -> Result<usize, String> {
         ensure_directory_exists(dst_str)?;
 
         let mut count = 0;
+        let mut walk_errors: Vec<String> = Vec::new();
+        let mut skipped_symlinks = 0usize;
 
-        for entry in WalkDir::new(&src).into_iter().filter_map(|e| e.ok()) {
-            let path = entry.path();
-
-            if path.is_file() {
-                let relative = path.strip_prefix(&src).map_err(|e| e.to_string())?;
-                let dst_file = dst.join(relative);
-
-                if let Some(parent) = dst_file.parent() {
-                    let parent_str = parent
-                        .to_str()
-                        .ok_or("Invalid path characters in destination")?;
-                    ensure_directory_exists(parent_str)?;
+        // follow_links(false) is the default; we additionally use the
+        // entry's own file type (lstat) so symlinks are never followed on
+        // the source side.
+        for entry in WalkDir::new(&src).follow_links(false) {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("sync_all_files: walk error: {}", e);
+                    walk_errors.push(e.to_string());
+                    continue;
                 }
-
-                fs::copy(path, &dst_file).map_err(|e| format!("Error copying: {}", e))?;
-                count += 1;
+            };
+            let file_type = entry.file_type();
+            if file_type.is_symlink() {
+                skipped_symlinks += 1;
+                continue;
             }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let path = entry.path();
+            let relative = path.strip_prefix(&src).map_err(|e| e.to_string())?;
+            let dst_file = dst.join(relative);
+
+            if let Some(parent) = dst_file.parent() {
+                // Plain mkdir: no ~/$VAR expansion of names taken from the source tree.
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Error creating {}: {}", parent.display(), e))?;
+            }
+
+            // Never write through a symlink planted at the destination.
+            if let Ok(meta) = fs::symlink_metadata(&dst_file) {
+                if meta.file_type().is_symlink() {
+                    return Err(format!(
+                        "Refusing to overwrite symlink at destination: {}",
+                        dst_file.display()
+                    ));
+                }
+            }
+
+            fs::copy(path, &dst_file).map_err(|e| format!("Error copying: {}", e))?;
+            count += 1;
+        }
+
+        if skipped_symlinks > 0 {
+            tracing::info!("sync_all_files: skipped {} symlinks", skipped_symlinks);
+        }
+        if !walk_errors.is_empty() {
+            return Err(format!(
+                "Copied {} files, but {} entries could not be read (first: {})",
+                count,
+                walk_errors.len(),
+                walk_errors[0]
+            ));
         }
 
         Ok(count)
@@ -430,7 +494,7 @@ pub async fn create_backup(
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S").to_string();
 
     // Create Config to use perform_backup from rsb-core
-    // Chunking is done automatically (512MB chunks)
+    // Chunking is done automatically (files > MULTIPART_THRESHOLD, CHUNK_SIZE chunks)
     let config = Config {
         source_path: src.to_string_lossy().to_string(),
         destination_path: backup_dst.to_string_lossy().to_string(),
@@ -466,9 +530,55 @@ pub async fn create_backup(
     .await
     {
         Ok(report) => Ok(format!(
-            "✅ Backup: {} with encryption\n📊 Files: {}/{}\n🔐 512MB chunks applied",
-            timestamp, report.files_processed, report.total_files
+            "✅ Backup: {} with encryption\n📊 Files: {}/{}\n🔐 {}MB chunks applied",
+            timestamp,
+            report.files_processed,
+            report.total_files,
+            crate::core::types::CHUNK_SIZE / (1024 * 1024)
         )),
         Err(e) => Err(format!("Error creating backup: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn process_batch_drains_queue() {
+        let sync = RealtimeSync::new(SyncStrategy::default());
+        sync.queue
+            .add_change(FileChange {
+                path: PathBuf::from("/a.txt"),
+                change_type: ChangeType::Deleted,
+                timestamp: Utc::now(),
+                size: 0,
+                hash: None,
+            })
+            .await;
+        assert_eq!(sync.process_batch().await.len(), 1);
+        assert_eq!(sync.queue.count().await, 0);
+        assert!(sync.process_batch().await.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sync_all_files_skips_symlinks_and_refuses_dst_symlinks() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"s").unwrap();
+        std::fs::write(src.path().join("f.txt"), b"f").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), src.path().join("link"))
+            .unwrap();
+        assert_eq!(sync_all_files(src.path(), dst.path()).await.unwrap(), 1);
+        assert!(!dst.path().join("link").exists());
+
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        std::fs::remove_file(dst.path().join("f.txt")).unwrap();
+        std::os::unix::fs::symlink(&victim, dst.path().join("f.txt")).unwrap();
+        assert!(sync_all_files(src.path(), dst.path()).await.is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
     }
 }

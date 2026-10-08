@@ -2,14 +2,19 @@
 use super::types::{CHUNK_SIZE, ChunkMetadata, FileMetadata, FileStatus, MULTIPART_THRESHOLD};
 use crate::crypto::{EncryptionKey, hash_file_content};
 use crate::storage::Storage;
-use crate::utils::mmap_file;
 use glob::Pattern;
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::fs::Metadata;
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::runtime::Handle;
+use tracing::warn;
 use zstd::stream::write::Encoder as ZstdEncoder;
+
+/// AES-GCM framing overhead added by `EncryptionKey::encrypt`:
+/// salt(16) + nonce(12) + tag(16).
+const ENCRYPTION_OVERHEAD: u64 = 16 + 12 + 16;
 
 #[allow(clippy::too_many_arguments)]
 pub fn process_file(
@@ -23,50 +28,62 @@ pub fn process_file(
     encrypt_patterns: &Option<Vec<String>>,
     compression_level: u8,
 ) -> io::Result<(FileStatus, FileMetadata)> {
-    let mapped = mmap_file(src)?;
-    let current_hash = hash_file_content(&mapped)?;
+    let before = std::fs::metadata(src)?;
+    let should_encrypt = should_encrypt_file(rel_path, encryption_key.as_deref(), encrypt_patterns);
+
+    // =============== LARGE FILES (Multipart, streamed) ===============
+    if before.len() > MULTIPART_THRESHOLD {
+        let result = process_file_multipart_streaming(
+            src,
+            storage,
+            should_encrypt,
+            encryption_key.as_deref(),
+            dry_run,
+            rt_handle,
+            compression_level,
+        )?;
+        ensure_unchanged(src, &before, None)?;
+        return Ok(result);
+    }
+
+    // =============== NORMAL FILES ===============
+    // Read once into memory: the bytes we hash are exactly the bytes we
+    // compress/store (no mmap → no SIGBUS if the file is truncated, and no
+    // window where hash and stored content can diverge).
+    let data = std::fs::read(src)?;
+    ensure_unchanged(src, &before, Some(data.len() as u64))?;
+    let current_hash = hash_file_content(&data)?;
 
     // Fast deduplication
     if let Some(cached) = previous_metadata_cache.get(&current_hash) {
         return Ok((FileStatus::Skipped, cached.clone()));
     }
 
-    let should_encrypt = should_encrypt_file(rel_path, encryption_key.as_deref(), encrypt_patterns);
-
-    // =============== LARGE FILES (Multipart) ===============
-    if mapped.len() as u64 > MULTIPART_THRESHOLD {
-        let metadata = process_file_multipart_optimized(
-            storage,
-            rel_path,
-            &mapped,
-            current_hash.clone(),
-            should_encrypt,
-            encryption_key.clone(),
-            dry_run,
-            rt_handle,
-            compression_level,
-        )?;
-        return Ok((FileStatus::Processed, metadata));
-    }
-
-    // =============== NORMAL FILES ===============
     let data_path = format!(
         "data/{}/{}",
         if should_encrypt { "enc" } else { "clear" },
         current_hash
     );
 
-    // File already exists in storage (deduplicated by hash)
-    if rt_handle.block_on(storage.exists(&data_path))? {
-        // Return the file as skipped (not processed again)
-        let metadata = build_file_metadata(
-            current_hash.clone(),
-            should_encrypt,
-            compression_level,
-            None, // Don't have stored_hash readily available, will be recomputed if needed
-            None, // Don't have stored_size readily available
+    // File already exists in storage (deduplicated by hash) — but only trust
+    // it if its size is plausible; a zero/short object is a torn write.
+    if let Some(existing) = rt_handle.block_on(storage.size(&data_path))? {
+        if plausible_stored_size(existing, data.len() as u64, should_encrypt) {
+            let metadata = build_file_metadata(
+                current_hash,
+                should_encrypt,
+                compression_level,
+                None,
+                Some(existing),
+            );
+            return Ok((FileStatus::Skipped, metadata));
+        }
+        warn!(
+            "Stored object {} has implausible size {} for {} bytes of content; rewriting it",
+            data_path,
+            existing,
+            data.len()
         );
-        return Ok((FileStatus::Skipped, metadata));
     }
 
     if dry_run {
@@ -82,7 +99,7 @@ pub fn process_file(
 
     // Compress + Encrypt (optimized)
     let final_data = compress_and_encrypt(
-        &mapped,
+        &data,
         compression_level,
         should_encrypt,
         encryption_key.as_deref(), // ⚡ Dereference Arc to get Option<&EncryptionKey>
@@ -104,22 +121,79 @@ pub fn process_file(
     Ok((FileStatus::Processed, metadata))
 }
 
-// ====================== OPTIMIZED MULTIPART ======================
-fn process_file_multipart_optimized(
+/// Errors if the file changed (size/mtime) while it was being read, so the
+/// backup reports it instead of silently storing a torn snapshot.
+fn ensure_unchanged(src: &Path, before: &Metadata, read_len: Option<u64>) -> io::Result<()> {
+    let after = std::fs::metadata(src)?;
+    let changed = after.len() != before.len()
+        || read_len.is_some_and(|n| n != before.len())
+        || after.modified().ok() != before.modified().ok();
+    if changed {
+        return Err(io::Error::other(format!(
+            "file changed while being backed up (size {} → {}); it will be picked up by the next backup",
+            before.len(),
+            after.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Cheap sanity check on an existing deduplicated object, without
+/// downloading it. Never flags a valid object (whatever compression level
+/// produced it); only catches objects that cannot possibly hold
+/// `plain_len` bytes, e.g. a zero-byte file left by a crashed write.
+fn plausible_stored_size(stored: u64, plain_len: u64, encrypted: bool) -> bool {
+    let min = if encrypted { ENCRYPTION_OVERHEAD } else { 0 };
+    if stored < min {
+        return false;
+    }
+    // Exactly the framing overhead means an empty payload, which is only
+    // possible for empty content (a zstd frame is never empty).
+    !(stored == min && plain_len > 0)
+}
+
+/// Fills `buf` from `reader` until full or EOF; returns bytes read.
+fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
+// ====================== STREAMING MULTIPART ======================
+/// Streams a large file in `CHUNK_SIZE` pieces: each chunk is hashed and
+/// stored from the same buffer, and the full-file hash is computed over
+/// exactly those bytes. Memory use is bounded by one chunk.
+fn process_file_multipart_streaming(
+    src: &Path,
     storage: &Arc<dyn Storage>,
-    rel_path: &Path,
-    mapped: &[u8],
-    file_hash: String,
     should_encrypt: bool,
-    encryption_key: Option<Arc<EncryptionKey>>, // ⚡ Pre-derived key
+    encryption_key: Option<&EncryptionKey>, // ⚡ Pre-derived key
     dry_run: bool,
     rt_handle: &Handle,
     compression_level: u8,
-) -> io::Result<FileMetadata> {
-    let mut chunks_meta = Vec::with_capacity((mapped.len() / CHUNK_SIZE) + 1);
+) -> io::Result<(FileStatus, FileMetadata)> {
+    let mut file = std::fs::File::open(src)?;
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    let mut full_hasher = blake3::Hasher::new();
+    let mut chunks_meta = Vec::new();
     let mut total_stored_size = 0u64;
+    let mut wrote_any = false;
 
-    for chunk_data in mapped.chunks(CHUNK_SIZE) {
+    loop {
+        let n = read_full(&mut file, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let chunk_data = &buf[..n];
+        full_hasher.update(chunk_data);
+
         let chunk_hash = hash_file_content(chunk_data)?;
         let data_path = format!(
             "data/{}/{}",
@@ -127,24 +201,31 @@ fn process_file_multipart_optimized(
             chunk_hash
         );
 
-        let (stored_size, stored_hash) = if rt_handle.block_on(storage.exists(&data_path))? {
-            let data = rt_handle.block_on(storage.read(&data_path))?;
-            (data.len() as u64, Some(hash_file_content(&data)?))
-        } else if dry_run {
-            (0, None)
-        } else {
-            let final_data = compress_and_encrypt_chunk(
-                chunk_data,
-                compression_level,
-                should_encrypt,
-                encryption_key.as_deref(),
-            )?;
-
-            let len = final_data.len() as u64;
-            let hash = hash_file_content(&final_data)?;
-
-            rt_handle.block_on(storage.write(&data_path, &final_data))?;
-            (len, Some(hash))
+        let existing = rt_handle.block_on(storage.size(&data_path))?;
+        let (stored_size, stored_hash) = match existing {
+            // Dedup on size metadata only: no more downloading the whole
+            // stored chunk just to hash it.
+            Some(sz) if plausible_stored_size(sz, n as u64, should_encrypt) => (sz, None),
+            _ if dry_run => (0, None),
+            other => {
+                if let Some(sz) = other {
+                    warn!(
+                        "Stored chunk {} has implausible size {}; rewriting it",
+                        data_path, sz
+                    );
+                }
+                let final_data = compress_and_encrypt(
+                    chunk_data,
+                    compression_level,
+                    should_encrypt,
+                    encryption_key,
+                )?;
+                let len = final_data.len() as u64;
+                let hash = hash_file_content(&final_data)?;
+                rt_handle.block_on(storage.write(&data_path, &final_data))?;
+                wrote_any = true;
+                (len, Some(hash))
+            }
         };
 
         chunks_meta.push(ChunkMetadata {
@@ -155,13 +236,20 @@ fn process_file_multipart_optimized(
         total_stored_size += stored_size;
     }
 
-    Ok(FileMetadata::new_multipart(
+    let file_hash = full_hasher.finalize().to_hex().to_string();
+    let metadata = FileMetadata::new_multipart(
         file_hash,
         should_encrypt,
         compression_level > 0,
         chunks_meta,
         total_stored_size,
-    ))
+    );
+    let status = if wrote_any || dry_run {
+        FileStatus::Processed
+    } else {
+        FileStatus::Skipped
+    };
+    Ok((status, metadata))
 }
 
 // ====================== HELPERS ======================
@@ -182,6 +270,9 @@ fn should_encrypt_file(
     }
 }
 
+/// Compresses (if `compression_level > 0`) and encrypts (only if
+/// `should_encrypt` and a key is present). Used for whole files and chunks
+/// alike, so the `enc`/`clear` location always matches the stored bytes.
 fn compress_and_encrypt(
     data: &[u8],
     compression_level: u8,
@@ -204,29 +295,6 @@ fn compress_and_encrypt(
         } else {
             Ok(compressed)
         }
-    } else {
-        Ok(compressed)
-    }
-}
-
-fn compress_and_encrypt_chunk(
-    data: &[u8],
-    compression_level: u8,
-    should_encrypt: bool,
-    enc_key: Option<&EncryptionKey>,
-) -> io::Result<Vec<u8>> {
-    let compressed = if compression_level > 0 {
-        let mut compressed = Vec::with_capacity(data.len() * 2 / 3);
-        let mut encoder = ZstdEncoder::new(&mut compressed, compression_level as i32)?;
-        encoder.write_all(data)?;
-        encoder.finish()?;
-        compressed
-    } else {
-        data.to_vec()
-    };
-
-    if let Some(key) = enc_key {
-        key.encrypt(&compressed)
     } else {
         Ok(compressed)
     }
@@ -263,5 +331,58 @@ pub fn get_file_priority(path: &Path) -> u8 {
             }
         }
         None => 10,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::LocalStorage;
+
+    #[test]
+    fn plausibility_rejects_torn_objects_only() {
+        assert!(!plausible_stored_size(0, 10, false));
+        assert!(plausible_stored_size(0, 0, false));
+        assert!(plausible_stored_size(3, 10, false)); // compressed
+        assert!(!plausible_stored_size(20, 10, true));
+        assert!(!plausible_stored_size(44, 10, true));
+        assert!(plausible_stored_size(44, 0, true));
+        assert!(plausible_stored_size(60, 10, true));
+    }
+
+    #[test]
+    fn truncated_dedup_object_is_rewritten() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("f.txt");
+        std::fs::write(&src, b"hello world").unwrap();
+        let hash = hash_file_content(b"hello world").unwrap();
+
+        let storage: Arc<dyn Storage> =
+            Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
+        // Simulate a torn write from an older version: zero-byte object.
+        let obj = repo.path().join("data/clear").join(&hash);
+        std::fs::create_dir_all(obj.parent().unwrap()).unwrap();
+        std::fs::write(&obj, b"").unwrap();
+
+        let (status, meta) = process_file(
+            &src,
+            &storage,
+            Path::new("f.txt"),
+            None,
+            &HashMap::new(),
+            false,
+            rt.handle(),
+            &None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(status, FileStatus::Processed);
+        assert_eq!(meta.hash, hash);
+        assert_eq!(std::fs::read(&obj).unwrap(), b"hello world");
     }
 }
