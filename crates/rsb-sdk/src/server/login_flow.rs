@@ -10,6 +10,7 @@ use crate::server;
 pub struct LoginFlow {
     server_handle: Option<tokio::task::JoinHandle<()>>,
     client: reqwest::Client,
+    port: u16,
 }
 
 impl Default for LoginFlow {
@@ -18,8 +19,14 @@ impl Default for LoginFlow {
     }
 }
 impl LoginFlow {
+    /// Porta lida de `RSB_SERVER_PORT` (por omissão 3000).
     pub fn new() -> Self {
+        Self::with_port(server::routes::server_port_from_env())
+    }
+
+    pub fn with_port(port: u16) -> Self {
         Self {
+            port,
             server_handle: None,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
@@ -35,10 +42,11 @@ impl LoginFlow {
 
         // 1. Create channel for server readiness
         let (tx, rx) = oneshot::channel();
+        let port = self.port;
 
         // 2. Start the server in background
         self.server_handle = Some(tokio::spawn(async move {
-            if let Err(e) = server::routes::start_auth_server(3000, tx).await {
+            if let Err(e) = server::routes::start_auth_server(port, tx).await {
                 eprintln!("Server error: {}", e);
             }
         }));
@@ -65,7 +73,7 @@ impl LoginFlow {
         let (device_code, user_code) = self.initiate_device_flow(&user_id).await?;
 
         // 5. Build auth URL without user_code
-        let auth_url = "http://localhost:3000/auth/device/verify".to_string();
+        let auth_url = format!("{}/auth/device/verify", self.base_url());
 
         println!("\n🔐 Authentication Required");
         println!("════════════════════════════════════════════");
@@ -89,6 +97,10 @@ impl LoginFlow {
         Ok(token)
     }
 
+    fn base_url(&self) -> String {
+        format!("http://localhost:{}", self.port)
+    }
+
     /// Wait for server to be ready with manual connection retry
     async fn wait_for_server_ready(&self) -> Result<()> {
         println!("⏳ Starting authentication server...");
@@ -106,7 +118,12 @@ impl LoginFlow {
         let start = std::time::Instant::now();
 
         for attempt in 0..120 {
-            match self.client.get("http://localhost:3000/").send().await {
+            match self
+                .client
+                .get(format!("{}/", self.base_url()))
+                .send()
+                .await
+            {
                 Ok(_) => {
                     pb.finish_with_message("✅ Server is responding!");
                     println!("   Server ready in {:.1}s", start.elapsed().as_secs_f32());
@@ -137,7 +154,7 @@ impl LoginFlow {
     async fn initiate_device_flow(&self, user_id: &str) -> Result<(String, String)> {
         let response = self
             .client
-            .post("http://127.0.0.1:3000/auth/device/start")
+            .post(format!("{}/auth/device/start", self.base_url()))
             .timeout(Duration::from_secs(10))
             .json(&serde_json::json!({
                 "user_id": user_id
@@ -189,7 +206,7 @@ impl LoginFlow {
         loop {
             match self
                 .client
-                .post("http://localhost:3000/auth/device/token")
+                .post(format!("{}/auth/device/token", self.base_url()))
                 .json(&serde_json::json!({ "device_code": device_code }))
                 .send()
                 .await

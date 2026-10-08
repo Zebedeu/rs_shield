@@ -1,4 +1,4 @@
-use crate::auth::{self, SessionStore};
+use crate::auth::{self, SessionStatus, SessionStore};
 
 use crate::credentials;
 use crate::server::handlers::{
@@ -13,6 +13,18 @@ use axum::{
 use std::fs;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// Porta por omissão do servidor de autenticação local.
+pub const DEFAULT_SERVER_PORT: u16 = 3000;
+
+/// Porta do servidor de autenticação: `RSB_SERVER_PORT` ou 3000.
+pub fn server_port_from_env() -> u16 {
+    std::env::var("RSB_SERVER_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|p| *p != 0)
+        .unwrap_or(DEFAULT_SERVER_PORT)
+}
 
 pub fn create_auth_router<S: SessionStore + Clone + 'static>(state: AuthHandlerState<S>) -> Router {
     Router::new()
@@ -56,7 +68,7 @@ pub async fn start_auth_server(
     port: u16,
     ready_tx: tokio::sync::oneshot::Sender<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use auth::{InMemorySessionStore, JwtManager};
+    use auth::{JwtManager, PersistentSessionStore, SessionRegistry};
     use credentials::Fido2Manager;
     use std::collections::HashMap;
     use tracing::info;
@@ -64,24 +76,35 @@ pub async fn start_auth_server(
     let origin = format!("http://localhost:{}", port);
     let mut fido2_mgr = Fido2Manager::new(&origin, "localhost", "RSB Shield")?;
 
-    if let Ok(storage_path) = Fido2Manager::default_storage_path() {
-        if storage_path.exists() {
-            let _ = fido2_mgr.load_from_file(&storage_path);
-        }
-    }
+    // Falhar se o ficheiro existir mas não puder ser carregado (ex.: DEK em
+    // falta): continuar com estado vazio arriscaria sobrescrever credenciais.
+    let storage_path = Fido2Manager::default_storage_path()?;
+    fido2_mgr.load_from_file(&storage_path)?;
 
     let jwt_mgr = JwtManager::from_env()?;
-    let session_store = Arc::new(InMemorySessionStore::new());
+    // Sessões persistidas para que a CLI valide o JTI sem este servidor ativo.
+    let session_store = Arc::new(PersistentSessionStore::new(
+        SessionRegistry::default_registry()?,
+    ));
     let rate_limiter = Arc::new(auth::RateLimiter::new(5, 60));
     let audit_logger = Arc::new(auth::AuditLogger::new(Some(default_audit_log_path())));
-    // Periodic cleanup of expired sessions + device flows (availability hygiene).
+    let device_flows = Arc::new(Mutex::new(HashMap::new()));
+
+    // Periodic cleanup of expired sessions, rate-limit windows and device flows.
     {
         let store = session_store.clone();
+        let limiter = rate_limiter.clone();
+        let flows = device_flows.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
                 let _ = store.cleanup_expired().await;
+                limiter.cleanup_expired().await;
+                let now = chrono::Utc::now();
+                flows.lock().await.retain(
+                    |_, f: &mut crate::server::handlers::DeviceFlowStatus| f.expires_at > now,
+                );
             }
         });
     }
@@ -90,15 +113,20 @@ pub async fn start_auth_server(
         jwt_manager: Arc::new(jwt_mgr),
         fido2_manager: Arc::new(Mutex::new(fido2_mgr)),
         session_store,
-        device_flows: Arc::new(Mutex::new(HashMap::new())),
+        device_flows,
         rate_limiter,
         audit_logger,
+        fido2_storage_path: storage_path,
+        public_base_url: origin.clone(),
     };
 
-    let app = create_auth_router(auth_state);
+    let app = create_auth_router(auth_state).layer(axum::middleware::from_fn_with_state(
+        port,
+        crate::server::middleware::local_host_guard_middleware,
+    ));
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
 
-    info!("🚀 Auth server running on http://localhost:{}", port);
+    info!("🚀 Auth server running on {}", origin);
 
     // Signal that server is ready
     let _ = ready_tx.send(());
@@ -108,7 +136,30 @@ pub async fn start_auth_server(
     Ok(())
 }
 
+/// Verifica a autenticação FIDO2 da CLI.
+///
+/// Validação local: assinatura/exp/aud/iss do JWT + registo persistido de
+/// sessões (`~/.rs-shield/sessions.json`, escrito pelo servidor ao emitir e
+/// revogar). Não depende do servidor de login estar ativo.
+///
+/// A verificação remota é opcional: ativa com `RSB_AUTH_REMOTE_VERIFY=1`,
+/// usando a porta `RSB_SERVER_PORT` (por omissão 3000).
 pub async fn check_fido2_auth() -> Result<String, Box<dyn std::error::Error>> {
+    let remote = std::env::var("RSB_AUTH_REMOTE_VERIFY")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let port = if remote {
+        Some(server_port_from_env())
+    } else {
+        None
+    };
+    check_fido2_auth_with(port).await
+}
+
+/// Como `check_fido2_auth`, com verificação remota opcional na porta dada.
+pub async fn check_fido2_auth_with(
+    remote_port: Option<u16>,
+) -> Result<String, Box<dyn std::error::Error>> {
     let home = dirs::home_dir().ok_or("Home directory not found")?;
     let rsb_dir = home.join(".rs-shield");
     let auth_file = rsb_dir.join("auth_token");
@@ -125,29 +176,54 @@ pub async fn check_fido2_auth() -> Result<String, Box<dyn std::error::Error>> {
         return Err("❌ Invalid authentication token".into());
     }
 
-    // 1. Validação Local (JWT Signature & Expiration)
-    // Fail-closed: a validação remota é obrigatória. Sem servidor não há
-    // como verificar revogação (JTI), então recusamos em vez de aceitar.
-    let jwt_mgr = auth::JwtManager::from_env()?;
-    jwt_mgr
-        .verify_token(trimmed_token)
+    let registry = auth::SessionRegistry::default_registry()?;
+    verify_token_locally(trimmed_token, &auth::JwtManager::from_env()?, &registry)?;
+
+    // Verificação remota opcional (ex.: servidor de longa duração).
+    if let Some(port) = remote_port {
+        let client = reqwest::Client::new();
+        let res = client
+            .get(format!("http://localhost:{}/api/auth/verify", port))
+            .header("Authorization", format!("Bearer {}", trimmed_token))
+            .send()
+            .await;
+
+        match res {
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(_) => {
+                return Err("❌ Session revoked or expired on server. Please login again.".into());
+            }
+            Err(e) => {
+                return Err(format!(
+                    "❌ Auth server unreachable for remote verification (fail-closed). ({})",
+                    e
+                )
+                .into());
+            }
+        }
+    }
+
+    Ok(trimmed_token.to_string())
+}
+
+/// Validação local (sem rede): JWT (assinatura, exp, aud, iss) + JTI ativo no
+/// registo persistido de sessões e pertencente ao mesmo utilizador.
+pub fn verify_token_locally(
+    token: &str,
+    jwt_mgr: &auth::JwtManager,
+    registry: &auth::SessionRegistry,
+) -> Result<auth::SessionClaims, Box<dyn std::error::Error>> {
+    let claims = jwt_mgr
+        .verify_token(token)
         .map_err(|e| format!("❌ Session expired or invalid: {}", e))?;
 
-    // 2. Validação Remota (Consulta ao servidor para verificar revogação/JTI)
-    let client = reqwest::Client::new();
-    let res = client
-        .get("http://localhost:3000/api/auth/verify")
-        .header("Authorization", format!("Bearer {}", trimmed_token))
-        .send()
-        .await;
-
-    match res {
-        Ok(resp) if resp.status().is_success() => Ok(trimmed_token.to_string()),
-        Ok(_) => Err("❌ Session revoked or expired on server. Please login again.".into()),
-        Err(e) => Err(format!(
-            "❌ Auth server unreachable, cannot verify revocation (fail-closed). Start the auth server and login again. ({})",
-            e
-        )
-        .into()),
+    match registry.status(&claims.jti, &claims.sub)? {
+        SessionStatus::Active => Ok(claims),
+        SessionStatus::Revoked => Err("❌ Session revoked. Please login again.".into()),
+        SessionStatus::Expired => Err("❌ Session expired. Please login again.".into()),
+        SessionStatus::Unknown => Err(
+            "❌ Session not recognized (not issued by this installation). Please login again."
+                .into(),
+        ),
     }
 }
