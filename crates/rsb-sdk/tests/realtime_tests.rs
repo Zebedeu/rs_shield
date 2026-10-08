@@ -292,20 +292,6 @@ async fn test_realtime_sync_creation() {
 }
 
 #[tokio::test]
-async fn test_realtime_sync_increment_counters() {
-    let strategy = SyncStrategy::default();
-    let sync = RealtimeSync::new(strategy);
-
-    sync.increment_synced().await;
-    sync.increment_synced().await;
-    sync.increment_failed().await;
-
-    let stats = sync.get_stats().await;
-    assert_eq!(stats.synced, 2);
-    assert_eq!(stats.failed, 1);
-}
-
-#[tokio::test]
 async fn test_realtime_sync_process_batch_with_ignore_patterns() {
     let mut strategy = SyncStrategy::default();
     strategy.ignore_patterns = vec![".*\\.tmp$".into()];
@@ -527,81 +513,6 @@ async fn test_realtime_sync_start_processing() {
 }
 
 #[tokio::test]
-async fn test_process_single_change_valid_file() {
-    let src_dir = TempDir::new().expect("Failed to create source dir");
-    let test_file = src_dir.path().join("test.txt");
-    fs::write(&test_file, "content").expect("Failed to write file");
-
-    // Verify that the file exists and has the correct size
-    let metadata = std::fs::metadata(&test_file).expect("File should exist");
-    assert_eq!(metadata.len(), 7);
-
-    let strategy = SyncStrategy::default();
-    let sync = RealtimeSync::new(strategy);
-
-    let change = FileChange {
-        path: test_file.clone(),
-        change_type: ChangeType::Created,
-        timestamp: Utc::now(),
-        size: 7,
-        hash: None,
-    };
-
-    let result = sync.process_single_change(change, 2).await;
-    assert!(result.is_ok());
-
-    let stats = sync.get_stats().await;
-    assert_eq!(stats.synced, 1);
-}
-
-#[tokio::test]
-async fn test_process_single_change_nonexistent_file() {
-    let nonexistent = PathBuf::from("/nonexistent/file.txt");
-    let strategy = SyncStrategy::default();
-    let sync = RealtimeSync::new(strategy);
-
-    let change = FileChange {
-        path: nonexistent,
-        change_type: ChangeType::Created,
-        timestamp: Utc::now(),
-        size: 100,
-        hash: None,
-    };
-
-    let result = sync.process_single_change(change, 1).await;
-    assert!(result.is_err());
-
-    let stats = sync.get_stats().await;
-    assert_eq!(stats.failed, 1);
-}
-
-#[tokio::test]
-async fn test_process_single_change_with_ignore_pattern() {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let test_file = temp_dir.path().join("test.tmp");
-    fs::write(&test_file, "content").expect("Failed to write file");
-
-    let mut strategy = SyncStrategy::default();
-    strategy.ignore_patterns = vec![".*\\.tmp$".into()];
-    let sync = RealtimeSync::new(strategy);
-
-    let change = FileChange {
-        path: test_file,
-        change_type: ChangeType::Created,
-        timestamp: Utc::now(),
-        size: 7,
-        hash: None,
-    };
-
-    let result = sync.process_single_change(change, 2).await;
-    assert!(result.is_ok());
-
-    // Should ignore the pattern, so synced should not increment
-    let stats = sync.get_stats().await;
-    assert_eq!(stats.synced, 0);
-}
-
-#[tokio::test]
 async fn test_peek_pending_changes() {
     let queue = ChangeQueue::new(10);
     let strategy = SyncStrategy::default();
@@ -627,24 +538,6 @@ async fn test_peek_pending_changes() {
 }
 
 #[tokio::test]
-async fn test_get_detailed_stats_ratio() {
-    let strategy = SyncStrategy::default();
-    let sync = RealtimeSync::new(strategy);
-
-    // 3 synced, 1 failed
-    sync.increment_synced().await;
-    sync.increment_synced().await;
-    sync.increment_synced().await;
-    sync.increment_failed().await;
-
-    let detailed = sync.get_detailed_stats().await;
-
-    assert_eq!(detailed.synced, 3);
-    assert_eq!(detailed.failed, 1);
-    assert_eq!(detailed.sync_ratio, 0.75); // 3 / (3 + 1)
-}
-
-#[tokio::test]
 async fn test_get_detailed_stats_ratio_zero() {
     let strategy = SyncStrategy::default();
     let sync = RealtimeSync::new(strategy);
@@ -654,34 +547,6 @@ async fn test_get_detailed_stats_ratio_zero() {
     assert_eq!(detailed.synced, 0);
     assert_eq!(detailed.failed, 0);
     assert_eq!(detailed.sync_ratio, 0.0);
-}
-
-#[tokio::test]
-async fn test_multiple_changes_sequential() {
-    let src_dir = TempDir::new().expect("Failed to create source dir");
-    let strategy = SyncStrategy::default();
-    let sync = RealtimeSync::new(strategy);
-
-    // Add multiple changes
-    for i in 0..3 {
-        let file_path = src_dir.path().join(format!("file{}.txt", i));
-        fs::write(&file_path, format!("content{}", i)).expect("Failed to write file");
-
-        let change = FileChange {
-            path: file_path,
-            change_type: ChangeType::Created,
-            timestamp: Utc::now(),
-            size: (8 + i as u64),
-            hash: None,
-        };
-
-        let result = sync.process_single_change(change, 2).await;
-        assert!(result.is_ok());
-    }
-
-    let detailed = sync.get_detailed_stats().await;
-    assert_eq!(detailed.synced, 3);
-    assert_eq!(detailed.sync_ratio, 1.0);
 }
 
 #[tokio::test]
@@ -745,4 +610,320 @@ async fn test_process_batch_filters_correctly() {
             .to_string_lossy()
             .contains("important.txt")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Real backups triggered by debounced batches
+// ---------------------------------------------------------------------------
+
+use rsb_sdk::config::Config;
+use rsb_sdk::realtime::BackupRunner;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
+fn change(path: impl Into<PathBuf>) -> FileChange {
+    FileChange {
+        path: path.into(),
+        change_type: ChangeType::Modified,
+        timestamp: Utc::now(),
+        size: 1,
+        hash: None,
+    }
+}
+
+fn fast_strategy() -> SyncStrategy {
+    SyncStrategy {
+        batch_interval: 0,
+        ..SyncStrategy::default()
+    }
+}
+
+fn test_config(src: &std::path::Path, dst: &std::path::Path) -> Config {
+    Config {
+        source_path: src.to_string_lossy().to_string(),
+        destination_path: dst.to_string_lossy().to_string(),
+        exclude_patterns: vec![],
+        encryption_key: None,
+        backup_mode: "incremental".to_string(),
+        s3_bucket: None,
+        s3_region: None,
+        s3_endpoint: None,
+        encrypt_patterns: Some(vec!["*".to_string()]),
+        pause_on_low_battery: None,
+        s3: None,
+        s3_buckets: None,
+        pause_on_high_cpu: None,
+        compression_level: Some(3),
+        max_threads: Some(2),
+        channel_buffer_size: 8192,
+    }
+}
+
+fn snapshot_count(dst: &std::path::Path) -> usize {
+    fs::read_dir(dst.join("snapshots"))
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "toml"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Fake runner: counts calls and the maximum number of runs in flight,
+/// sleeps `delay`, and fails the first `fail_first` calls.
+struct Probe {
+    calls: Arc<AtomicUsize>,
+    in_flight: Arc<AtomicUsize>,
+    max_in_flight: Arc<AtomicUsize>,
+}
+
+fn probe_runner(fail_first: usize, delay: Duration) -> (BackupRunner, Probe) {
+    let probe = Probe {
+        calls: Arc::new(AtomicUsize::new(0)),
+        in_flight: Arc::new(AtomicUsize::new(0)),
+        max_in_flight: Arc::new(AtomicUsize::new(0)),
+    };
+    let (calls, in_flight, max_in_flight) = (
+        probe.calls.clone(),
+        probe.in_flight.clone(),
+        probe.max_in_flight.clone(),
+    );
+    let runner: BackupRunner = Arc::new(move || {
+        let (calls, in_flight, max_in_flight) =
+            (calls.clone(), in_flight.clone(), max_in_flight.clone());
+        Box::pin(async move {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            max_in_flight.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(delay).await;
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            if n < fail_first {
+                Err(format!("simulated failure #{}", n + 1))
+            } else {
+                Ok("ok".to_string())
+            }
+        })
+    });
+    (runner, probe)
+}
+
+async fn wait_until<F: Fn() -> bool>(timeout: Duration, f: F) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if f() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    f()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_realtime_batch_creates_snapshot_in_local_destination() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    fs::write(src.path().join("seed.txt"), b"seed").unwrap();
+
+    let sync = Arc::new(RealtimeSync::for_profile(
+        fast_strategy(),
+        test_config(src.path(), dst.path()),
+        Some("realtime-test-key".to_string()),
+    ));
+    sync.start(src.path()).await.expect("watch source");
+    let handle = sync.clone().spawn_processing_loop();
+    // Let the watcher settle before producing the burst.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    for i in 0..5 {
+        fs::write(src.path().join(format!("file{}.txt", i)), format!("data {}", i)).unwrap();
+    }
+
+    let dst_path = dst.path().to_path_buf();
+    let mut ok = false;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(60) {
+        let stats = sync.get_stats().await;
+        if snapshot_count(&dst_path) >= 1 && stats.synced > 0 && stats.pending_changes == 0 {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let stats = sync.get_stats().await;
+    sync.stop().await;
+    handle.await.unwrap();
+
+    assert!(
+        ok,
+        "expected a snapshot and no pending changes, got {} snapshot(s), stats {:?}",
+        snapshot_count(&dst_path),
+        stats
+    );
+    assert!(stats.backups_completed >= 1);
+    assert_eq!(stats.backups_failed, 0, "last error: {:?}", stats.last_error);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_failed_profile_backup_keeps_changes_pending_then_succeeds() {
+    let root = TempDir::new().unwrap();
+    let src = root.path().join("src");
+    let dst = root.path().join("dst");
+
+    let sync = RealtimeSync::for_profile(
+        fast_strategy(),
+        test_config(&src, &dst),
+        Some("realtime-test-key".to_string()),
+    );
+    sync.queue.add_change(change(src.join("a.txt"))).await;
+
+    // Source doesn't exist yet: the backup must fail and nothing is synced.
+    assert!(sync.sync_now().await.is_err());
+    let stats = sync.get_stats().await;
+    assert_eq!(stats.pending_changes, 1);
+    assert_eq!(stats.synced, 0);
+    assert_eq!(stats.backups_failed, 1);
+    assert!(stats.last_error.is_some());
+    assert_eq!(snapshot_count(&dst), 0);
+
+    // Retry after the problem is fixed: now the change is confirmed.
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), b"hello").unwrap();
+    assert_eq!(sync.sync_now().await.unwrap(), 1);
+    let stats = sync.get_stats().await;
+    assert_eq!(stats.pending_changes, 0);
+    assert_eq!(stats.synced, 1);
+    assert_eq!(stats.backups_completed, 1);
+    assert!(stats.last_error.is_none());
+    assert_eq!(snapshot_count(&dst), 1);
+}
+
+#[tokio::test]
+async fn test_without_backup_target_nothing_is_reported_synced() {
+    let sync = RealtimeSync::new(SyncStrategy::default());
+    sync.queue.add_change(change("/x/a.txt")).await;
+    assert!(sync.sync_now().await.is_err());
+    let stats = sync.get_stats().await;
+    assert_eq!(stats.pending_changes, 1);
+    assert_eq!(stats.synced, 0);
+    assert_eq!(stats.failed, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_no_concurrent_backups() {
+    let (runner, probe) = probe_runner(0, Duration::from_millis(100));
+    let sync = Arc::new(RealtimeSync::with_backup_runner(fast_strategy(), runner));
+    let handle = sync.clone().spawn_processing_loop();
+
+    let mut tasks = Vec::new();
+    for i in 0..6 {
+        let s = sync.clone();
+        tasks.push(tokio::spawn(async move {
+            s.queue.add_change(change(format!("/x/{}.txt", i))).await;
+            s.sync_now().await
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap().unwrap();
+    }
+    assert!(
+        wait_until(Duration::from_secs(10), || !sync.is_backup_running()).await,
+        "backup never finished"
+    );
+    sync.stop_processing().await;
+    handle.await.unwrap();
+
+    assert!(probe.calls.load(Ordering::SeqCst) >= 1);
+    assert_eq!(probe.max_in_flight.load(Ordering::SeqCst), 1);
+    let stats = sync.get_stats().await;
+    assert_eq!(stats.pending_changes, 0);
+    assert_eq!(stats.synced, 6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_changes_during_backup_trigger_one_more_backup() {
+    let (runner, probe) = probe_runner(0, Duration::from_millis(400));
+    let sync = Arc::new(RealtimeSync::with_backup_runner(fast_strategy(), runner));
+    sync.queue.add_change(change("/x/a.txt")).await;
+    let handle = sync.clone().spawn_processing_loop();
+
+    let s = sync.clone();
+    assert!(wait_until(Duration::from_secs(5), move || s.is_backup_running()).await);
+    // Arrives while the first backup runs: must not be marked synced by it.
+    sync.queue.add_change(change("/x/b.txt")).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(sync.get_stats().await.pending_changes >= 1);
+
+    let c = probe.calls.clone();
+    assert!(wait_until(Duration::from_secs(10), move || c.load(Ordering::SeqCst) >= 2).await);
+    let s = sync.clone();
+    assert!(wait_until(Duration::from_secs(5), move || !s.is_backup_running()).await);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    sync.stop_processing().await;
+    handle.await.unwrap();
+
+    let stats = sync.get_stats().await;
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.max_in_flight.load(Ordering::SeqCst), 1);
+    assert_eq!(stats.pending_changes, 0);
+    assert_eq!(stats.synced, 2);
+    assert_eq!(stats.backups_completed, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_loop_retries_failed_backup_with_backoff() {
+    let (runner, probe) = probe_runner(2, Duration::from_millis(10));
+    let sync = Arc::new(
+        RealtimeSync::with_backup_runner(fast_strategy(), runner)
+            .with_retry_backoff(Duration::from_millis(50), Duration::from_millis(200)),
+    );
+    sync.queue.add_change(change("/x/a.txt")).await;
+    let handle = sync.clone().spawn_processing_loop();
+
+    let c = probe.calls.clone();
+    assert!(wait_until(Duration::from_secs(10), move || c.load(Ordering::SeqCst) >= 3).await);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    sync.stop_processing().await;
+    handle.await.unwrap();
+
+    let stats = sync.get_stats().await;
+    assert_eq!(stats.backups_failed, 2);
+    assert_eq!(stats.backups_completed, 1);
+    assert_eq!(stats.synced, 1);
+    assert_eq!(stats.pending_changes, 0);
+    assert!(stats.last_error.is_none());
+    let detailed = sync.get_detailed_stats().await;
+    assert!((detailed.sync_ratio - 1.0 / 3.0).abs() < 1e-9);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_stop_lets_running_backup_finish() {
+    let (runner, probe) = probe_runner(0, Duration::from_millis(400));
+    let sync = Arc::new(RealtimeSync::with_backup_runner(fast_strategy(), runner));
+    sync.queue.add_change(change("/x/a.txt")).await;
+    let handle = sync.clone().spawn_processing_loop();
+
+    let s = sync.clone();
+    assert!(wait_until(Duration::from_secs(5), move || s.is_backup_running()).await);
+    sync.stop().await;
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("loop did not exit")
+        .unwrap();
+
+    assert!(!sync.is_backup_running());
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    let stats = sync.get_stats().await;
+    assert_eq!(stats.backups_completed, 1);
+    assert_eq!(stats.pending_changes, 0);
+}
+
+#[tokio::test]
+async fn test_excluded_root_changes_are_ignored() {
+    let (runner, probe) = probe_runner(0, Duration::from_millis(1));
+    let sync = RealtimeSync::with_backup_runner(fast_strategy(), runner).exclude_root("/repo/dst");
+    sync.queue.add_change(change("/repo/dst/snapshots/x.toml")).await;
+    assert_eq!(sync.sync_now().await.unwrap(), 0);
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(sync.get_stats().await.pending_changes, 0);
 }

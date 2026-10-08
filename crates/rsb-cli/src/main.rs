@@ -694,66 +694,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
 
-            let source = PathBuf::from(&cfg.source_path);
+            let source = rsb_sdk::utils::expand_path(&cfg.source_path);
             let sync_dst = sync_to;
-            let backup_dst = PathBuf::from(&cfg.destination_path);
+            let backup_dst = rsb_sdk::utils::expand_path(&cfg.destination_path);
 
             println!("🟢 Real-Time Sync started");
             println!("📂 Source: {}", source.display());
             println!("📁 Syncing to: {}", sync_dst.display());
             println!("💾 Backup to: {}", backup_dst.display());
-            println!("⏱️ Interval: {}s", interval);
+            println!("⏱️ Debounce: {}s", interval);
             println!("🔐 Encryption: ENABLED");
             println!("\nPress Ctrl+C to stop\n");
-            let mut total_changes = 0;
-            let mut backups_count = 0;
 
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
+            let rt = Arc::new(build_watch_sync(&cfg, sync_dst.clone(), interval));
+            rt.start(&source)
+                .await
+                .map_err(|e| format!("Failed to watch {}: {}", source.display(), e))?;
+            // Back up once at startup so the repository reflects the current
+            // state before we only react to changes.
+            rt.queue
+                .add_change(rsb_sdk::realtime::FileChange {
+                    path: source.clone(),
+                    change_type: rsb_sdk::realtime::ChangeType::Modified,
+                    timestamp: chrono::Utc::now(),
+                    size: 0,
+                    hash: None,
+                })
+                .await;
+            let loop_handle = rt.clone().spawn_processing_loop();
 
-                match sync_changed_files(&source, &sync_dst).await {
-                    Ok(copied_count) => {
-                        if copied_count > 0 {
-                            total_changes += copied_count;
-                            println!("✅ Sync: {} new/modified files synchronized.", copied_count);
-
-                            // ⚡ Use config max_threads for watch mode
-                            let watch_threads = cfg.max_threads;
-
-                            match perform_backup(
-                                &cfg,
-                                "incremental",
-                                Some(cfg.encryption_key.as_ref().unwrap()),
-                                false,
-                                false,
-                                watch_threads, // ⚡ Use config value instead of None
-                                None,
-                            )
-                            .await
-                            {
-                                Ok(report) => {
-                                    backups_count += 1;
-                                    println!(
-                                        "💾 Backup #{}: {} files total, {} processed",
-                                        backups_count, report.total_files, report.files_processed
-                                    );
-                                }
-                                Err(e) => {
-                                    eprintln!("❌ Backup error: {}", e);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("❌ Sync error: {}", e);
-                    }
+            tokio::signal::ctrl_c().await?;
+            println!(
+                "\n⏹️ Stopping... a backup in progress will be allowed to finish (Ctrl+C again to abort it)."
+            );
+            rt.stop().await;
+            tokio::select! {
+                _ = loop_handle => {}
+                _ = tokio::signal::ctrl_c() => {
+                    // The snapshot manifest is only written at the very end
+                    // (atomically), so aborting leaves no partial snapshot.
+                    eprintln!("⚠️ Aborted: the interrupted backup produced no snapshot.");
+                    std::process::exit(130);
                 }
+            }
 
-                println!(
-                    "📊 Total: {} changes detected, {} backups created",
-                    total_changes, backups_count
+            let stats = rt.get_stats().await;
+            println!(
+                "📊 {} change(s) backed up, {} backup(s) succeeded, {} failed",
+                stats.synced, stats.backups_completed, stats.backups_failed
+            );
+            if stats.pending_changes > 0 {
+                eprintln!(
+                    "⚠️ {} change(s) were NOT backed up yet (run `rsb backup` to capture them).",
+                    stats.pending_changes
                 );
-                println!("---");
+            }
+            if let Some(err) = stats.last_error {
+                eprintln!("❌ Last backup error: {}", err);
             }
         }
 
@@ -945,4 +942,51 @@ fn save_auth_token(token: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let auth_file = rsb_dir.join("auth_token");
     config::write_file_secure(&auth_file, token.as_bytes())?;
     Ok(auth_file)
+}
+
+/// Builds the realtime synchronizer used by `rsb watch`: each debounced
+/// batch mirrors new/modified files to `sync_dst`, then runs an encrypted
+/// incremental backup of the profile. The key comes from `cfg.encryption_key`
+/// (already resolved by the caller) and is never printed.
+fn build_watch_sync(
+    cfg: &config::Config,
+    sync_dst: PathBuf,
+    interval: u64,
+) -> rsb_sdk::realtime::RealtimeSync {
+    use rsb_sdk::realtime::{BackupRunner, RealtimeSync, SyncStrategy, profile_backup_runner};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let source = rsb_sdk::utils::expand_path(&cfg.source_path);
+    let backup_dst = rsb_sdk::utils::expand_path(&cfg.destination_path);
+    let backup = profile_backup_runner(cfg.clone(), cfg.encryption_key.clone());
+    let backups = Arc::new(AtomicUsize::new(0));
+    let mirror_dst = sync_dst.clone();
+    let runner: BackupRunner = Arc::new(move || {
+        let backup = backup.clone();
+        let backups = backups.clone();
+        let src = source.clone();
+        let dst = mirror_dst.clone();
+        Box::pin(async move {
+            let copied = sync_changed_files(&src, &dst)
+                .await
+                .map_err(|e| format!("sync to {} failed: {}", dst.display(), e))?;
+            if copied > 0 {
+                println!("✅ Sync: {} new/modified files synchronized.", copied);
+            }
+            let summary = backup().await?;
+            let n = backups.fetch_add(1, Ordering::SeqCst) + 1;
+            println!("💾 Backup #{}: {}", n, summary);
+            Ok(summary)
+        })
+    });
+
+    let strategy = SyncStrategy {
+        batch_interval: interval,
+        ..SyncStrategy::default()
+    };
+    // Neither the mirror nor the repository may feed changes back into the
+    // watcher (they could live inside the source tree).
+    RealtimeSync::with_backup_runner(strategy, runner)
+        .exclude_root(sync_dst)
+        .exclude_root(backup_dst)
 }
