@@ -317,6 +317,51 @@ impl KeyCache {
     pub fn decrypt(&self, encrypted: &[u8]) -> io::Result<Vec<u8>> {
         decrypt_with(encrypted, |salt, iterations| self.key_for(salt, iterations))
     }
+
+    /// Like [`KeyCache::decrypt`] but decrypts in place inside `blob`'s own
+    /// allocation and returns it trimmed to the plaintext, so peak memory is
+    /// one copy of the blob instead of two.
+    pub fn decrypt_owned(&self, mut blob: Vec<u8>) -> io::Result<Vec<u8>> {
+        // (aad bytes, salt, nonce, iterations, body offset)
+        let (aad, salt, nonce, iterations, body_start) = match parse_v2(&blob) {
+            Some(p) => (
+                p.aad.to_vec(),
+                p.salt,
+                p.nonce,
+                p.iterations,
+                V2_HEADER_LEN + SALT_LEN + NONCE_LEN,
+            ),
+            None => match parse_legacy(&blob) {
+                Some(p) => (Vec::new(), p.salt, p.nonce, p.iterations, SALT_LEN + NONCE_LEN),
+                None => {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "Invalid encrypted data size: {} bytes (minimum: {})",
+                            blob.len(),
+                            SALT_LEN + NONCE_LEN + TAG_LEN
+                        ),
+                    ));
+                }
+            },
+        };
+        let key = self.key_for(&salt, iterations)?;
+        let len = match key.open_in_place(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(&aad[..]),
+            &mut blob[body_start..],
+        ) {
+            Ok(plain) => plain.len(),
+            Err(_) => {
+                error!("Decryption failed (authentication tag mismatch)");
+                return Err(CryptoError::AuthenticationFailed.into());
+            }
+        };
+        blob.truncate(body_start + len);
+        blob.drain(..body_start);
+        debug!("Decrypted {} bytes successfully (in place)", blob.len());
+        Ok(blob)
+    }
 }
 
 /// Same as [`decrypt_data`] but reuses keys derived by `cache`.
@@ -404,5 +449,20 @@ mod tests {
         assert_eq!(decrypt_data_with_cache(&a, &cache).unwrap(), b"a");
         assert_eq!(decrypt_data_with_cache(&b, &cache).unwrap(), b"b");
         assert_eq!(cache.keys.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn decrypt_owned_matches_decrypt() {
+        let cache = KeyCache::new(b"pw");
+        let key = EncryptionKey::new(b"pw").unwrap();
+        let blob = key.encrypt(b"hello world").unwrap();
+        assert_eq!(cache.decrypt_owned(blob.clone()).unwrap(), b"hello world");
+        let legacy = legacy_encrypt(b"old", b"pw");
+        assert_eq!(cache.decrypt_owned(legacy).unwrap(), b"old");
+        let mut bad = blob;
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert!(is_authentication_error(&cache.decrypt_owned(bad).unwrap_err()));
+        assert!(cache.decrypt_owned(vec![0u8; 3]).is_err());
     }
 }

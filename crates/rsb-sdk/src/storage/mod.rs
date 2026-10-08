@@ -7,15 +7,32 @@ use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Region;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWriteExt};
 
 pub use lock::{LockKind, RepoLock};
+
+/// Streaming reader over a stored object (see [`Storage::read_stream`]).
+pub type BlobReader = Pin<Box<dyn AsyncRead + Send>>;
 
 #[async_trait]
 pub trait Storage: Send + Sync {
     async fn write(&self, path: &str, data: &[u8]) -> io::Result<()>;
+    /// Reads a whole object into memory. Meant for small objects
+    /// (manifests, snapshots); use [`Storage::read_stream`] for data blobs.
     async fn read(&self, path: &str) -> io::Result<Vec<u8>>;
+
+    /// Opens an object as a byte stream so callers can process it with
+    /// bounded memory (no full-object buffering in real backends).
+    ///
+    /// The default implementation falls back to [`Storage::read`]; real
+    /// backends override it (local: file handle, S3: GetObject body).
+    async fn read_stream(&self, path: &str) -> io::Result<BlobReader> {
+        let data = self.read(path).await?;
+        Ok(Box::pin(io::Cursor::new(data)))
+    }
+
     async fn exists(&self, path: &str) -> io::Result<bool>;
     async fn list(&self, prefix: &str) -> io::Result<Vec<String>>;
     async fn delete(&self, path: &str) -> io::Result<()>;
@@ -216,6 +233,12 @@ impl Storage for LocalStorage {
         fs::read(full_path).await
     }
 
+    async fn read_stream(&self, path: &str) -> io::Result<BlobReader> {
+        let full_path = self.safe_join(path)?;
+        let file = fs::File::open(full_path).await?;
+        Ok(Box::pin(file))
+    }
+
     async fn exists(&self, path: &str) -> io::Result<bool> {
         let full_path = self.safe_join(path)?;
         Ok(full_path.exists())
@@ -355,6 +378,19 @@ impl Storage for S3Storage {
         Ok(data.into_bytes().to_vec())
     }
 
+    async fn read_stream(&self, path: &str) -> io::Result<BlobReader> {
+        let resp = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(path)
+            .send()
+            .await
+            .map_err(|e| io::Error::new(ErrorKind::NotFound, format!("S3 Read Error: {}", e)))?;
+        // Streams the HTTP body chunk by chunk; nothing is collected.
+        Ok(Box::pin(resp.body.into_async_read()))
+    }
+
     async fn exists(&self, path: &str) -> io::Result<bool> {
         match self
             .client
@@ -489,6 +525,21 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names.len(), 1, "temp files left behind: {:?}", names);
+    }
+
+    #[tokio::test]
+    async fn local_read_stream_matches_read_and_rejects_traversal() {
+        use tokio::io::AsyncReadExt;
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path().to_str().unwrap());
+        let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        storage.write("data/clear/blob", &payload).await.unwrap();
+        let mut r = storage.read_stream("data/clear/blob").await.unwrap();
+        let mut got = Vec::new();
+        r.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got, payload);
+        assert!(storage.read_stream("../etc/passwd").await.is_err());
+        assert!(storage.read_stream("data/clear/missing").await.is_err());
     }
 
     #[tokio::test]
