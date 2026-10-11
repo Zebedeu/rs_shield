@@ -54,8 +54,8 @@ pub enum CryptoError {
 impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // Keep the words "authentication" and "tag": callers (e.g.
-            // core/manifest.rs) match on them to report a wrong password.
+            // Callers classify with `is_authentication_error` /
+            // `RsbError::is_authentication_failure`, not with this text.
             CryptoError::AuthenticationFailed => write!(
                 f,
                 "Decryption failed: authentication tag mismatch (wrong password or tampered data)"

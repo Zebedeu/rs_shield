@@ -4,6 +4,7 @@ use crate::core::manifest::write_manifest;
 use crate::core::resource_monitor::spawn_resource_monitor;
 use crate::core::types::FileMetadata;
 use crate::core::types::FileStatus;
+use crate::error::RsbError;
 use crate::options::BackupOptions;
 use crate::report::ReportData;
 use crate::storage::{LockKind, RepoLock, Storage};
@@ -29,13 +30,16 @@ use super::threading;
 pub async fn perform_backup(
     config: &Config,
     options: BackupOptions,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
+) -> crate::error::Result<ReportData> {
     let start_time = Instant::now();
     let source_expanded = expand_path(&config.source_path);
     let source = source_expanded.as_path();
 
     if !source.is_dir() {
-        return Err(format!("Source path is not a directory: {}", source.display()).into());
+        return Err(RsbError::InvalidInput(format!(
+            "Source path is not a directory: {}",
+            source.display()
+        )));
     }
 
     let storage =
@@ -53,7 +57,9 @@ pub async fn perform_backup(
         Some(RepoLock::acquire(storage.clone(), LockKind::Shared, "backup").await?)
     };
 
-    let result = run_backup(config, source, storage, &options, start_time).await;
+    let result = run_backup(config, source, storage, &options, start_time)
+        .await
+        .map_err(RsbError::from);
 
     if let Some(lock) = repo_lock
         && let Err(e) = lock.release().await

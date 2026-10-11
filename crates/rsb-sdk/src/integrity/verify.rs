@@ -34,7 +34,7 @@ use crate::{CancellationToken, Config};
 pub async fn perform_verify(
     config: &Config,
     options: VerifyOptions,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
+) -> crate::error::Result<ReportData> {
     let VerifyOptions {
         snapshot_id,
         quiet,

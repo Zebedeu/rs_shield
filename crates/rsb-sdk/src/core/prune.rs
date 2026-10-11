@@ -4,6 +4,7 @@ use super::manifest::{
 use crate::config::Config;
 use crate::core::types::FileMetadata;
 use crate::crypto::KeyCache;
+use crate::error::RsbError;
 use crate::storage::{LockKind, RepoLock, Storage};
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
@@ -11,10 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-pub async fn perform_prune(
-    config: &Config,
-    keep_last: usize,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn perform_prune(config: &Config, keep_last: usize) -> Result<(), RsbError> {
     // Fail before touching storage: keep_last == 0 would delete everything.
     check_keep_last(keep_last)?;
     let storage = super::storage_backend::get_storage(config).await?;
@@ -26,7 +24,7 @@ pub async fn perform_prune_with_storage(
     storage: Arc<dyn Storage>,
     encryption_key: Option<&str>,
     keep_last: usize,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), RsbError> {
     let deleted = plan_prune_by_count_with_storage(&*storage, keep_last).await?;
     if deleted.is_empty() {
         info!("Nothing to prune.");
@@ -39,7 +37,7 @@ pub async fn perform_prune_with_storage(
 pub async fn plan_prune_by_count(
     config: &Config,
     keep_last: usize,
-) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<String>, RsbError> {
     // Fail before touching storage: keep_last == 0 would delete everything.
     check_keep_last(keep_last)?;
     let storage = super::storage_backend::get_storage(config).await?;
@@ -50,19 +48,19 @@ pub async fn plan_prune_by_count(
 pub async fn plan_prune_by_count_with_storage(
     storage: &dyn Storage,
     keep_last: usize,
-) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<String>, RsbError> {
     check_keep_last(keep_last)?;
     let snapshots = list_snapshots(storage).await?;
     select_by_count(snapshots, keep_last)
 }
 
-fn check_keep_last(keep_last: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn check_keep_last(keep_last: usize) -> Result<(), RsbError> {
     if keep_last == 0 {
-        return Err(
+        return Err(RsbError::InvalidInput(
             "Refusing to prune with keep_last = 0: that would delete every snapshot. \
              Use keep_last >= 1."
-                .into(),
-        );
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -71,7 +69,7 @@ fn check_keep_last(keep_last: usize) -> Result<(), Box<dyn std::error::Error + S
 pub fn select_by_count(
     mut snapshots: Vec<String>,
     keep_last: usize,
-) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<String>, RsbError> {
     check_keep_last(keep_last)?;
     if snapshots.len() <= keep_last {
         return Ok(vec![]);
@@ -100,10 +98,7 @@ pub fn select_by_age(
 /// Retenção por idade: mantém sempre o snapshot mais recente + os dos
 /// últimos `retention_days` dias. Corrige o bug da UI que passava "dias"
 /// como `keep_last` (contagem), o que deletava demais ou de menos.
-pub async fn perform_prune_by_age(
-    config: &Config,
-    retention_days: u32,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn perform_prune_by_age(config: &Config, retention_days: u32) -> Result<(), RsbError> {
     let storage = super::storage_backend::get_storage(config).await?;
     perform_prune_by_age_with_storage(storage, config.encryption_key.as_deref(), retention_days)
         .await
@@ -114,7 +109,7 @@ pub async fn perform_prune_by_age_with_storage(
     storage: Arc<dyn Storage>,
     encryption_key: Option<&str>,
     retention_days: u32,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), RsbError> {
     let snapshots = list_snapshots(&*storage).await?;
     let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
     // Snapshot names are `%Y-%m-%dT%H%M%S[.mmm]Z` (not RFC3339); the shared
@@ -127,9 +122,7 @@ pub async fn perform_prune_by_age_with_storage(
     prune_with_storage(storage, encryption_key, &to_delete).await
 }
 
-async fn list_snapshots(
-    storage: &dyn Storage,
-) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+async fn list_snapshots(storage: &dyn Storage) -> Result<Vec<String>, RsbError> {
     let mut snapshots = storage.list("snapshots").await?;
     snapshots.retain(|s| s.ends_with(".toml"));
     Ok(snapshots)
@@ -142,7 +135,7 @@ pub async fn prune_with_storage(
     storage: Arc<dyn Storage>,
     encryption_key: Option<&str>,
     delete_snapshots: &[String],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), RsbError> {
     let lock = RepoLock::acquire(storage.clone(), LockKind::Exclusive, "prune").await?;
     let result = prune_locked(&*storage, encryption_key, delete_snapshots).await;
     if let Err(e) = lock.release().await {
@@ -155,7 +148,7 @@ async fn prune_locked(
     storage: &dyn Storage,
     encryption_key: Option<&str>,
     delete_snapshots: &[String],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), RsbError> {
     let mut deleted_count = 0;
 
     // 1) Delete the snapshot manifests first. If we crash afterwards the
@@ -189,7 +182,7 @@ async fn prune_locked(
         // what it references).
         let content = read_manifest_cached(storage, &snap, cache.as_ref())
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(RsbError::from)?;
         let manifest: HashMap<PathBuf, FileMetadata> = toml::from_str(&content)?;
 
         for metadata in manifest.values() {

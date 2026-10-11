@@ -296,7 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(data) => data,
                 Err(e) => {
                     send_healthcheck(&healthcheck_url, "/fail").await;
-                    return Err(e);
+                    return Err(e.into());
                 }
             };
 
@@ -645,7 +645,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if !dry_run && let Err(e) = core::perform_prune(&cfg, keep_count).await {
                 send_healthcheck(&healthcheck_url, "/fail").await;
-                return Err(e);
+                return Err(e.into());
             }
             send_healthcheck(&healthcheck_url, "").await;
             info!("Prune completed.");

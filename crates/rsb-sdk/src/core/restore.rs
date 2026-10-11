@@ -22,7 +22,7 @@ use tracing::{error, info};
 pub async fn perform_restore(
     config: &Config,
     options: RestoreOptions,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
+) -> crate::error::Result<ReportData> {
     let storage =
         super::storage_backend::storage_or_from_config(options.storage.clone(), config).await?;
     restore_from_storage(&*storage, options).await
@@ -33,7 +33,7 @@ pub async fn perform_restore(
 pub async fn restore_from_storage(
     storage: &dyn Storage,
     options: RestoreOptions,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
+) -> crate::error::Result<ReportData> {
     let RestoreOptions {
         snapshot_id,
         target_path,

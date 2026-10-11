@@ -6,6 +6,7 @@
 
 use crate::config::Config;
 use crate::core;
+use crate::error::RsbError;
 use crate::options::RestoreOptions;
 use crate::report::ReportData;
 use std::path::Path;
@@ -31,9 +32,12 @@ use std::path::Path;
 pub fn config_from_backup_path(
     backup_path: &Path,
     encryption_key: Option<String>,
-) -> Result<Config, Box<dyn std::error::Error>> {
+) -> crate::error::Result<Config> {
     if !backup_path.exists() {
-        return Err(format!("Backup path not found: {}", backup_path.display()).into());
+        return Err(RsbError::NotFound(format!(
+            "Backup path not found: {}",
+            backup_path.display()
+        )));
     }
 
     // Validate backup structure
@@ -41,9 +45,9 @@ pub fn config_from_backup_path(
     let data_dir = backup_path.join("data");
 
     if !snapshots_dir.exists() || !data_dir.exists() {
-        return Err(
-            "Invalid backup structure: missing 'snapshots' and/or 'data' directories".into(),
-        );
+        return Err(RsbError::InvalidInput(
+            "Invalid backup structure: missing 'snapshots' and/or 'data' directories".to_string(),
+        ));
     }
 
     // Create minimal config for restore
@@ -63,9 +67,11 @@ pub fn config_for_s3_restore(
     bucket: &str,
     region: Option<String>,
     endpoint: Option<String>,
-) -> Result<Config, Box<dyn std::error::Error>> {
+) -> crate::error::Result<Config> {
     if bucket.trim().is_empty() {
-        return Err("S3 bucket is required for an S3 restore".into());
+        return Err(RsbError::InvalidInput(
+            "S3 bucket is required for an S3 restore".to_string(),
+        ));
     }
     Ok(Config {
         source_path: "direct-restore".to_string(),
@@ -105,10 +111,12 @@ pub async fn restore_from_config_or_backup(
     config_path: Option<&Path>,
     backup_path: Option<&Path>,
     options: RestoreOptions,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
+) -> crate::error::Result<ReportData> {
     // Validate that at least one source is provided
     if config_path.is_none() && backup_path.is_none() {
-        return Err("Either config file or backup path must be provided".into());
+        return Err(RsbError::InvalidInput(
+            "Either config file or backup path must be provided".to_string(),
+        ));
     }
 
     // Create config from appropriate source
@@ -119,7 +127,9 @@ pub async fn restore_from_config_or_backup(
         // Portable mode: create config from backup path
         config_from_backup_path(backup, options.key().map(String::from))?
     } else {
-        return Err("No valid restore source provided".into());
+        return Err(RsbError::InvalidInput(
+            "No valid restore source provided".to_string(),
+        ));
     };
 
     // Perform restore using core function

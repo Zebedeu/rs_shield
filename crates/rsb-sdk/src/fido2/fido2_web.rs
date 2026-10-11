@@ -395,7 +395,10 @@ async fn delete_credential(
 
     m.revoke_user(&user_id).map_err(|e| {
         error!("Delete credential error: {}", e);
-        let status = if e.to_string().contains("not found") {
+        let status = if matches!(
+            e,
+            crate::credentials::fido2_manager::Fido2Error::CredentialNotFound
+        ) {
             StatusCode::NOT_FOUND
         } else {
             StatusCode::BAD_REQUEST

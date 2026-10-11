@@ -4,6 +4,7 @@ pub mod config;
 pub mod core;
 pub mod credentials;
 pub mod crypto;
+pub mod error;
 pub mod fido2;
 pub mod integrity;
 pub mod metrics;
@@ -22,6 +23,7 @@ pub use crate::core::cancellation::CancellationToken;
 pub use config::{Config, create_profile, load_config};
 pub use core::{perform_prune, perform_prune_by_age, perform_restore, plan_prune_by_count};
 pub use credentials::{CredentialsManager, S3Credentials, SecureString, encryption};
+pub use error::{CryptoErrorKind, RsbError};
 pub use integrity::perform_verify;
 pub use options::{BackupOptions, RestoreOptions, VerifyOptions};
 pub use portable_restore::{

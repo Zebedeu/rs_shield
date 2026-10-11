@@ -9,7 +9,7 @@ use rsb_sdk::core::{
 };
 use rsb_sdk::integrity::perform_verify;
 use rsb_sdk::storage::{MemoryStorage, Storage};
-use rsb_sdk::{BackupOptions, RestoreOptions, VerifyOptions};
+use rsb_sdk::{BackupOptions, CryptoErrorKind, RestoreOptions, RsbError, VerifyOptions};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -178,6 +178,40 @@ async fn wrong_key_fails_on_memory_storage() {
         ..RestoreOptions::new(out.path())
     }
     .with_encryption_key(Some("wrong"));
-    assert!(perform_restore(&config, opts).await.is_err());
+    let err = perform_restore(&config, opts).await.unwrap_err();
+    // Classificação tipada (sem olhar para o texto da mensagem).
+    assert!(err.is_authentication_failure(), "{err:?}");
+    assert!(matches!(
+        err,
+        RsbError::Crypto {
+            kind: CryptoErrorKind::AuthenticationFailed,
+            ..
+        }
+    ));
+    assert!(err.to_string().contains("wrong key"));
     assert!(!out.path().join("a.txt").exists());
+
+    // Manifesto truncado: corrupção, não chave errada.
+    let snap = storage
+        .list("snapshots")
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    storage.write(&snap, b"short").await.unwrap();
+    let opts = RestoreOptions {
+        storage: Some(storage.clone()),
+        ..RestoreOptions::new(out.path())
+    }
+    .with_encryption_key(Some("right"));
+    let err = perform_restore(&config, opts).await.unwrap_err();
+    assert!(matches!(
+        err,
+        RsbError::Crypto {
+            kind: CryptoErrorKind::Corrupt,
+            ..
+        }
+    ));
+    assert!(!err.is_authentication_failure());
 }

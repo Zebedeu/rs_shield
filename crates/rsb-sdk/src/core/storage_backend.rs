@@ -1,6 +1,7 @@
 // storage_backend.rs - Performance + robustness version
 use crate::config::Config;
 use crate::credentials::CredentialsManager;
+use crate::error::RsbError;
 use crate::storage::{LocalStorage, S3Storage, Storage};
 use std::io::IsTerminal;
 use std::sync::{Arc, RwLock};
@@ -40,7 +41,7 @@ pub fn clear_session_s3_credentials() {
 /// Fails (instead of panicking) when S3 is configured but no credentials are
 /// available: release builds use `panic = "abort"`, so a panic here used to
 /// kill the whole desktop app.
-pub async fn get_storage(config: &Config) -> Result<Arc<dyn Storage>, String> {
+pub async fn get_storage(config: &Config) -> crate::error::Result<Arc<dyn Storage>> {
     // Priority: nested or flat S3 configuration (backward compatibility)
     let s3_config = config.s3.as_ref();
 
@@ -69,10 +70,10 @@ pub async fn get_storage(config: &Config) -> Result<Arc<dyn Storage>, String> {
                 }
                 Err(e) => {
                     error!("❌ Failed to load S3 credentials: {}", e);
-                    Err(format!(
+                    Err(RsbError::Auth(format!(
                         "S3 bucket '{}' is configured but credentials are unavailable: {}",
                         bucket, e
-                    ))
+                    )))
                 }
             }
         }
@@ -89,7 +90,7 @@ pub async fn get_storage(config: &Config) -> Result<Arc<dyn Storage>, String> {
 pub async fn storage_or_from_config(
     injected: Option<Arc<dyn Storage>>,
     config: &Config,
-) -> Result<Arc<dyn Storage>, String> {
+) -> crate::error::Result<Arc<dyn Storage>> {
     match injected {
         Some(storage) => Ok(storage),
         None => get_storage(config).await,
