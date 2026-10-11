@@ -171,6 +171,15 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 const KEYRING_SERVICE_NAME: &str = "rsb-fido2-dek";
 const KEYRING_USERNAME: &str = "default"; // A generic username for the DEK entry
 
+/// Serviço do keyring onde vive o DEK. `RSB_FIDO2_KEYRING_SERVICE` permite aos
+/// testes usarem uma entrada isolada em vez do DEK real do utilizador.
+fn keyring_service_name() -> String {
+    std::env::var("RSB_FIDO2_KEYRING_SERVICE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| KEYRING_SERVICE_NAME.to_string())
+}
+
 impl Fido2Manager {
     /// Create manager
     pub fn new(
@@ -201,7 +210,7 @@ impl Fido2Manager {
 
     /// Gets the DEK (Data Encryption Key) from the Keyring or generates a new one if it doesn't exist.
     fn get_or_create_dek() -> Result<Vec<u8>, Fido2Error> {
-        let entry = Entry::new(KEYRING_SERVICE_NAME, KEYRING_USERNAME)
+        let entry = Entry::new(&keyring_service_name(), KEYRING_USERNAME)
             .map_err(|e| Fido2Error::EncryptionError(format!("Keyring error: {}", e)))?;
 
         match entry.get_password() {
@@ -231,7 +240,7 @@ impl Fido2Manager {
     /// credential file already exists: generating a new DEK there would make the
     /// file permanently unreadable (and a later save would overwrite it).
     fn get_existing_dek() -> Result<Vec<u8>, Fido2Error> {
-        let entry = Entry::new(KEYRING_SERVICE_NAME, KEYRING_USERNAME)
+        let entry = Entry::new(&keyring_service_name(), KEYRING_USERNAME)
             .map_err(|e| Fido2Error::KeyringError(format!("Keyring error: {}", e)))?;
 
         match entry.get_password() {
