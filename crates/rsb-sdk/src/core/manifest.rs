@@ -167,7 +167,10 @@ pub async fn read_manifest(
     path: &str,
     key: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let cache = key.map(|k| KeyCache::new(k.as_bytes()));
+    let cache = match key {
+        Some(k) => Some(KeyCache::open(storage, k.as_bytes()).await?),
+        None => None,
+    };
     read_manifest_cached(storage, path, cache.as_ref()).await
 }
 
@@ -181,58 +184,10 @@ pub async fn read_manifest_cached(
     let raw = storage.read(path).await?;
 
     let decrypted = if let Some(cache) = cache {
-        match cache.decrypt(&raw) {
+        // v3 manifests are bound to their storage key (object id).
+        match cache.decrypt_object(path, &raw) {
             Ok(data) => data,
-            Err(e) => {
-                // 🐛 Fix: Provide more helpful error message.
-                // Classificação tipada (não por texto da mensagem): tag AEAD
-                // inválida ⇒ chave errada; dados mal formados ⇒ corrupção.
-                let kind = if crate::crypto::is_authentication_error(&e) {
-                    CryptoErrorKind::AuthenticationFailed
-                } else if e.kind() == std::io::ErrorKind::InvalidData {
-                    CryptoErrorKind::Corrupt
-                } else {
-                    CryptoErrorKind::Other
-                };
-                let user_message = match kind {
-                    CryptoErrorKind::AuthenticationFailed => {
-                        format!(
-                            "❌ Decryption failed (wrong key)\n\n\
-                        The backup is encrypted but the key provided is incorrect.\n\
-                        Use the SAME encryption key that was used when creating this backup.\n\n\
-                        Technical: {}",
-                            e
-                        )
-                    }
-                    CryptoErrorKind::Corrupt => {
-                        format!(
-                            "⚠️  Backup metadata may be corrupted\n\n\
-                        The backup data cannot be read, even with the provided key.\n\
-                        This may indicate:\n\
-                        - Incomplete backup copy\n\
-                        - Corrupted backup files\n\
-                        - Wrong backup directory\n\n\
-                        Try: rsb verify --backup /path/to/backup\n\n\
-                        Technical: {}",
-                            e
-                        )
-                    }
-                    CryptoErrorKind::Other => {
-                        format!(
-                            "❌ Decryption error\n\n\
-                        Could not decrypt backup metadata.\n\
-                        Ensure:\n\
-                        - The backup is not corrupted\n\
-                        - The correct encryption key is provided\n\
-                        - The entire backup folder was copied\n\n\
-                        Technical: {}",
-                            e
-                        )
-                    }
-                };
-                error!("Decryption error for {}: {}", path, e);
-                return Err(Box::new(RsbError::crypto(kind, user_message)));
-            }
+            Err(e) => return Err(Box::new(manifest_decrypt_error(path, &raw, cache, &e))),
         }
     } else {
         raw
@@ -254,6 +209,71 @@ pub async fn read_manifest_cached(
 
         "Backup metadata is corrupted or unreadable".into()
     })
+}
+
+/// Typed, user-facing error for a manifest that cannot be decrypted.
+///
+/// Classification is by type, never by message text: AEAD tag mismatch →
+/// `AuthenticationFailed`, malformed blob → `Corrupt`, v3 blob without a
+/// repository key → `Other`.
+fn manifest_decrypt_error(
+    path: &str,
+    raw: &[u8],
+    cache: &KeyCache,
+    e: &std::io::Error,
+) -> RsbError {
+    use crate::crypto::CryptoError;
+    let crypto = crate::crypto::crypto_error_of(e);
+    let kind = match crypto {
+        Some(CryptoError::AuthenticationFailed) => CryptoErrorKind::AuthenticationFailed,
+        Some(CryptoError::Malformed) => CryptoErrorKind::Corrupt,
+        Some(CryptoError::RepoKeyRequired) => CryptoErrorKind::Other,
+        None if e.kind() == std::io::ErrorKind::InvalidData => CryptoErrorKind::Corrupt,
+        None => CryptoErrorKind::Other,
+    };
+    // With a v3 manifest the password was already proven by unlocking the
+    // repository key, so a tag mismatch here means tampering/corruption.
+    let key_verified = cache.repo_key().is_some() && crate::crypto::is_v3(raw);
+    let user_message = match kind {
+        CryptoErrorKind::AuthenticationFailed if key_verified => format!(
+            "❌ Backup metadata failed authentication\n\n\
+             The repository key is correct but {} does not authenticate: it was \
+             modified, truncated or moved from another name.\n\n\
+             Try: rsb verify --backup /path/to/backup\n\n\
+             Technical: {}",
+            path, e
+        ),
+        CryptoErrorKind::AuthenticationFailed => format!(
+            "❌ Decryption failed (wrong key)\n\n\
+             The backup is encrypted but the key provided is incorrect.\n\
+             Use the SAME encryption key that was used when creating this backup.\n\n\
+             Technical: {}",
+            e
+        ),
+        CryptoErrorKind::Corrupt => format!(
+            "⚠️  Backup metadata may be corrupted\n\n\
+             The backup data cannot be read, even with the provided key.\n\
+             This may indicate:\n\
+             - Incomplete backup copy\n\
+             - Corrupted backup files\n\
+             - Wrong backup directory\n\n\
+             Try: rsb verify --backup /path/to/backup\n\n\
+             Technical: {}",
+            e
+        ),
+        CryptoErrorKind::Other => format!(
+            "❌ Decryption error\n\n\
+             Could not decrypt backup metadata.\n\
+             Ensure:\n\
+             - The backup is not corrupted\n\
+             - The correct encryption key is provided\n\
+             - The entire backup folder was copied (including keys/repo.key)\n\n\
+             Technical: {}",
+            e
+        ),
+    };
+    error!("Decryption error for {}: {}", path, e);
+    RsbError::crypto(kind, user_message)
 }
 
 /// Sorts snapshot paths newest first: by parsed timestamp, then by name
@@ -282,7 +302,10 @@ pub async fn find_latest_snapshot(
     snapshot_id: Option<&str>,
     key: Option<&str>,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let cache = key.map(|k| KeyCache::new(k.as_bytes()));
+    let cache = match key {
+        Some(k) => Some(KeyCache::open(storage, k.as_bytes()).await?),
+        None => None,
+    };
     find_latest_snapshot_cached(storage, snapshot_id, cache.as_ref()).await
 }
 

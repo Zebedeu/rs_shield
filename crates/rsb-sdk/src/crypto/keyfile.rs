@@ -360,6 +360,17 @@ impl RepoKey {
         super::stream::StreamEncryptor::new(&self.dek, object_id, inner)
     }
 
+    /// Streaming v3 decryptor over `reader`; `prefix` are bytes already
+    /// consumed from it (e.g. the magic used to detect the format).
+    pub async fn stream_decryptor<R: tokio::io::AsyncRead + Unpin>(
+        &self,
+        object_id: &str,
+        prefix: &[u8],
+        reader: R,
+    ) -> io::Result<super::stream::StreamDecryptor<R>> {
+        super::stream::StreamDecryptor::new(&self.dek, object_id, prefix, reader).await
+    }
+
     /// Decrypts a v3 blob held in memory.
     pub fn decrypt_object(&self, object_id: &str, blob: &[u8]) -> io::Result<Vec<u8>> {
         super::stream::decrypt_v3(&self.dek, object_id, blob)

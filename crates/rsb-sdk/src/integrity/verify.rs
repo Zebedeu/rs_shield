@@ -48,11 +48,16 @@ pub async fn perform_verify(
     let snapshot_id = snapshot_id.as_deref();
     let start_time = Instant::now();
     let storage = storage_or_from_config(storage, config).await?;
-    let key_cache = encryption_key
+    let password = encryption_key
         .as_ref()
         .map(|k| k.as_str())
-        .or(config.encryption_key.as_deref())
-        .map(|k| KeyCache::new(k.as_bytes()));
+        .or(config.encryption_key.as_deref());
+    // Unlocks keys/repo.key (if any) before touching objects: a wrong
+    // password fails here with a typed authentication error.
+    let key_cache = match password {
+        Some(k) => Some(KeyCache::open(&*storage, k.as_bytes()).await?),
+        None => None,
+    };
 
     // Reading the manifest with the key also proves the key is correct, so
     // a later decryption failure on an object means the object is damaged.
@@ -204,7 +209,8 @@ async fn check_object_content(
                 path
             ));
         };
-        match key.decrypt(&raw) {
+        // v3 blobs are bound to their object id (the content hash).
+        match key.decrypt_object(content_hash, &raw) {
             Ok(p) => p,
             Err(e) => {
                 return ObjectCheck::Corrupt {
