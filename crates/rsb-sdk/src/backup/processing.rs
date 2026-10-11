@@ -38,7 +38,9 @@ pub async fn perform_backup(
         return Err(format!("Source path is not a directory: {}", source.display()).into());
     }
 
-    let storage = crate::core::storage_backend::get_storage(config).await?;
+    let storage =
+        crate::core::storage_backend::storage_or_from_config(options.storage.clone(), config)
+            .await?;
 
     // ====================== REPOSITORY LOCK ======================
     // Shared lock: concurrent backups are fine, but prune (exclusive) must

@@ -18,8 +18,10 @@
 use crate::core::cancellation::CancellationToken;
 use crate::core::types::ProgressCallback;
 use crate::credentials::SecureString;
+use crate::storage::Storage;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn secret(key: Option<&str>) -> Option<SecureString> {
     key.map(SecureString::from)
@@ -47,6 +49,10 @@ pub struct BackupOptions {
     pub max_threads: Option<usize>,
     pub on_progress: Option<ProgressCallback>,
     pub cancellation_token: Option<CancellationToken>,
+    /// Storage já construído (ex.: [`crate::storage::MemoryStorage`]);
+    /// `None` constrói a partir do `Config` com
+    /// [`crate::core::storage_backend::get_storage`].
+    pub storage: Option<Arc<dyn Storage>>,
 }
 
 impl BackupOptions {
@@ -78,6 +84,7 @@ impl fmt::Debug for BackupOptions {
                 "cancellation_token",
                 &shown(&self.cancellation_token, "<token>"),
             )
+            .field("storage", &shown(&self.storage, "<storage>"))
             .finish()
     }
 }
@@ -98,6 +105,10 @@ pub struct RestoreOptions {
     pub versioned: bool,
     pub on_progress: Option<ProgressCallback>,
     pub cancellation_token: Option<CancellationToken>,
+    /// Storage já construído (ex.: [`crate::storage::MemoryStorage`]);
+    /// `None` constrói a partir do `Config` com
+    /// [`crate::core::storage_backend::get_storage`].
+    pub storage: Option<Arc<dyn Storage>>,
 }
 
 impl RestoreOptions {
@@ -137,6 +148,7 @@ impl fmt::Debug for RestoreOptions {
                 "cancellation_token",
                 &shown(&self.cancellation_token, "<token>"),
             )
+            .field("storage", &shown(&self.storage, "<storage>"))
             .finish()
     }
 }
@@ -157,6 +169,10 @@ pub struct VerifyOptions {
     pub encryption_key: Option<SecureString>,
     pub on_progress: Option<ProgressCallback>,
     pub cancellation_token: Option<CancellationToken>,
+    /// Storage já construído (ex.: [`crate::storage::MemoryStorage`]);
+    /// `None` constrói a partir do `Config` com
+    /// [`crate::core::storage_backend::get_storage`].
+    pub storage: Option<Arc<dyn Storage>>,
 }
 
 impl VerifyOptions {
@@ -183,6 +199,7 @@ impl fmt::Debug for VerifyOptions {
                 "cancellation_token",
                 &shown(&self.cancellation_token, "<token>"),
             )
+            .field("storage", &shown(&self.storage, "<storage>"))
             .finish()
     }
 }

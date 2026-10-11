@@ -23,11 +23,13 @@ pub async fn perform_restore(
     config: &Config,
     options: RestoreOptions,
 ) -> Result<ReportData, Box<dyn std::error::Error>> {
-    let storage = super::storage_backend::get_storage(config).await?;
+    let storage =
+        super::storage_backend::storage_or_from_config(options.storage.clone(), config).await?;
     restore_from_storage(&*storage, options).await
 }
 
 /// Restore implementation working on any [`Storage`] (used by tests too).
+/// `options.storage` is ignored here: `storage` is used.
 pub async fn restore_from_storage(
     storage: &dyn Storage,
     options: RestoreOptions,
@@ -40,6 +42,7 @@ pub async fn restore_from_storage(
         versioned,
         on_progress,
         cancellation_token,
+        storage: _,
     } = options;
     let snapshot_id = snapshot_id.as_deref();
     let encryption_key = encryption_key.as_ref().map(|k| k.as_str());

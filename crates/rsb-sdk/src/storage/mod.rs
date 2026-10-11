@@ -1,4 +1,5 @@
 pub mod lock;
+pub mod memory;
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -12,6 +13,7 @@ use tokio::fs;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 
 pub use lock::{LockKind, RepoLock};
+pub use memory::MemoryStorage;
 
 /// Streaming reader over a stored object (see [`Storage::read_stream`]).
 pub type BlobReader = Pin<Box<dyn AsyncRead + Send>>;

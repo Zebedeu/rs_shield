@@ -83,6 +83,19 @@ pub async fn get_storage(config: &Config) -> Result<Arc<dyn Storage>, String> {
     }
 }
 
+/// Uses `injected` when given, otherwise builds the backend from `config`
+/// with [`get_storage`]. Lets callers reuse one `Arc<dyn Storage>` across
+/// operations (or inject e.g. [`crate::storage::MemoryStorage`]).
+pub async fn storage_or_from_config(
+    injected: Option<Arc<dyn Storage>>,
+    config: &Config,
+) -> Result<Arc<dyn Storage>, String> {
+    match injected {
+        Some(storage) => Ok(storage),
+        None => get_storage(config).await,
+    }
+}
+
 /// Secure and prioritized loading of S3 credentials
 async fn load_s3_credentials_securely(
     config: &Config,

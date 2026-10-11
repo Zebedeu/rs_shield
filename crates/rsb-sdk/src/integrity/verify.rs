@@ -4,7 +4,7 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 use crate::core::manifest::find_latest_snapshot_cached;
-use crate::core::storage_backend::get_storage;
+use crate::core::storage_backend::storage_or_from_config;
 use crate::core::types::{FileMetadata, ProgressCallback};
 use crate::crypto::{KeyCache, hash_file_content};
 use crate::integrity::checksum::checksum;
@@ -43,10 +43,11 @@ pub async fn perform_verify(
         encryption_key,
         on_progress,
         cancellation_token,
+        storage,
     } = options;
     let snapshot_id = snapshot_id.as_deref();
     let start_time = Instant::now();
-    let storage = get_storage(config).await?;
+    let storage = storage_or_from_config(storage, config).await?;
     let key_cache = encryption_key
         .as_ref()
         .map(|k| k.as_str())
