@@ -140,3 +140,16 @@ fuzzing = []
 [dev-dependencies]
 tempfile = { workspace = true }
 toml = { workspace = true }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+# Benchmarks (not run by `cargo test`): see docs/PERFORMANCE.md.
+[[bench]]
+name = "backup_restore"
+harness = false
+
+[[bench]]
+name = "perf_probe"
+harness = false

@@ -1,3 +1,4 @@
+pub mod instrumented;
 pub mod lock;
 pub mod memory;
 
@@ -13,6 +14,7 @@ use std::pin::Pin;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
+pub use instrumented::{InstrumentedStorage, StorageCallCounts};
 pub use lock::{LockKind, RepoLock};
 pub use memory::MemoryStorage;
 
