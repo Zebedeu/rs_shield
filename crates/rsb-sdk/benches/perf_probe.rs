@@ -73,6 +73,21 @@ fn main() {
 fn child(a: &[String]) {
     let op = a[0].as_str();
     let path = PathBuf::from(&a[1]);
+    // Fixture helpers, for profiling a single operation by hand:
+    // `child gen <small|large|small-lat> <dir>`, `child mutate <small|small-lat> <dir> <round>`.
+    let spec_of = |name: &str| match name {
+        "small" => small_files(Profile::from_env()),
+        "small-lat" => small_files_latency(Profile::from_env()),
+        _ => large_files(Profile::from_env()),
+    };
+    match op {
+        "gen" => return generate(&spec_of(&a[1]), Path::new(&a[2])),
+        "mutate" => {
+            mutate_one_percent(&spec_of(&a[1]), Path::new(&a[2]), a[3].parse().unwrap());
+            return;
+        }
+        _ => {}
+    }
     let repo = a[2].clone();
     let enc = a[3] == "1";
     let latency = Duration::from_millis(a[4].parse().unwrap());
