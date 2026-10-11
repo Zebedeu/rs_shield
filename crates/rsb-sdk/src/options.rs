@@ -103,6 +103,11 @@ pub struct RestoreOptions {
     pub force: bool,
     /// Restaura para `target_path/restore_<timestamp>`.
     pub versioned: bool,
+    /// Ficheiros restaurados em paralelo; `None` (ou 0) usa
+    /// [`crate::core::restore::default_restore_concurrency`]. A memória
+    /// continua limitada por
+    /// [`crate::core::restore::RESTORE_MEM_BUDGET_MIB`].
+    pub concurrency: Option<usize>,
     pub on_progress: Option<ProgressCallback>,
     pub cancellation_token: Option<CancellationToken>,
     /// Storage já construído (ex.: [`crate::storage::MemoryStorage`]);
@@ -143,6 +148,7 @@ impl fmt::Debug for RestoreOptions {
             )
             .field("force", &self.force)
             .field("versioned", &self.versioned)
+            .field("concurrency", &self.concurrency)
             .field("on_progress", &shown(&self.on_progress, "<callback>"))
             .field(
                 "cancellation_token",

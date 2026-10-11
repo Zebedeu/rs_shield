@@ -17,6 +17,7 @@ clap = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 crossbeam-channel =  "0.5"
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 jwalk = "0.8"
 
 # LOGGING
