@@ -1,7 +1,7 @@
 // manifest.rs - Performance + reliability version
 use super::types::{ChunkMetadata, FileMetadata};
-use crate::crypto::KeyCache;
 use crate::crypto::encrypt_data_with_key;
+use crate::crypto::{KeyCache, RepoKey};
 use crate::error::{CryptoErrorKind, RsbError};
 use crate::storage::Storage;
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -110,11 +110,53 @@ async fn unique_snapshot_path(
     Err("Could not allocate a unique snapshot name".into())
 }
 
-/// Writes the manifest in an optimized way (compression + encryption)
+/// Writes the manifest (zstd + encryption) given a password.
+///
+/// Uses the repository key (v3) if `keys/repo.key` exists; otherwise falls
+/// back to the legacy v2 format (the key file is only created by a backup
+/// or `rsb key init`). Backups use [`write_manifest_with_key`].
 pub async fn write_manifest(
     storage: &dyn Storage,
     manifest: &HashMap<PathBuf, FileMetadata>,
     encryption_key: Option<&str>,
+    dry_run: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match encryption_key {
+        Some(pw) => match crate::crypto::keyfile::load_repo_key(storage, pw.as_bytes()).await? {
+            Some(k) => write_manifest_with_key(storage, manifest, Some(&k), dry_run).await,
+            None => {
+                write_manifest_inner(storage, manifest, ManifestCipher::Legacy(pw), dry_run).await
+            }
+        },
+        None => write_manifest_inner(storage, manifest, ManifestCipher::None, dry_run).await,
+    }
+}
+
+/// Writes the manifest, encrypted as a v3 blob bound to its snapshot path
+/// when `repo_key` is given.
+pub async fn write_manifest_with_key(
+    storage: &dyn Storage,
+    manifest: &HashMap<PathBuf, FileMetadata>,
+    repo_key: Option<&RepoKey>,
+    dry_run: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let cipher = match repo_key {
+        Some(k) => ManifestCipher::V3(k),
+        None => ManifestCipher::None,
+    };
+    write_manifest_inner(storage, manifest, cipher, dry_run).await
+}
+
+enum ManifestCipher<'a> {
+    None,
+    Legacy(&'a str),
+    V3(&'a RepoKey),
+}
+
+async fn write_manifest_inner(
+    storage: &dyn Storage,
+    manifest: &HashMap<PathBuf, FileMetadata>,
+    cipher: ManifestCipher<'_>,
     dry_run: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let now = Utc::now();
@@ -141,12 +183,15 @@ pub async fn write_manifest(
     }
 
     // Encryption (if applicable)
-    let final_bytes = if let Some(key) = encryption_key {
-        let enc_key = crate::crypto::EncryptionKey::new(key.as_bytes())
-            .map_err(|e| format!("Failed to derive key for manifest: {}", e))?;
-        encrypt_data_with_key(&compressed, &enc_key)?
-    } else {
-        compressed
+    let final_bytes = match cipher {
+        ManifestCipher::None => compressed,
+        ManifestCipher::Legacy(pw) => {
+            let enc_key = crate::crypto::EncryptionKey::new(pw.as_bytes())
+                .map_err(|e| format!("Failed to derive key for manifest: {}", e))?;
+            encrypt_data_with_key(&compressed, &enc_key)?
+        }
+        // Object id = storage key: the manifest cannot be renamed/swapped.
+        ManifestCipher::V3(k) => k.encrypt_object(&snapshot_path, &compressed)?,
     };
 
     // Storage::write is atomic + fsync'ed for local storage.

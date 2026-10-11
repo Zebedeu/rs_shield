@@ -1,18 +1,21 @@
 use crate::core::types::FileMetadata;
+use crate::crypto::{KeyCache, RepoKey};
 use crate::storage::Storage;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::debug;
 
 /// Loads metadata from previous snapshots and indexes by file hash for deduplication
 /// The hash is the content hash of the original file, used for fast deduplication
 pub async fn load_previous_metadata(
     storage: &dyn Storage,
-    key: Option<&str>,
+    key: Option<&KeyCache>,
 ) -> Result<HashMap<String, FileMetadata>, Box<dyn std::error::Error>> {
     let mut metadata_by_hash = HashMap::new();
 
-    if let Ok((_, content)) = crate::core::manifest::find_latest_snapshot(storage, None, key).await
+    if let Ok((_, content)) =
+        crate::core::manifest::find_latest_snapshot_cached(storage, None, key).await
         && let Ok(prev) = toml::from_str::<HashMap<PathBuf, FileMetadata>>(&content)
     {
         metadata_by_hash.reserve(prev.len());
@@ -29,37 +32,22 @@ pub async fn load_previous_metadata(
     Ok(metadata_by_hash)
 }
 
-/// Structure to store encryption key in cache
-/// Optimization: derives the key ONCE instead of per-file
+/// Repository key shared by every worker of one backup session.
+///
+/// The key is unlocked (or created) once per backup by
+/// [`crate::crypto::keyfile::open_or_init_repo_key`]; every object gets
+/// its own HKDF subkey from it, so nothing is derived per file.
 pub struct CachedEncryptionKey {
-    key: Option<std::sync::Arc<crate::crypto::EncryptionKey>>,
+    key: Option<Arc<RepoKey>>,
 }
 
 impl CachedEncryptionKey {
-    /// Creates a cached encryption key from a password.
-    ///
-    /// If a password is given and key derivation fails, an error is returned:
-    /// the backup must never silently fall back to writing unencrypted data.
-    pub fn new(password: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
-        let key = match password {
-            Some(pwd) => {
-                let k = crate::crypto::EncryptionKey::new(pwd.as_bytes()).map_err(|e| {
-                    tracing::error!("Failed to pre-derive encryption key: {}", e);
-                    format!("Failed to derive encryption key; aborting backup: {}", e)
-                })?;
-                debug!(
-                    "✅ Pre-derived encryption key (saved ~{:?} PBKDF2 iterations)",
-                    crate::crypto::PBKDF2_ITERATIONS
-                );
-                Some(std::sync::Arc::new(k))
-            }
-            None => None,
-        };
-
-        Ok(Self { key })
+    /// Wraps the unlocked repository key (`None` = unencrypted backup).
+    pub fn new(key: Option<Arc<RepoKey>>) -> Self {
+        Self { key }
     }
 
-    pub fn as_ref(&self) -> Option<std::sync::Arc<crate::crypto::EncryptionKey>> {
+    pub fn as_ref(&self) -> Option<Arc<RepoKey>> {
         self.key.clone()
     }
 
@@ -74,13 +62,13 @@ mod tests {
 
     #[test]
     fn test_cached_encryption_key_none() {
-        let key = CachedEncryptionKey::new(None).unwrap();
+        let key = CachedEncryptionKey::new(None);
         assert!(!key.is_some());
     }
 
     #[test]
     fn test_cached_encryption_key_some() {
-        let key = CachedEncryptionKey::new(Some("password")).unwrap();
+        let key = CachedEncryptionKey::new(Some(Arc::new(RepoKey::generate().unwrap())));
         assert!(key.is_some());
     }
 }
