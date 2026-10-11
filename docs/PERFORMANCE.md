@@ -103,3 +103,30 @@ Observations:
 * **Incremental backups pay one HEAD per unchanged file** (20 000 HEADs for
   200 changed files), and every backup waits for the resource monitor's
   4 s sleep before it returns (the 4.2 s floor of the incremental runs).
+
+## Benchmarks in CI
+
+`.github/workflows/benchmark.yml`:
+
+| Trigger | Runs | Baseline |
+|---------|------|----------|
+| pull request (touching `crates/rsb-sdk`, `Cargo.toml` or the workflow) | `quick` profile: criterion `backup_restore` with 500 small files, 2 × 80 MiB and the incremental case, clear and encrypted, in-memory storage only (about 35 s of benchmarks on an M1 Pro, plus the build; target < 5 min with a warm cache) | compared with the latest `quick` baseline from `main`; never saved |
+| push to `main`, weekly schedule, manual | `quick` (refreshes the PR baseline) and `full` (every fixture on local, in-memory and 20 ms latency storage, then `perf_probe` for peak RSS and storage calls, appended to the job summary) | compared with the previous baseline of the same profile, then saved |
+
+Baselines are the `github-action-benchmark` data file kept in the GitHub
+Actions cache (`bench-baseline-<profile>-*`); raw criterion output
+(`target/criterion`, with its own saved baselines), `output.txt` and
+`probe.md` are uploaded as artifacts.
+
+**Regression policy: warn for now.** A benchmark slower than 120% of its
+baseline is reported in the job summary and log, but does not fail the
+job (`fail-on-alert: false`). Once the runner noise is known (a few weeks
+of `main` history), switch to failing by setting `fail-on-alert: true`
+(optionally `fail-threshold`, e.g. `150%`) in the "Compare with baseline"
+step.
+
+Benchmarks are built without LTO (`CARGO_PROFILE_BENCH_LTO=false`,
+`CARGO_PROFILE_BENCH_CODEGEN_UNITS=16`) to keep the build short; baselines
+are built the same way, so comparisons stay valid. `CARGO_TARGET_DIR` is
+set so criterion does not shell out to `cargo metadata` (which can block
+on cargo's lock while `cargo bench` holds it).

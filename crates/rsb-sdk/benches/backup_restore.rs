@@ -70,8 +70,8 @@ fn bench_fixture(c: &mut Criterion, spec: FixtureSpec, backends: &[Backend]) {
 
     let mut group = c.benchmark_group(format!("backup/{}", spec.name));
     group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(warm_up());
+    group.measurement_time(measurement());
     group.throughput(Throughput::Bytes(spec.total_bytes()));
     for &backend in backends {
         for (mode, key) in modes() {
@@ -94,8 +94,8 @@ fn bench_fixture(c: &mut Criterion, spec: FixtureSpec, backends: &[Backend]) {
 
     let mut group = c.benchmark_group(format!("restore/{}", spec.name));
     group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(warm_up());
+    group.measurement_time(measurement());
     group.throughput(Throughput::Bytes(spec.total_bytes()));
     for &backend in backends {
         for (mode, key) in modes() {
@@ -127,8 +127,8 @@ fn bench_incremental(c: &mut Criterion, spec: FixtureSpec, backends: &[Backend])
 
     let mut group = c.benchmark_group(format!("incremental/{}", spec.name));
     group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(warm_up());
+    group.measurement_time(measurement());
     group.throughput(Throughput::Bytes(changed * spec.file_size));
     let mut round = 0u64;
     for &backend in backends {
@@ -169,6 +169,23 @@ fn benches(c: &mut Criterion) {
         let lat = [Backend::Latency(Duration::from_millis(20))];
         bench_fixture(c, small_files_latency(profile), &lat);
         bench_incremental(c, small_files_latency(profile), &lat);
+    }
+}
+
+/// Warm-up per benchmark (shorter in the quick CI profile).
+fn warm_up() -> Duration {
+    match Profile::from_env() {
+        Profile::Quick => Duration::from_millis(100),
+        Profile::Full => Duration::from_millis(500),
+    }
+}
+
+/// Target measurement time per benchmark (at least 10 iterations run
+/// anyway); shorter in the quick CI profile.
+fn measurement() -> Duration {
+    match Profile::from_env() {
+        Profile::Quick => Duration::from_secs(1),
+        Profile::Full => Duration::from_secs(5),
     }
 }
 
