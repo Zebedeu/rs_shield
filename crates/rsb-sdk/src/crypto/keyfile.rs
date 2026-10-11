@@ -574,6 +574,12 @@ impl RepoKey {
         }
     }
 
+    /// Raw active DEK (tests only).
+    #[cfg(test)]
+    pub(crate) fn active_dek(&self) -> [u8; DEK_LEN] {
+        *self.active().key
+    }
+
     /// Key holding only the old (primary) DEK of a rotation.
     #[doc(hidden)]
     pub fn only_primary(&self) -> RepoKey {
@@ -589,6 +595,13 @@ impl RepoKeyFile {
     pub fn to_bytes(&self) -> Result<Vec<u8>, RsbError> {
         serde_json::to_vec_pretty(self)
             .map_err(|e| RsbError::Other(format!("serialize key file: {e}")))
+    }
+
+    /// Keeps `created_at` of the file this one replaces and sets
+    /// `updated_at` to now.
+    pub(crate) fn set_dates_from(&mut self, previous: &RepoKeyFile) {
+        self.created_at = previous.created_at.clone();
+        self.updated_at = Some(chrono::Utc::now().to_rfc3339());
     }
 
     /// Single-line JSON (used for the paper form, where size matters).

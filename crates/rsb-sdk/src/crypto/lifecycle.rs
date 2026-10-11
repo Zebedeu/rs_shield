@@ -1,6 +1,6 @@
 //! Repository key lifecycle: re-encryption of legacy (v1/v2) objects as v3
-//! (`rsb key migrate`) and export/import of the key file (`rsb key
-//! export` / `rsb key import`).
+//! (`rsb key migrate`), export/import of the key file (`rsb key export` /
+//! `rsb key import`) and DEK rotation (`rsb key rotate`).
 //!
 //! # Crash safety
 //!
@@ -215,15 +215,19 @@ async fn authenticate_v3(
     })
 }
 
-/// A rewritten blob waiting to be stored.
+/// A rewritten blob waiting to be stored (memory, or a spooled temp file).
 enum NewBlob {
     Memory(Vec<u8>),
+    Spool(crate::core::file_processor::Spool),
 }
 
 impl NewBlob {
     async fn store(&self, storage: &dyn Storage, path: &str) -> io::Result<()> {
+        use crate::core::file_processor::Spool;
         match self {
             NewBlob::Memory(b) => storage.write(path, b).await,
+            NewBlob::Spool(Spool::Memory { buf, .. }) => storage.write(path, buf).await,
+            NewBlob::Spool(Spool::File(f)) => storage.write_file(path, f.path()).await,
         }
     }
 }
@@ -912,6 +916,240 @@ async fn import_locked(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Key rotation.
+
+/// Result of [`rotate_repo_key`].
+#[derive(Debug, Clone, Default)]
+pub struct RotationReport {
+    /// Key id (hex) of the retired DEK.
+    pub old_key_id: String,
+    /// Key id (hex) of the new DEK.
+    pub new_key_id: String,
+    /// True if this run resumed an interrupted rotation.
+    pub resumed: bool,
+    /// Objects re-encrypted by this run.
+    pub objects_rotated: usize,
+    /// Objects already under the new key (written by an earlier run, or by
+    /// a backup during an interrupted rotation).
+    pub objects_already_rotated: usize,
+    /// Manifests rewritten.
+    pub manifests_rewritten: usize,
+    /// Objects checked by the final verification.
+    pub objects_verified: usize,
+    /// Unreferenced objects that decrypt with neither key (left as they
+    /// are; prune garbage-collects them).
+    pub unreadable_unreferenced: Vec<String>,
+}
+
+/// Re-encrypts `o` (a v3 blob of either DEK) under the active (new) DEK of
+/// `key`, streaming through a spool so memory stays bounded.
+async fn rotate_object(
+    storage: &dyn Storage,
+    o: &ObjectEntry,
+    key: &RepoKey,
+    verify_key: &RepoKey,
+) -> Result<StoredInfo, RsbError> {
+    use crate::core::file_processor::{HashingWriter, SPOOL_MEM_LIMIT, Spool};
+    use std::io::Write;
+    let reader = storage.read_stream(&o.path).await?;
+    let mut dec = key.stream_decryptor(&o.id, &[], reader).await?;
+    let mut enc = key.encryptor(&o.id, HashingWriter::new(Spool::new(SPOOL_MEM_LIMIT)))?;
+    let mut plain = blake3::Hasher::new();
+    while let Some(chunk) = dec.next_chunk().await? {
+        plain.update(chunk);
+        enc.write_all(chunk)?;
+    }
+    let (spool, _, _) = enc.finish()?.into_parts();
+    let plain_hash = plain.finalize().to_hex().to_string();
+    store_verified(
+        storage,
+        &o.path,
+        &o.id,
+        &NewBlob::Spool(spool),
+        verify_key,
+        &plain_hash,
+    )
+    .await
+}
+
+/// Generates a new DEK and re-encrypts every v3 object and manifest under
+/// it; then, after a full verification with the new DEK alone, removes the
+/// old DEK from the key file.
+///
+/// The key file first enters a "rotating" state that holds both DEKs
+/// (wrapped by the same password-derived KEK); from then on new blobs use
+/// the new DEK and readers pick the DEK by the key id in each blob header.
+/// Running it again during an interrupted rotation resumes it. Requires the
+/// legacy migration to be complete (no v1/v2 blob that still needs the
+/// password). Holds the exclusive repository lock.
+pub async fn rotate_repo_key(
+    storage: Arc<dyn Storage>,
+    password: &[u8],
+    progress: Option<ProgressCallback>,
+    cancellation: Option<CancellationToken>,
+) -> Result<RotationReport, RsbError> {
+    let lock = keyfile::lock_exclusive(&storage, "key-rotate").await?;
+    let result = rotate_locked(&*storage, password, progress, cancellation).await;
+    release(lock).await;
+    result
+}
+
+fn rotation_params(file: &RepoKeyFile) -> keyfile::KdfParams {
+    let p = file.params();
+    if p.validate_for_create().is_ok() {
+        p
+    } else {
+        keyfile::KdfParams::DEFAULT
+    }
+}
+
+async fn rotate_locked(
+    storage: &dyn Storage,
+    password: &[u8],
+    progress: Option<ProgressCallback>,
+    cancel: Option<CancellationToken>,
+) -> Result<RotationReport, RsbError> {
+    let mut raw = read_key_file_raw(storage).await?;
+    let mut file = RepoKeyFile::from_bytes(&raw)?;
+    let mut key = Arc::new(unwrap_blocking(file.clone(), password).await?);
+    let mut rep = RotationReport::default();
+
+    if key.is_rotating() {
+        rep.resumed = true;
+        info!("🔑 Resuming the interrupted key rotation");
+    } else {
+        let cache = KeyCache::with_repo_key(password, key.clone());
+        let legacy = legacy_blockers(storage, &cache).await?;
+        if legacy > 0 || file.has_legacy_secret() {
+            return Err(RsbError::InvalidInput(format!(
+                "The repository still holds {} v1/v2 (pre-v3) object(s) or manifest(s){}: run \
+                 `rsb key migrate` first, then `rsb key rotate`",
+                legacy,
+                if file.has_legacy_secret() {
+                    " or its key file still stores the legacy password"
+                } else {
+                    ""
+                }
+            )));
+        }
+        let rotating = key.begin_rotation()?;
+        let mut new_file = keyfile::wrap_blocking(
+            Arc::new(rotating.without_legacy()),
+            password,
+            rotation_params(&file),
+        )
+        .await?;
+        new_file.set_dates_from(&file);
+        key = Arc::new(replace_key_file(storage, &raw, &new_file, password, &rotating).await?);
+        raw = read_key_file_raw(storage).await?;
+        file = RepoKeyFile::from_bytes(&raw)?;
+        info!(
+            "🔑 Key rotation started: new key id {} (old {})",
+            key.key_id_hex(),
+            key.only_primary().key_id_hex()
+        );
+    }
+    rep.new_key_id = key.key_id_hex();
+    rep.old_key_id = key.only_primary().key_id_hex();
+    let new_id = key.key_id();
+    let final_key = Arc::new(key.only_active());
+
+    let cache = KeyCache::with_repo_key(password, key.clone());
+    let scan = scan(storage, &cache).await?;
+    let mut info: HashMap<String, StoredInfo> = HashMap::new();
+
+    // 1) Objects.
+    let total = scan.objects.len();
+    for (i, o) in scan.objects.iter().enumerate() {
+        if cancelled(&cancel) {
+            return Err(RsbError::Cancelled);
+        }
+        report(&progress, i, total, format!("Re-encrypting {}", o.path));
+        let referenced = scan.referenced.contains_key(&o.id);
+        match blob_kind(storage, &o.path).await? {
+            BlobKind::V3(Some(id)) if id == new_id => {
+                rep.objects_already_rotated += 1;
+                if referenced {
+                    match authenticate_v3(storage, &o.path, &o.id, &final_key).await {
+                        Ok(s) => {
+                            info.insert(o.id.clone(), s);
+                        }
+                        Err(e) => {
+                            return Err(corrupt(format!(
+                                "Referenced object {} does not authenticate: {}",
+                                o.path, e
+                            )));
+                        }
+                    }
+                }
+            }
+            BlobKind::V3(_) => match rotate_object(storage, o, &key, &final_key).await {
+                Ok(s) => {
+                    info.insert(o.id.clone(), s);
+                    rep.objects_rotated += 1;
+                }
+                Err(e) if referenced => return Err(e),
+                Err(e) => {
+                    warn!("Unreferenced object {} left as is: {}", o.path, e);
+                    rep.unreadable_unreferenced.push(o.path.clone());
+                }
+            },
+            BlobKind::Legacy | BlobKind::Malformed if referenced => {
+                return Err(RsbError::InvalidInput(format!(
+                    "Referenced object {} is not a v3 blob: run `rsb key migrate` (or `rsb \
+                     verify`) first, then `rsb key rotate` again to resume",
+                    o.path
+                )));
+            }
+            BlobKind::Legacy | BlobKind::Malformed => {
+                rep.unreadable_unreferenced.push(o.path.clone());
+            }
+        }
+    }
+
+    // 2) Manifests.
+    for (i, snap) in scan.snapshots.iter().enumerate() {
+        if cancelled(&cancel) {
+            return Err(RsbError::Cancelled);
+        }
+        report(
+            &progress,
+            i,
+            scan.snapshots.len(),
+            format!("Rewriting {}", snap.path),
+        );
+        let must = match snap.kind {
+            ManifestKind::Clear => false,
+            ManifestKind::V3(id) => id != Some(new_id),
+            ManifestKind::Legacy => {
+                return Err(RsbError::InvalidInput(format!(
+                    "{} is a v1/v2 manifest: run `rsb key migrate` first",
+                    snap.path
+                )));
+            }
+        };
+        if rewrite_manifest(storage, snap, &key, &info, must).await? {
+            rep.manifests_rewritten += 1;
+        }
+    }
+
+    // 3) Full verification with the new DEK alone.
+    rep.objects_verified =
+        verify_complete(storage, final_key.clone(), Some(new_id), progress, cancel).await?;
+
+    // 4) Drop the old DEK from the key file.
+    let mut final_file =
+        keyfile::wrap_blocking(final_key.clone(), password, rotation_params(&file)).await?;
+    final_file.set_dates_from(&file);
+    replace_key_file(storage, &raw, &final_file, password, &final_key).await?;
+    info!(
+        "🔑 Key rotation complete: {} object(s) and {} manifest(s) re-encrypted under key {}",
+        rep.objects_rotated, rep.manifests_rewritten, rep.new_key_id
+    );
+    Ok(rep)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,5 +1225,72 @@ mod tests {
         change_password(storage.clone(), b"new", b"x", Some(KdfParams::MIN_CREATE))
             .await
             .unwrap();
+    }
+
+    /// After a rotation, the raw old DEK fails AEAD authentication on every
+    /// blob (not only the key-id lookup), and sizes are unchanged.
+    #[tokio::test]
+    async fn rotated_blobs_do_not_open_with_the_old_dek() {
+        use crate::core::manifest::write_manifest_with_key;
+        use crate::core::types::ChunkMetadata;
+        let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+        let old = keyfile::init_repo_key(storage.clone(), b"pw", KdfParams::MIN_CREATE)
+            .await
+            .unwrap();
+        let old_dek = old.active_dek();
+        let mut m = HashMap::new();
+        let mut chunks = Vec::new();
+        let mut sizes = Vec::new();
+        for i in 0..3u8 {
+            let data = vec![i; 1024 * 1024 + 5 * i as usize];
+            let hash = crate::crypto::hash_file_content(&data).unwrap();
+            let blob = old.encrypt_object(&hash, &data).unwrap();
+            storage
+                .write(&format!("data/enc/{}", hash), &blob)
+                .await
+                .unwrap();
+            sizes.push(blob.len());
+            chunks.push(ChunkMetadata {
+                hash: hash.clone(),
+                stored_size: blob.len() as u64,
+                stored_hash: Some(blake3_hex(&blob)),
+            });
+        }
+        let total: u64 = chunks.iter().map(|c| c.stored_size).sum();
+        m.insert(
+            PathBuf::from("big"),
+            FileMetadata::new_multipart("f".repeat(64), true, false, chunks.clone(), total),
+        );
+        write_manifest_with_key(&*storage, &m, Some(&old), false)
+            .await
+            .unwrap();
+
+        let rep = rotate_repo_key(storage.clone(), b"pw", None, None)
+            .await
+            .unwrap();
+        assert_eq!(rep.objects_rotated, 3);
+        let new = load_repo_key(&*storage, b"pw").await.unwrap().unwrap();
+        let new_dek = new.active_dek();
+        assert_ne!(old_dek, new_dek);
+        for (c, size) in chunks.iter().zip(sizes) {
+            let blob = storage.read(&format!("data/enc/{}", c.hash)).await.unwrap();
+            assert_eq!(blob.len(), size);
+            let e = crate::crypto::stream::decrypt_v3(&old_dek, &c.hash, &blob).unwrap_err();
+            assert!(crate::crypto::is_authentication_error(&e));
+            assert!(crate::crypto::stream::decrypt_v3(&new_dek, &c.hash, &blob).is_ok());
+        }
+        // The manifest records the new stored hashes.
+        let snap = &snapshot_paths(&*storage).await.unwrap()[0];
+        let raw = storage.read(snap).await.unwrap();
+        assert!(crate::crypto::stream::decrypt_v3(&old_dek, snap, &raw).is_err());
+        let cache = KeyCache::v3_only(Arc::new(new));
+        let content = read_manifest_cached(&*storage, snap, Some(&cache))
+            .await
+            .unwrap();
+        let after: HashMap<PathBuf, FileMetadata> = toml::from_str(&content).unwrap();
+        for c in after[&PathBuf::from("big")].chunks.as_ref().unwrap() {
+            let blob = storage.read(&format!("data/enc/{}", c.hash)).await.unwrap();
+            assert_eq!(c.stored_hash.as_deref(), Some(blake3_hex(&blob).as_str()));
+        }
     }
 }

@@ -75,6 +75,17 @@ pub enum KeyCommand {
         target: RepoTarget,
     },
 
+    /// Generate a new data key and re-encrypt every object and manifest
+    /// under it; the old key is dropped once everything verifies. Resumable:
+    /// run it again after an interruption
+    Rotate {
+        #[command(flatten)]
+        target: RepoTarget,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Export keys/repo.key. The data key stays wrapped by the password, but
     /// together with the password the export decrypts every backup: protect
     /// it like the password
@@ -361,6 +372,56 @@ impl KeyCommand {
                         println!("ℹ️  The previous key file was kept at {}.", b);
                     }
                 }
+            }
+            KeyCommand::Rotate { target, yes } => {
+                let storage = open_storage(target).await?;
+                let resuming = keyfile::read_key_file(&*storage)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "{} not found: run `rsb key init` or an encrypted backup first",
+                            REPO_KEY_PATH
+                        )
+                    })?
+                    .is_rotating();
+                if resuming {
+                    println!("ℹ️  Resuming the interrupted key rotation.");
+                } else if !*yes && std::io::stdin().is_terminal() {
+                    println!(
+                        "Key rotation re-encrypts every object and manifest of the repository \
+                         (it reads and rewrites all encrypted data)."
+                    );
+                    if !confirm("Continue?")? {
+                        return Ok(());
+                    }
+                }
+                let pw = prompt("Repository password: ")?;
+                let (cb, token) = progress_and_cancel();
+                let rep =
+                    lifecycle::rotate_repo_key(storage, pw.as_bytes(), Some(cb), Some(token)).await;
+                eprintln!();
+                let rep = rep?;
+                println!(
+                    "✅ Key rotated: {} -> {} ({} object(s) and {} manifest(s) re-encrypted, {} \
+                     object(s) verified).",
+                    rep.old_key_id,
+                    rep.new_key_id,
+                    rep.objects_rotated,
+                    rep.manifests_rewritten,
+                    rep.objects_verified
+                );
+                if !rep.unreadable_unreferenced.is_empty() {
+                    println!(
+                        "⚠️  {} unreferenced object(s) could not be re-encrypted and were left as \
+                         they are (prune garbage-collects them).",
+                        rep.unreadable_unreferenced.len()
+                    );
+                }
+                println!(
+                    "ℹ️  Old copies of {} (exports, backups) no longer open the data: export the \
+                     new key file (`rsb key export`).",
+                    REPO_KEY_PATH
+                );
             }
             KeyCommand::Migrate { target } => {
                 let storage = open_storage(target).await?;

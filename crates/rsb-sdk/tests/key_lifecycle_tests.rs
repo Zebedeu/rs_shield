@@ -647,3 +647,219 @@ async fn import_into_another_repository_is_refused() {
             .is_err()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Rotation
+
+/// Every encrypted object and manifest fails to open with `old` (an
+/// authentication failure, not a format error) and opens with `new`.
+async fn only_new_key_opens(
+    storage: &dyn Storage,
+    old: &rsb_sdk::crypto::RepoKey,
+    new: &rsb_sdk::crypto::RepoKey,
+) {
+    let mut blobs: Vec<(String, String)> = list(storage, "data/enc")
+        .await
+        .into_iter()
+        .map(|p| {
+            let id = p.rsplit('/').next().unwrap().to_string();
+            (p, id)
+        })
+        .collect();
+    blobs.extend(
+        list(storage, "snapshots")
+            .await
+            .into_iter()
+            .map(|p| (p.clone(), p)),
+    );
+    assert!(blobs.len() > 3);
+    for (path, id) in blobs {
+        let raw = storage.read(&path).await.unwrap();
+        let e = old.decrypt_object(&id, &raw).unwrap_err();
+        assert!(rsb_sdk::crypto::is_authentication_error(&e), "{path}: {e}");
+        assert!(new.decrypt_object(&id, &raw).is_ok(), "{path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rotation_full_cycle() {
+    let mem = FailingStorage::new();
+    let storage: Arc<dyn Storage> = mem.clone();
+    let repo = fresh_repo(&storage).await;
+    // A second snapshot sharing objects with the first.
+    std::fs::write(repo._src.path().join("two.txt"), b"second").unwrap();
+    backup(&repo.cfg, &storage, PW).await;
+    let mut files = repo.files();
+    files.push(("two.txt", b"second"));
+    let old = keyfile::load_repo_key(&*storage, PW.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let sizes_before: Vec<(String, Option<u64>)> = {
+        let mut v = Vec::new();
+        for o in list(&*storage, "data/enc").await {
+            let s = storage.size(&o).await.unwrap();
+            v.push((o, s));
+        }
+        v
+    };
+
+    let rep = lifecycle::rotate_repo_key(storage.clone(), PW.as_bytes(), None, None)
+        .await
+        .unwrap();
+    assert!(!rep.resumed);
+    assert_eq!(rep.old_key_id, old.key_id_hex());
+    assert_ne!(rep.new_key_id, rep.old_key_id);
+    assert_eq!(rep.objects_rotated, sizes_before.len(), "{:?}", rep);
+    assert_eq!(rep.manifests_rewritten, 2, "{:?}", rep);
+
+    let new = keyfile::load_repo_key(&*storage, PW.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!new.is_rotating());
+    assert_eq!(new.key_id_hex(), rep.new_key_id);
+    let file = keyfile::read_key_file(&*storage).await.unwrap().unwrap();
+    assert!(!file.is_rotating());
+    assert_eq!(file.key_id(), Some(rep.new_key_id.as_str()));
+    assert!(no_backup_copies(&mem.inner.keys()));
+    only_new_key_opens(&*storage, &old, &new).await;
+    for (o, k) in kinds(&*storage).await {
+        assert_eq!(k, BlobKind::V3(Some(new.key_id())), "{o}");
+    }
+    // Object sizes (and names) are unchanged.
+    for (o, s) in &sizes_before {
+        assert_eq!(&storage.size(o).await.unwrap(), s, "{o}");
+    }
+    assert!(
+        verify_errors(&repo.cfg, &storage, PW, true)
+            .await
+            .is_empty()
+    );
+    all_operations_work(&repo.cfg, &storage, PW, &files).await;
+    // Backups after the rotation use the new key; the password is unchanged.
+    std::fs::write(repo._src.path().join("three.txt"), b"third").unwrap();
+    backup(&repo.cfg, &storage, PW).await;
+    for (o, k) in kinds(&*storage).await {
+        assert_eq!(k, BlobKind::V3(Some(new.key_id())), "{o}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_rotation_resumes() {
+    let mem = FailingStorage::new();
+    let storage: Arc<dyn Storage> = mem.clone();
+    let repo = fresh_repo(&storage).await;
+    let files = repo.files();
+    let old = keyfile::load_repo_key(&*storage, PW.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Crash after one re-encrypted object.
+    mem.fail_after("data/enc/", 1);
+    let e = lifecycle::rotate_repo_key(storage.clone(), PW.as_bytes(), None, None)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("injected"), "{e}");
+    mem.heal();
+    let file = keyfile::read_key_file(&*storage).await.unwrap().unwrap();
+    assert!(file.is_rotating());
+    let rotating = keyfile::load_repo_key(&*storage, PW.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rotating.is_rotating());
+    let ids: Vec<BlobKind> = kinds(&*storage).await.into_iter().map(|(_, k)| k).collect();
+    assert!(
+        ids.contains(&BlobKind::V3(Some(rotating.key_id()))),
+        "{ids:?}"
+    );
+    assert!(ids.contains(&BlobKind::V3(Some(old.key_id()))), "{ids:?}");
+
+    // Mixed old/new objects: everything works, and a backup during the
+    // interrupted rotation writes with the new key.
+    all_operations_work(&repo.cfg, &storage, PW, &files).await;
+    std::fs::write(repo._src.path().join("during.txt"), b"written mid-rotation").unwrap();
+    backup(&repo.cfg, &storage, PW).await;
+    let mut files = files;
+    files.push(("during.txt", b"written mid-rotation"));
+    restore_ok(&repo.cfg, &storage, PW, &files).await;
+    // No password change while the key file holds two keys.
+    let e = keyfile::change_password(
+        storage.clone(),
+        PW.as_bytes(),
+        b"x",
+        Some(KdfParams::MIN_CREATE),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.to_string().contains("rsb key rotate"), "{e}");
+
+    // Crash again while rewriting manifests.
+    mem.fail_after("snapshots/", 0);
+    assert!(
+        lifecycle::rotate_repo_key(storage.clone(), PW.as_bytes(), None, None)
+            .await
+            .is_err()
+    );
+    mem.heal();
+    all_operations_work(&repo.cfg, &storage, PW, &files).await;
+
+    // Resume: same new key, finishes.
+    let rep = lifecycle::rotate_repo_key(storage.clone(), PW.as_bytes(), None, None)
+        .await
+        .unwrap();
+    assert!(rep.resumed);
+    assert_eq!(rep.new_key_id, rotating.key_id_hex());
+    assert_eq!(rep.objects_rotated, 0, "{:?}", rep);
+    let new = keyfile::load_repo_key(&*storage, PW.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!new.is_rotating());
+    only_new_key_opens(&*storage, &old, &new).await;
+    assert!(
+        verify_errors(&repo.cfg, &storage, PW, true)
+            .await
+            .is_empty()
+    );
+    all_operations_work(&repo.cfg, &storage, PW, &files).await;
+    // A second rotation works and retires the intermediate key.
+    lifecycle::rotate_repo_key(storage.clone(), PW.as_bytes(), None, None)
+        .await
+        .unwrap();
+    let newer = keyfile::load_repo_key(&*storage, PW.as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    only_new_key_opens(&*storage, &new, &newer).await;
+    restore_ok(&repo.cfg, &storage, PW, &files).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rotation_requires_completed_migration() {
+    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let repo = mixed_repo(&storage).await;
+    let e = lifecycle::rotate_repo_key(storage.clone(), PW.as_bytes(), None, None)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("rsb key migrate"), "{e}");
+    assert!(
+        !keyfile::read_key_file(&*storage)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_rotating()
+    );
+    lifecycle::migrate_legacy_objects(storage.clone(), PW.as_bytes(), None, None)
+        .await
+        .unwrap();
+    // The garbage blob left by the migration does not block the rotation
+    // (it is unreferenced and opens with nothing).
+    let rep = lifecycle::rotate_repo_key(storage.clone(), PW.as_bytes(), None, None)
+        .await
+        .unwrap();
+    assert_eq!(rep.unreadable_unreferenced.len(), 1, "{:?}", rep);
+    all_operations_work(&repo.cfg, &storage, PW, &repo.files()).await;
+}

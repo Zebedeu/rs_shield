@@ -23,7 +23,7 @@ const ENCRYPTION_OVERHEAD: u64 = 16 + 12 + 16;
 const ENCRYPTION_OVERHEAD_V2: u64 = 8 + 4 + ENCRYPTION_OVERHEAD;
 /// Encrypted output up to this size is spooled in memory before the upload;
 /// larger output spills to a temp file that is streamed to storage.
-const SPOOL_MEM_LIMIT: usize = 8 * 1024 * 1024;
+pub(crate) const SPOOL_MEM_LIMIT: usize = 8 * 1024 * 1024;
 /// zstd level used when an existing object forces compression but the
 /// profile has compression disabled.
 const FALLBACK_COMPRESSION_LEVEL: u8 = 3;
@@ -631,10 +631,29 @@ fn store_object(
 }
 
 /// Counts and hashes everything written through it.
-struct HashingWriter<W: Write> {
+pub(crate) struct HashingWriter<W: Write> {
     inner: W,
     hasher: blake3::Hasher,
     len: u64,
+}
+
+impl<W: Write> HashingWriter<W> {
+    pub(crate) fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: blake3::Hasher::new(),
+            len: 0,
+        }
+    }
+
+    /// (inner writer, bytes written, BLAKE3 hex of them)
+    pub(crate) fn into_parts(self) -> (W, u64, String) {
+        (
+            self.inner,
+            self.len,
+            self.hasher.finalize().to_hex().to_string(),
+        )
+    }
 }
 
 impl<W: Write> Write for HashingWriter<W> {
@@ -652,13 +671,13 @@ impl<W: Write> Write for HashingWriter<W> {
 
 /// In-memory buffer that spills to an anonymous-on-drop temp file once it
 /// exceeds `limit` bytes.
-enum Spool {
+pub(crate) enum Spool {
     Memory { buf: Vec<u8>, limit: usize },
     File(tempfile::NamedTempFile),
 }
 
 impl Spool {
-    fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: usize) -> Self {
         Spool::Memory {
             buf: Vec::new(),
             limit,
