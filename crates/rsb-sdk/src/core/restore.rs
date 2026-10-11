@@ -1,8 +1,8 @@
 use super::cancellation::CancellationToken;
-use crate::crypto::KeyCache;
 use super::manifest::find_latest_snapshot_cached;
 use super::types::{FileMetadata, ProgressCallback};
 use crate::config::Config;
+use crate::crypto::KeyCache;
 use crate::report::ReportData;
 use crate::storage::{Storage, sync_dir};
 use crate::storage::{validate_content_hash, validate_storage_path};
@@ -291,13 +291,19 @@ async fn restore_entry(
 pub fn prepare_restore_target(root_canon: &Path, rel: &Path, force: bool) -> io::Result<PathBuf> {
     let comps: Vec<Component> = rel.components().collect();
     let Some((Component::Normal(file_name), parents)) = comps.split_last() else {
-        return Err(io::Error::new(ErrorKind::InvalidInput, "Invalid restore path"));
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Invalid restore path",
+        ));
     };
 
     let mut dir = root_canon.to_path_buf();
     for comp in parents {
         let Component::Normal(name) = comp else {
-            return Err(io::Error::new(ErrorKind::InvalidInput, "Invalid restore path"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "Invalid restore path",
+            ));
         };
         dir.push(name);
         match std::fs::symlink_metadata(&dir) {
@@ -701,7 +707,10 @@ mod tests {
                 let mut chunks = Vec::new();
                 for part in content.chunks(3) {
                     let h = hash_file_content(part).unwrap();
-                    storage.write(&format!("data/clear/{}", h), part).await.unwrap();
+                    storage
+                        .write(&format!("data/clear/{}", h), part)
+                        .await
+                        .unwrap();
                     chunks.push(ChunkMetadata {
                         hash: h,
                         stored_size: part.len() as u64,
@@ -713,7 +722,10 @@ mod tests {
                     FileMetadata::new_multipart(hash, false, false, chunks, content.len() as u64),
                 );
             } else {
-                storage.write(&format!("data/clear/{}", hash), content).await.unwrap();
+                storage
+                    .write(&format!("data/clear/{}", hash), content)
+                    .await
+                    .unwrap();
                 manifest.insert(PathBuf::from(name), FileMetadata::new(hash, false, false));
             }
         }

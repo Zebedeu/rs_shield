@@ -6,9 +6,17 @@ const SECURITY_KEY_ERROR: &str =
     "🔑 Security key error. Please reconnect your security key or verify the connection.";
 
 fn is_security_key_error(e: &str) -> bool {
-    ["fido", "webauthn", "ctap", "u2f", "security key", "security-key", "authenticator"]
-        .iter()
-        .any(|k| e.contains(k))
+    [
+        "fido",
+        "webauthn",
+        "ctap",
+        "u2f",
+        "security key",
+        "security-key",
+        "authenticator",
+    ]
+    .iter()
+    .any(|k| e.contains(k))
 }
 
 /// Convert technical error messages to user-friendly messages

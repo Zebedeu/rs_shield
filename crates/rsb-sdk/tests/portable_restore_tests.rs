@@ -756,7 +756,11 @@ fn test_real_validator_still_flags_incomplete_backups() {
     fs::create_dir_all(empty.path().join("snapshots")).unwrap();
     fs::create_dir_all(empty.path().join("data/clear")).unwrap();
     fs::create_dir_all(empty.path().join("data/enc")).unwrap();
-    fs::write(empty.path().join("snapshots/2026-05-25T120000.000Z.toml"), "").unwrap();
+    fs::write(
+        empty.path().join("snapshots/2026-05-25T120000.000Z.toml"),
+        "",
+    )
+    .unwrap();
     let v = rsb_sdk::validate_backup_structure(empty.path());
     assert!(v.is_valid);
     assert_eq!(v.data_files_count, 0);

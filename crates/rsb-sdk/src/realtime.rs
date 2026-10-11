@@ -632,7 +632,11 @@ impl RealtimeSync {
     }
 
     fn should_ignore(&self, path: &Path) -> bool {
-        if self.excluded_roots.iter().any(|root| path.starts_with(root)) {
+        if self
+            .excluded_roots
+            .iter()
+            .any(|root| path.starts_with(root))
+        {
             return true;
         }
         let path_str = path.to_string_lossy();
@@ -874,8 +878,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret"), b"s").unwrap();
         std::fs::write(src.path().join("f.txt"), b"f").unwrap();
-        std::os::unix::fs::symlink(outside.path().join("secret"), src.path().join("link"))
-            .unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), src.path().join("link")).unwrap();
         assert_eq!(sync_all_files(src.path(), dst.path()).await.unwrap(), 1);
         assert!(!dst.path().join("link").exists());
 

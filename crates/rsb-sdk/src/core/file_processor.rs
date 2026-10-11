@@ -302,7 +302,13 @@ fn cached_objects_present(
     let objects: Vec<(String, Option<u64>, Option<u64>)> = match &cached.chunks {
         Some(chunks) => chunks
             .iter()
-            .map(|c| (format!("data/{}/{}", kind, c.hash), Some(c.stored_size), None))
+            .map(|c| {
+                (
+                    format!("data/{}/{}", kind, c.hash),
+                    Some(c.stored_size),
+                    None,
+                )
+            })
             .collect(),
         None => vec![(
             format!("data/{}/{}", kind, cached.hash),
@@ -670,8 +676,8 @@ mod tests {
                     encrypted, first, second
                 );
                 let kind = if encrypted { "enc" } else { "clear" };
-                let raw = std::fs::read(repo.path().join("data").join(kind).join(&m2.hash))
-                    .unwrap();
+                let raw =
+                    std::fs::read(repo.path().join("data").join(kind).join(&m2.hash)).unwrap();
                 assert_eq!(decode_like_restore(raw, &m2, password), content);
             }
         }
@@ -690,8 +696,7 @@ mod tests {
         let content = zstd::stream::encode_all(&b"inner ".repeat(100)[..], 3).unwrap();
         std::fs::write(&src, &content).unwrap();
         let repo = tempfile::tempdir().unwrap();
-        let storage: Arc<dyn Storage> =
-            Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
+        let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
         let none = HashMap::new();
         let (_, m1) = run(&rt, &storage, &src, None, &none, 0);
         assert!(!m1.compressed);
@@ -709,8 +714,7 @@ mod tests {
         let src = src_dir.path().join("f.txt");
         std::fs::write(&src, b"some content").unwrap();
         let repo = tempfile::tempdir().unwrap();
-        let storage: Arc<dyn Storage> =
-            Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
+        let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
         let (_, m1) = run(&rt, &storage, &src, None, &HashMap::new(), 3);
         let mut cache = HashMap::new();
         cache.insert(m1.hash.clone(), m1.clone());
@@ -736,8 +740,7 @@ mod tests {
         std::fs::write(&src, b"hello world").unwrap();
         let hash = hash_file_content(b"hello world").unwrap();
 
-        let storage: Arc<dyn Storage> =
-            Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
+        let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
         // Simulate a torn write from an older version: zero-byte object.
         let obj = repo.path().join("data/clear").join(&hash);
         std::fs::create_dir_all(obj.parent().unwrap()).unwrap();

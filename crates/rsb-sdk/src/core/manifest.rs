@@ -1,6 +1,6 @@
 // manifest.rs - Performance + reliability version
-use crate::crypto::KeyCache;
 use super::types::{ChunkMetadata, FileMetadata};
+use crate::crypto::KeyCache;
 use crate::crypto::encrypt_data_with_key;
 use crate::storage::Storage;
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -49,7 +49,11 @@ pub fn parse_snapshot_timestamp(name: &str) -> Option<DateTime<Utc>> {
                 let mut ts = naive.and_utc();
                 match frac {
                     None => return Some(ts),
-                    Some(f) if !f.is_empty() && f.len() <= 9 && f.bytes().all(|b| b.is_ascii_digit()) => {
+                    Some(f)
+                        if !f.is_empty()
+                            && f.len() <= 9
+                            && f.bytes().all(|b| b.is_ascii_digit()) =>
+                    {
                         let nanos: i64 = format!("{:0<9}", f).parse().ok()?;
                         ts += chrono::Duration::nanoseconds(nanos);
                         return Some(ts);
@@ -324,7 +328,10 @@ mod tests {
 
     #[test]
     fn snapshot_id_validation() {
-        assert_eq!(validate_snapshot_id("2026-02-07T103000Z").unwrap(), "2026-02-07T103000Z");
+        assert_eq!(
+            validate_snapshot_id("2026-02-07T103000Z").unwrap(),
+            "2026-02-07T103000Z"
+        );
         assert_eq!(
             validate_snapshot_id("2026-02-07T103000.1Z.toml").unwrap(),
             "2026-02-07T103000.1Z"

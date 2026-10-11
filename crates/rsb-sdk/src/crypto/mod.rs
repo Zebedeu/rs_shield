@@ -332,7 +332,13 @@ impl KeyCache {
                 V2_HEADER_LEN + SALT_LEN + NONCE_LEN,
             ),
             None => match parse_legacy(&blob) {
-                Some(p) => (Vec::new(), p.salt, p.nonce, p.iterations, SALT_LEN + NONCE_LEN),
+                Some(p) => (
+                    Vec::new(),
+                    p.salt,
+                    p.nonce,
+                    p.iterations,
+                    SALT_LEN + NONCE_LEN,
+                ),
                 None => {
                     return Err(io::Error::new(
                         ErrorKind::InvalidData,
@@ -462,7 +468,9 @@ mod tests {
         let mut bad = blob;
         let last = bad.len() - 1;
         bad[last] ^= 1;
-        assert!(is_authentication_error(&cache.decrypt_owned(bad).unwrap_err()));
+        assert!(is_authentication_error(
+            &cache.decrypt_owned(bad).unwrap_err()
+        ));
         assert!(cache.decrypt_owned(vec![0u8; 3]).is_err());
     }
 }

@@ -19,7 +19,9 @@ fn content(len: usize, seed: u64) -> Vec<u8> {
             if (i / 4096) % 3 == 0 {
                 (i % 7) as u8
             } else {
-                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (x >> 33) as u8
             }
         })
@@ -103,10 +105,26 @@ async fn multi_mb_unencrypted_restore_round_trips() {
     let zeros = vec![0u8; 24 * 1024 * 1024];
     let (_repo, storage, _) = repo(
         &[
-            Entry { name: "a.bin", data: &a, compressed: true },
-            Entry { name: "dir/b.bin", data: &b, compressed: false },
-            Entry { name: "zeros.bin", data: &zeros, compressed: true },
-            Entry { name: "empty.bin", data: b"", compressed: true },
+            Entry {
+                name: "a.bin",
+                data: &a,
+                compressed: true,
+            },
+            Entry {
+                name: "dir/b.bin",
+                data: &b,
+                compressed: false,
+            },
+            Entry {
+                name: "zeros.bin",
+                data: &zeros,
+                compressed: true,
+            },
+            Entry {
+                name: "empty.bin",
+                data: b"",
+                compressed: true,
+            },
         ],
         None,
     )
@@ -118,7 +136,11 @@ async fn multi_mb_unencrypted_restore_round_trips() {
     assert_eq!(std::fs::read(out.path().join("a.bin")).unwrap(), a);
     assert_eq!(std::fs::read(out.path().join("dir/b.bin")).unwrap(), b);
     assert_eq!(std::fs::read(out.path().join("zeros.bin")).unwrap(), zeros);
-    assert!(std::fs::read(out.path().join("empty.bin")).unwrap().is_empty());
+    assert!(
+        std::fs::read(out.path().join("empty.bin"))
+            .unwrap()
+            .is_empty()
+    );
     assert_no_temp_files(out.path());
 }
 
@@ -129,8 +151,16 @@ async fn multi_mb_encrypted_restore_round_trips() {
     let b = content(2 * 1024 * 1024, 4);
     let (_repo, storage, _) = repo(
         &[
-            Entry { name: "a.bin", data: &a, compressed: true },
-            Entry { name: "b.bin", data: &b, compressed: false },
+            Entry {
+                name: "a.bin",
+                data: &a,
+                compressed: true,
+            },
+            Entry {
+                name: "b.bin",
+                data: &b,
+                compressed: false,
+            },
         ],
         Some(&key),
     )
@@ -151,7 +181,11 @@ async fn multi_mb_encrypted_restore_round_trips() {
 async fn corrupt_unencrypted_blob_leaves_target_untouched() {
     let a = content(4 * 1024 * 1024, 5);
     let (repo_dir, storage, blobs) = repo(
-        &[Entry { name: "a.bin", data: &a, compressed: true }],
+        &[Entry {
+            name: "a.bin",
+            data: &a,
+            compressed: true,
+        }],
         None,
     )
     .await;
@@ -198,7 +232,11 @@ async fn corrupt_encrypted_blob_leaves_target_untouched() {
     let key = EncryptionKey::new(PASSWORD.as_bytes()).unwrap();
     let a = content(3 * 1024 * 1024, 6);
     let (repo_dir, storage, blobs) = repo(
-        &[Entry { name: "a.bin", data: &a, compressed: true }],
+        &[Entry {
+            name: "a.bin",
+            data: &a,
+            compressed: true,
+        }],
         Some(&key),
     )
     .await;

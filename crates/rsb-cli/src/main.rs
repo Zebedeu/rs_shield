@@ -3,7 +3,9 @@ use chrono::Local;
 use clap::Parser;
 use rsb_cli::command::list_profiles_cmd::{ListProfilesCmd, OutputFormat};
 use rsb_cli::command::main_cmd::{Commands, ListProfilesFormat, StorageChoice};
-use rsb_cli::helpers::{obtain_encryption_key, profile_name, resolve_profile_path, warn_secret_arg};
+use rsb_cli::helpers::{
+    obtain_encryption_key, profile_name, resolve_profile_path, warn_secret_arg,
+};
 use rsb_sdk::backup::diagnostic::{print_diagnostics, run_backup_diagnostics, sync_changed_files};
 use rsb_sdk::backup::perform_backup;
 use rsb_sdk::integrity::perform_verify;
@@ -181,11 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Storage: --storage > configuração do perfil. Só se pergunta em
             // modo interativo (TTY) quando o perfil não tem S3 configurado;
             // em cron/systemd nunca se lê stdin.
-            let s3_configured = cfg
-                .s3
-                .as_ref()
-                .and_then(|s| s.bucket.as_ref())
-                .is_some()
+            let s3_configured = cfg.s3.as_ref().and_then(|s| s.bucket.as_ref()).is_some()
                 || cfg.s3_bucket.is_some();
             let interactive = std::io::stdin().is_terminal();
             let choice = match storage {
@@ -838,8 +836,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // check_fido2_auth só aceita tokens cujo jti esteja no registo
                     // de sessões persistido.
                     let claims = jwt_mgr.verify_token(&token)?;
-                    rsb_sdk::auth::SessionRegistry::default_registry()?
-                        .record_claims(&claims)?;
+                    rsb_sdk::auth::SessionRegistry::default_registry()?.record_claims(&claims)?;
 
                     println!("\n✅ Recovery code verified successfully!");
                     println!("🔑 User: {}", user_id);

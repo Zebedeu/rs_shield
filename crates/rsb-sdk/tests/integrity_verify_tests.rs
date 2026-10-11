@@ -55,7 +55,9 @@ async fn roundtrip(key: Option<&str>) {
     perform_backup(&cfg, "incremental", key, false, false, Some(2), None)
         .await
         .unwrap();
-    let report = perform_verify(&cfg, None, true, false, None, None).await.unwrap();
+    let report = perform_verify(&cfg, None, true, false, None, None)
+        .await
+        .unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
 
     let objects = data_objects(dst.path(), kind);
@@ -64,14 +66,14 @@ async fn roundtrip(key: Option<&str>) {
     truncate_half(victim);
 
     // Plain verify detects it, names the object and does not modify anything.
-    let report = perform_verify(&cfg, None, true, false, None, None).await.unwrap();
+    let report = perform_verify(&cfg, None, true, false, None, None)
+        .await
+        .unwrap();
     assert_eq!(report.files_with_errors, 1, "{:?}", report.errors);
     assert_eq!(report.files_processed, 1);
     assert!(
-        report
-            .errors
-            .iter()
-            .any(|e| e.contains("Corrupt object") && e.contains(&*victim.file_name().unwrap().to_string_lossy())),
+        report.errors.iter().any(|e| e.contains("Corrupt object")
+            && e.contains(&*victim.file_name().unwrap().to_string_lossy())),
         "{:?}",
         report.errors
     );
@@ -81,7 +83,12 @@ async fn roundtrip(key: Option<&str>) {
     let report = perform_verify_with_repair(&cfg, None, true, false, true, None, None)
         .await
         .unwrap();
-    assert!(report.errors.iter().any(|e| e.contains("Deleted corrupt object")));
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("Deleted corrupt object"))
+    );
     assert!(!victim.exists());
 
     // The next backup re-uploads it even though the source is unchanged
@@ -90,7 +97,9 @@ async fn roundtrip(key: Option<&str>) {
         .await
         .unwrap();
     assert!(victim.exists());
-    let report = perform_verify(&cfg, None, true, false, None, None).await.unwrap();
+    let report = perform_verify(&cfg, None, true, false, None, None)
+        .await
+        .unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert_eq!(report.files_processed, 2);
 }
@@ -112,9 +121,17 @@ async fn repair_does_not_delete_with_wrong_key_objects() {
     let dst = tempfile::tempdir().unwrap();
     std::fs::write(src.path().join("a.txt"), b"alpha").unwrap();
     let cfg = config(src.path(), dst.path(), Some("right"));
-    perform_backup(&cfg, "incremental", Some("right"), false, false, Some(2), None)
-        .await
-        .unwrap();
+    perform_backup(
+        &cfg,
+        "incremental",
+        Some("right"),
+        false,
+        false,
+        Some(2),
+        None,
+    )
+    .await
+    .unwrap();
     let wrong = config(src.path(), dst.path(), Some("wrong"));
     assert!(
         perform_verify_with_repair(&wrong, None, true, false, true, None, None)

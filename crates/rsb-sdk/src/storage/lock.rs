@@ -257,8 +257,12 @@ mod tests {
     async fn shared_locks_coexist_but_exclude_prune() {
         let dir = tempfile::tempdir().unwrap();
         let s = local(&dir);
-        let b1 = RepoLock::acquire(s.clone(), LockKind::Shared, "backup").await.unwrap();
-        let b2 = RepoLock::acquire(s.clone(), LockKind::Shared, "backup").await.unwrap();
+        let b1 = RepoLock::acquire(s.clone(), LockKind::Shared, "backup")
+            .await
+            .unwrap();
+        let b2 = RepoLock::acquire(s.clone(), LockKind::Shared, "backup")
+            .await
+            .unwrap();
         let err = RepoLock::acquire(s.clone(), LockKind::Exclusive, "prune")
             .await
             .err()
@@ -266,7 +270,9 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::WouldBlock);
         b1.release().await.unwrap();
         b2.release().await.unwrap();
-        let p = RepoLock::acquire(s.clone(), LockKind::Exclusive, "prune").await.unwrap();
+        let p = RepoLock::acquire(s.clone(), LockKind::Exclusive, "prune")
+            .await
+            .unwrap();
         assert!(
             RepoLock::acquire(s.clone(), LockKind::Shared, "backup")
                 .await
@@ -293,7 +299,9 @@ mod tests {
         s.write("locks/dead.lock", &serde_json::to_vec(&stale).unwrap())
             .await
             .unwrap();
-        let l = RepoLock::acquire(s.clone(), LockKind::Shared, "backup").await.unwrap();
+        let l = RepoLock::acquire(s.clone(), LockKind::Shared, "backup")
+            .await
+            .unwrap();
         l.release().await.unwrap();
         assert!(!s.exists("locks/dead.lock").await.unwrap());
     }

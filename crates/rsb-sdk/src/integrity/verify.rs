@@ -181,7 +181,10 @@ enum Decoded {
 
 enum ObjectCheck {
     Ok(Option<Decoded>),
-    Corrupt { reason: String, decrypt_failed: bool },
+    Corrupt {
+        reason: String,
+        decrypt_failed: bool,
+    },
     Error(String),
 }
 
@@ -261,7 +264,11 @@ pub async fn verify_manifest_objects(
                 .iter()
                 .map(|c| (c.hash.clone(), Some(c.stored_size), c.stored_hash.clone()))
                 .collect(),
-            None => vec![(meta.hash.clone(), meta.stored_size, meta.stored_hash.clone())],
+            None => vec![(
+                meta.hash.clone(),
+                meta.stored_size,
+                meta.stored_hash.clone(),
+            )],
         };
         for (hash, size, stored_hash) in items {
             let path = format!("data/{}/{}", kind, hash);
@@ -285,7 +292,10 @@ pub async fn verify_manifest_objects(
     let total = objects.len();
 
     for (i, (path, (content_hash, encrypted, refs))) in objects.iter().enumerate() {
-        if cancellation_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+        if cancellation_token
+            .as_ref()
+            .is_some_and(|t| t.is_cancelled())
+        {
             info!("⏹️ Verification cancelled by the user");
             out.errors.push("Verification cancelled".to_string());
             break;
@@ -304,8 +314,11 @@ pub async fn verify_manifest_objects(
         match storage.exists(path).await {
             Ok(true) => {}
             Ok(false) => {
-                out.errors
-                    .push(format!("Missing object {} (used by: {})", path, files_list()));
+                out.errors.push(format!(
+                    "Missing object {} (used by: {})",
+                    path,
+                    files_list()
+                ));
                 out.missing.push(path.clone());
                 bad_files.extend(refs.iter().map(|r| r.file.clone()));
                 continue;
@@ -359,7 +372,11 @@ pub async fn verify_manifest_objects(
                             r.file.display(),
                             r.compressed,
                             path,
-                            if r.compressed { "not compressed" } else { "compressed" }
+                            if r.compressed {
+                                "not compressed"
+                            } else {
+                                "compressed"
+                            }
                         ));
                         bad_files.insert(r.file.clone());
                     }

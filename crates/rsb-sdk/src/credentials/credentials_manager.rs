@@ -147,10 +147,9 @@ impl CredentialsManager {
                 .create(parent)
                 .map_err(|e| format!("Error creating directory {}: {}", parent.display(), e))?;
             if parent.file_name().is_some_and(|n| n == ".rs-shield") {
-                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|e| {
-                        format!("Error setting permissions on {}: {}", parent.display(), e)
-                    })?;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+                    |e| format!("Error setting permissions on {}: {}", parent.display(), e),
+                )?;
             }
             Ok(())
         }
@@ -233,10 +232,7 @@ impl CredentialsManager {
             match entry.get_password() {
                 Ok(password) => Ok(Some(Zeroizing::new(password))),
                 Err(keyring::Error::NoEntry) => Ok(None),
-                Err(e) => Err(format!(
-                    "Error reading master password from keyring: {}",
-                    e
-                )),
+                Err(e) => Err(format!("Error reading master password from keyring: {}", e)),
             }
         }
 

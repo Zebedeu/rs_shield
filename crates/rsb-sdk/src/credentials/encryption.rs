@@ -81,8 +81,8 @@ pub fn encrypt_credentials(
     // Derive key from master password
     let key_bytes = derive_key_from_password(master_password, &salt, PBKDF2_ITERATIONS);
     // new_from_slice avoids an extra un-wiped `Key` copy on the stack.
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes[..])
-        .map_err(|_| "Invalid key length".to_string())?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key_bytes[..]).map_err(|_| "Invalid key length".to_string())?;
 
     // Generate unique nonce (12 bytes for GCM)
     let mut nonce_bytes = [0u8; 12];
@@ -137,8 +137,8 @@ pub fn decrypt_credentials(
 
     // Derive key
     let key_bytes = derive_key_from_password(master_password, &salt, iterations);
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes[..])
-        .map_err(|_| "Invalid key length".to_string())?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key_bytes[..]).map_err(|_| "Invalid key length".to_string())?;
 
     // Decrypt
     let nonce = Nonce::from_slice(&nonce_bytes);

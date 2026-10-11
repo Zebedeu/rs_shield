@@ -736,7 +736,11 @@ async fn test_realtime_batch_creates_snapshot_in_local_destination() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     for i in 0..5 {
-        fs::write(src.path().join(format!("file{}.txt", i)), format!("data {}", i)).unwrap();
+        fs::write(
+            src.path().join(format!("file{}.txt", i)),
+            format!("data {}", i),
+        )
+        .unwrap();
     }
 
     let dst_path = dst.path().to_path_buf();
@@ -761,7 +765,11 @@ async fn test_realtime_batch_creates_snapshot_in_local_destination() {
         stats
     );
     assert!(stats.backups_completed >= 1);
-    assert_eq!(stats.backups_failed, 0, "last error: {:?}", stats.last_error);
+    assert_eq!(
+        stats.backups_failed, 0,
+        "last error: {:?}",
+        stats.last_error
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -855,7 +863,11 @@ async fn test_changes_during_backup_trigger_one_more_backup() {
     assert!(sync.get_stats().await.pending_changes >= 1);
 
     let c = probe.calls.clone();
-    assert!(wait_until(Duration::from_secs(10), move || c.load(Ordering::SeqCst) >= 2).await);
+    assert!(
+        wait_until(Duration::from_secs(10), move || c.load(Ordering::SeqCst)
+            >= 2)
+        .await
+    );
     let s = sync.clone();
     assert!(wait_until(Duration::from_secs(5), move || !s.is_backup_running()).await);
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -881,7 +893,11 @@ async fn test_loop_retries_failed_backup_with_backoff() {
     let handle = sync.clone().spawn_processing_loop();
 
     let c = probe.calls.clone();
-    assert!(wait_until(Duration::from_secs(10), move || c.load(Ordering::SeqCst) >= 3).await);
+    assert!(
+        wait_until(Duration::from_secs(10), move || c.load(Ordering::SeqCst)
+            >= 3)
+        .await
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
     sync.stop_processing().await;
     handle.await.unwrap();
@@ -922,7 +938,9 @@ async fn test_stop_lets_running_backup_finish() {
 async fn test_excluded_root_changes_are_ignored() {
     let (runner, probe) = probe_runner(0, Duration::from_millis(1));
     let sync = RealtimeSync::with_backup_runner(fast_strategy(), runner).exclude_root("/repo/dst");
-    sync.queue.add_change(change("/repo/dst/snapshots/x.toml")).await;
+    sync.queue
+        .add_change(change("/repo/dst/snapshots/x.toml"))
+        .await;
     assert_eq!(sync.sync_now().await.unwrap(), 0);
     assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
     assert_eq!(sync.get_stats().await.pending_changes, 0);

@@ -1,7 +1,9 @@
-use crate::crypto::KeyCache;
-use super::manifest::{parse_snapshot_timestamp, read_manifest_cached, sort_snapshots_newest_first};
+use super::manifest::{
+    parse_snapshot_timestamp, read_manifest_cached, sort_snapshots_newest_first,
+};
 use crate::config::Config;
 use crate::core::types::FileMetadata;
+use crate::crypto::KeyCache;
 use crate::storage::{LockKind, RepoLock, Storage};
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
@@ -94,7 +96,9 @@ pub async fn perform_prune_by_age(
     apply_prune_deletion(config, &to_delete).await
 }
 
-async fn list_snapshots(storage: &dyn Storage) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+async fn list_snapshots(
+    storage: &dyn Storage,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     let mut snapshots = storage.list("snapshots").await?;
     snapshots.retain(|s| s.ends_with(".toml"));
     Ok(snapshots)
@@ -216,7 +220,10 @@ mod tests {
     use crate::storage::LocalStorage;
 
     fn snaps(names: &[&str]) -> Vec<String> {
-        names.iter().map(|n| format!("snapshots/{}.toml", n)).collect()
+        names
+            .iter()
+            .map(|n| format!("snapshots/{}.toml", n))
+            .collect()
     }
 
     #[test]
@@ -275,19 +282,34 @@ mod tests {
         let drop_hash = "b".repeat(64);
         let mk = |h: &str| {
             let mut m = HashMap::new();
-            m.insert(PathBuf::from("f"), FileMetadata::new(h.to_string(), false, false));
+            m.insert(
+                PathBuf::from("f"),
+                FileMetadata::new(h.to_string(), false, false),
+            );
             toml::to_string(&m).unwrap()
         };
         storage
-            .write("snapshots/2026-01-01T000000Z.toml", mk(&drop_hash).as_bytes())
+            .write(
+                "snapshots/2026-01-01T000000Z.toml",
+                mk(&drop_hash).as_bytes(),
+            )
             .await
             .unwrap();
         storage
-            .write("snapshots/2026-01-02T000000Z.toml", mk(&keep_hash).as_bytes())
+            .write(
+                "snapshots/2026-01-02T000000Z.toml",
+                mk(&keep_hash).as_bytes(),
+            )
             .await
             .unwrap();
-        storage.write(&format!("data/clear/{}", keep_hash), b"k").await.unwrap();
-        storage.write(&format!("data/clear/{}", drop_hash), b"d").await.unwrap();
+        storage
+            .write(&format!("data/clear/{}", keep_hash), b"k")
+            .await
+            .unwrap();
+        storage
+            .write(&format!("data/clear/{}", drop_hash), b"d")
+            .await
+            .unwrap();
 
         prune_with_storage(
             storage.clone(),
@@ -297,9 +319,24 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!storage.exists("snapshots/2026-01-01T000000Z.toml").await.unwrap());
-        assert!(storage.exists(&format!("data/clear/{}", keep_hash)).await.unwrap());
-        assert!(!storage.exists(&format!("data/clear/{}", drop_hash)).await.unwrap());
+        assert!(
+            !storage
+                .exists("snapshots/2026-01-01T000000Z.toml")
+                .await
+                .unwrap()
+        );
+        assert!(
+            storage
+                .exists(&format!("data/clear/{}", keep_hash))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .exists(&format!("data/clear/{}", drop_hash))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -309,9 +346,16 @@ mod tests {
         let backup = RepoLock::acquire(storage.clone(), LockKind::Shared, "backup")
             .await
             .unwrap();
-        assert!(prune_with_storage(storage.clone(), None, &[]).await.is_err());
+        assert!(
+            prune_with_storage(storage.clone(), None, &[])
+                .await
+                .is_err()
+        );
         backup.release().await.unwrap();
         let prune = RepoLock::acquire(storage.clone(), LockKind::Exclusive, "prune").await;
-        assert!(prune.is_ok(), "lock must be free once the backup released it");
+        assert!(
+            prune.is_ok(),
+            "lock must be free once the backup released it"
+        );
     }
 }

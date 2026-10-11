@@ -548,7 +548,8 @@ mod tests {
         let storage = LocalStorage::new(dir.path().to_str().unwrap());
         storage.write("snapshots/a.toml", b"x").await.unwrap();
         std::fs::write(
-            dir.path().join(format!("snapshots/.a.toml{}123", TMP_MARKER)),
+            dir.path()
+                .join(format!("snapshots/.a.toml{}123", TMP_MARKER)),
             b"",
         )
         .unwrap();

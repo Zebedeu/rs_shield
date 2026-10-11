@@ -119,11 +119,7 @@ impl SnapshotCommand {
                 rsb_sdk::server::routes::check_fido2_auth()
                     .await
                     .map_err(|e| anyhow!("{}", e))?;
-                if id.is_empty()
-                    || id.contains('/')
-                    || id.contains('\\')
-                    || id.contains("..")
-                {
+                if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
                     return Err(anyhow!("Invalid snapshot id: {}", id));
                 }
                 let dest_path = self.resolve_destination_path(config, backup)?;

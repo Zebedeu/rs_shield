@@ -237,7 +237,9 @@ pub fn resolve_encryption_key(
             return Some(k);
         }
     }
-    config.and_then(|c| c.encryption_key.clone()).filter(|k| !k.is_empty())
+    config
+        .and_then(|c| c.encryption_key.clone())
+        .filter(|k| !k.is_empty())
 }
 
 /// Nível de compressão máximo suportado pelo zstd.
@@ -330,7 +332,10 @@ pub fn create_profile_with_options(
             eprintln!("⚠️ Password provided without --encrypt; it will be ignored.");
         } else {
             match store_encryption_key_in_keyring(name, pwd) {
-                Ok(()) => println!("🔐 Encryption key stored in OS keyring for profile '{}'", name),
+                Ok(()) => println!(
+                    "🔐 Encryption key stored in OS keyring for profile '{}'",
+                    name
+                ),
                 Err(e) => eprintln!(
                     "⚠️ {} — the key was NOT saved. Provide it at backup time via {} or the interactive prompt.",
                     e, ENCRYPTION_KEY_ENV

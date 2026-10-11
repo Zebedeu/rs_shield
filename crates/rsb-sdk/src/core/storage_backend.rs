@@ -69,7 +69,10 @@ pub async fn get_storage(config: &Config) -> Result<Arc<dyn Storage>, String> {
                 }
                 Err(e) => {
                     error!("❌ Failed to load S3 credentials: {}", e);
-                    Err(format!("S3 bucket '{}' is configured but credentials are unavailable: {}", bucket, e))
+                    Err(format!(
+                        "S3 bucket '{}' is configured but credentials are unavailable: {}",
+                        bucket, e
+                    ))
                 }
             }
         }

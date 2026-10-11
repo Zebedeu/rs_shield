@@ -18,7 +18,9 @@ fn build_smtp_transport(config: &EmailConfig) -> Result<SmtpTransport, Box<dyn s
             .build())
     } else {
         if !config.sender_password.is_empty() {
-            error!("❌ Refusing to send SMTP credentials over a plaintext connection (use_tls=false)");
+            error!(
+                "❌ Refusing to send SMTP credentials over a plaintext connection (use_tls=false)"
+            );
             return Err(
                 "Refusing to send SMTP credentials without TLS. Enable use_tls or remove the password for unauthenticated relay."
                     .into(),

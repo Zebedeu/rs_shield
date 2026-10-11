@@ -24,7 +24,10 @@ fn is_profile_candidate(path: &Path) -> bool {
         return false;
     }
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if NON_PROFILE_TOML.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+    if NON_PROFILE_TOML
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(name))
+    {
         return false;
     }
     fs::read_to_string(path)

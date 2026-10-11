@@ -105,7 +105,7 @@ impl Fido2Command {
                     fido2_web::ServerMode::Register,
                 )
                 .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             }
 
             Self::Authenticate { .. } => {
