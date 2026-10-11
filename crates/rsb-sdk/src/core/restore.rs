@@ -387,18 +387,9 @@ async fn restore_entry(
             })
             .collect(),
         None => {
+            // No HEAD first: a missing object is reported by the GET
+            // (see `MissingObject`), which saves one round trip per file.
             let data_path = format!("data/{}/{}", kind, metadata.hash);
-            match storage.exists(&data_path).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    // 🐛 Fix: More informative error about missing data
-                    return Err(format!(
-                        "❌ Missing data for file: {}\n   This file is referenced in the backup metadata but the data file is missing.\n   Your backup may be incomplete or corrupted.",
-                        rel_path.display()
-                    ));
-                }
-                Err(e) => return Err(format!("Failed to restore {}: {}", rel_path.display(), e)),
-            }
             vec![BlobRef {
                 path: data_path,
                 object_id: metadata.hash.as_str(),
@@ -422,6 +413,13 @@ async fn restore_entry(
     )
     .await
     .map_err(|e| {
+        if metadata.chunks.is_none() && MissingObject::is(&e) {
+            // 🐛 Fix: More informative error about missing data
+            return format!(
+                "❌ Missing data for file: {}\n   This file is referenced in the backup metadata but the data file is missing.\n   Your backup may be incomplete or corrupted.",
+                rel_path.display()
+            );
+        }
         let what = if metadata.chunks.is_some() {
             "multipart "
         } else {
@@ -798,7 +796,7 @@ async fn decode_encrypted_blob(
             return push_whole(&plain, compressed, outbuf, sink).await;
         }
         Some(whole) => Box::pin(std::io::Cursor::new(whole)),
-        None => storage.read_stream(&blob.path).await?,
+        None => open_blob(storage, &blob.path).await?,
     };
     let mut magic = [0u8; 8];
     let got = read_up_to(&mut reader, &mut magic).await?;
@@ -842,6 +840,36 @@ async fn decode_encrypted_blob(
     // Decrypted in place: one copy of the blob in memory.
     let plain = key.decrypt_owned(whole)?;
     push_whole(&plain, compressed, outbuf, sink).await
+}
+
+/// A data object referenced by the manifest does not exist in storage.
+#[derive(Debug)]
+struct MissingObject(String);
+
+impl std::fmt::Display for MissingObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "object {} is missing from the repository", self.0)
+    }
+}
+
+impl std::error::Error for MissingObject {}
+
+impl MissingObject {
+    fn is(e: &io::Error) -> bool {
+        e.kind() == ErrorKind::NotFound && e.get_ref().is_some_and(|i| i.is::<MissingObject>())
+    }
+}
+
+/// Opens a data object for reading; a missing object is reported as
+/// [`MissingObject`].
+async fn open_blob(storage: &dyn Storage, path: &str) -> io::Result<BlobReader> {
+    storage.read_stream(path).await.map_err(|e| {
+        if e.kind() == ErrorKind::NotFound {
+            io::Error::new(ErrorKind::NotFound, MissingObject(path.to_string()))
+        } else {
+            e
+        }
+    })
 }
 
 /// Decodes an in-memory payload into `sink`.
@@ -1023,7 +1051,7 @@ async fn restore_blobs(
                         };
                         let mut src: BlobReader = match data {
                             Some(d) => Box::pin(std::io::Cursor::new(d)),
-                            None => storage.read_stream(&blob.path).await?,
+                            None => open_blob(storage, &blob.path).await?,
                         };
                         decode_into(&mut src, compressed, &mut inbuf, &mut outbuf, &mut sink)
                             .await?;
@@ -1425,6 +1453,31 @@ mod tests {
         // Entries 0..=4 were handed out before the cancellation was seen.
         assert_eq!(report.files_processed + report.files_with_errors, 5);
         assert_eq!(report.total_files, 60);
+    }
+
+    #[tokio::test]
+    async fn missing_object_is_reported_without_a_head_per_file() {
+        use crate::storage::InstrumentedStorage;
+        let (repo, local) = repo_with(&[("a.txt", b"alpha"), ("b.txt", b"bravo")], false).await;
+        let h = hash_file_content(b"bravo").unwrap();
+        std::fs::remove_file(repo.path().join("data/clear").join(h)).unwrap();
+        let storage = InstrumentedStorage::new(Arc::new(local));
+        let out = tempfile::tempdir().unwrap();
+        let report = restore_from_storage(&storage, RestoreOptions::new(out.path()))
+            .await
+            .unwrap();
+        assert_eq!(report.files_processed, 1);
+        assert_eq!(report.files_with_errors, 1);
+        assert!(
+            report.errors[0].contains("Missing data for file: b.txt"),
+            "{:?}",
+            report.errors
+        );
+        assert!(!out.path().join("b.txt").exists());
+        // One GET per file and no HEAD per file.
+        let c = storage.counts();
+        assert_eq!(c.get, 2 + 1, "{}", c); // 2 objects + the manifest
+        assert_eq!(c.head, 1, "{}", c); // the manifest size check
     }
 
     #[test]
