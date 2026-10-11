@@ -104,6 +104,103 @@ Observations:
   200 changed files), and every backup waits for the resource monitor's
   4 s sleep before it returns (the 4.2 s floor of the incremental runs).
 
+## After phase 4
+
+Same machine, build and fixtures (`perf_probe`, full profile). Backups
+now also create `meta/repo-id` (1 extra PUT on the first backup, 2 GETs and
+1 LIST per backup to open the dedup index).
+
+| Fixture | Op | Mode | Storage | Wall (s) before → after | MiB/s after | Peak RSS (MiB) before → after | Storage calls after (before) |
+|---|---|---|---|---:|---:|---:|---|
+| small | backup | clear | local | 148.32 → 14.96 | 5.2 | 50 → 62 | PUT 20 003 / HEAD 20 001 (same) |
+| small | backup | enc | local | 144.73 → 13.31 | 5.9 | 98 → 98 | PUT 20 005 / HEAD 20 002 (same) |
+| small | restore | clear | local | 223.17 → 9.47 | 8.3 | 93 → 93 | GET 20 001 / **HEAD 1** (HEAD 20 001) |
+| small | restore | enc | local | 213.94 → 9.91 | 7.9 | 162 → 160 | GET 20 002 / **HEAD 1** (HEAD 20 001) |
+| large | backup | clear | local | 4.03 → 2.00 | 512.8 | **433 → 107** | PUT 35 / HEAD 33 (same) |
+| large | backup | enc | local | 4.54 → 3.12 | 328.5 | **246 → 146** | PUT 37 / HEAD 34 (same) |
+| large | restore | clear | local | 2.57 → 0.97 | 1050.3 | 19 → 214 | GET 33 / HEAD 1 (same) |
+| large | restore | enc | local | 3.48 → 1.09 | 936.0 | 82 → 242 | GET 34 / HEAD 1 (same) |
+| incr (1%) | backup | clear | local | 4.26 → 0.71 | | 101 → 103 | PUT 202 / **HEAD 394** (HEAD 20 002) |
+| incr (1%) | backup | enc | local | 4.38 → 0.72 | | 167 → 166 | PUT 202 / **HEAD 401** (HEAD 20 002) |
+| small-lat | backup | clear | latency | 16.21 → 6.80 | 1.1 | 18 → 22 | PUT 2 003 / HEAD 2 001 (same) |
+| small-lat | backup | enc | latency | 16.66 → 7.00 | 1.1 | 93 → 97 | PUT 2 005 / HEAD 2 002 (same) |
+| small-lat | restore | clear | latency | 110.77 → 4.44 | 1.8 | 18 → 36 | GET 2 001 / **HEAD 1** (HEAD 2 001) |
+| small-lat | restore | enc | latency | 111.86 → 4.32 | 1.8 | 87 → 181 | GET 2 002 / **HEAD 1** (HEAD 2 001) |
+| large-lat | backup | clear | latency | 4.17 → 2.29 | 447.7 | **386 → 160** | PUT 35 / HEAD 33 (same) |
+| large-lat | backup | enc | latency | 8.68 → 2.56 | 400.8 | **253 → 148** | PUT 37 / HEAD 34 (same) |
+| large-lat | restore | clear | latency | 3.85 → 0.78 | 1317.9 | 17 → 221 | GET 33 / HEAD 1 (same) |
+| large-lat | restore | enc | latency | 3.73 → 0.92 | 1117.9 | 83 → 246 | GET 34 / HEAD 1 (same) |
+| incr-lat (1%) | backup | clear | latency | 4.23 → 0.47 | | 22 → 29 | PUT 22 / **HEAD 40** (HEAD 2 002) |
+| incr-lat (1%) | backup | enc | latency | 4.37 → 0.56 | | 89 → 96 | PUT 22 / **HEAD 53** (HEAD 2 002) |
+
+Run-to-run noise on this laptop is ±20-30% for the fsync-bound cases.
+Higher restore RSS on large files is the multipart prefetch (2 chunks
+ahead per file), always within `RESTORE_MEM_BUDGET_MIB` (512 MiB).
+
+What changed (one commit each, numbers in the commit messages):
+
+1. **Resource monitor** (`perf(backup): wake the resource monitor…`):
+   it slept 4 s and every backup joined it; now parked/unparked.
+   Unchanged 20k-file backup 4.29 s → 0.62 s.
+2. **Parallel restore** (`RestoreOptions::concurrency`, default 2 × CPUs,
+   4..=64): scoped worker threads on a multi-threaded runtime (in-task
+   concurrency otherwise), path-ordered progress and errors, cancellation
+   stops handing out files, case-colliding paths restored sequentially,
+   multipart chunks prefetched 2 ahead (never waiting for budget, so no
+   deadlock) and written in order, one directory fsync per directory at
+   the end. All per-file guarantees unchanged.
+3. **No HEAD before GET on restore**: a missing object is reported by the
+   GET with the same message. Requests per file 2 → 1.
+4. **Streaming backup**: files > 1 MiB and multipart chunks are hashed in a
+   1 MiB-buffer pass and, only if stored, streamed again through
+   zstd → (v3) → hasher → spool with the hash re-checked before upload;
+   clear objects use the spool too; classifying an existing encrypted
+   object reads its 45-byte header. Peak memory is now per worker, not
+   per file/chunk size.
+5. **Local atomic writes in one blocking task** (1 MiB copy buffer instead
+   of 8 KiB `tokio::fs` round trips).
+6. **Ordered fsync + batched directory fsync**: `F_BARRIERFSYNC` before
+   each rename on Apple (`sync_all` elsewhere), data objects written with
+   `Storage::write_deferred`, and one `Storage::sync()` (directory
+   `F_FULLFSYNC`) before the manifest. Same crash guarantees: never a
+   renamed but incomplete object/file, and a manifest never references an
+   object whose rename is not durable.
+7. **Local dedup index** (below).
+
+### Dedup index
+
+`<user cache dir>/rs-shield/dedup-index/<key>.idx` (configurable with
+`BackupOptions::dedup_index`) lists data objects this machine verified
+(HEAD or upload) for manifests it then wrote: object key, stored size,
+time of the check. A lookup answered by the index costs no request.
+
+Safety rules (correctness over speed):
+
+* keyed by `meta/repo-id` (a random id stored in the repository, created
+  on the first non-dry-run backup) **and** the storage location
+  (`Storage::cache_identity`: canonical path, S3 endpoint/region/bucket);
+  storage without an identity gets no index;
+* checksummed file; a corrupt, truncated, foreign or unknown-version file
+  is ignored (cold start, plain storage lookups);
+* discarded when `meta/epoch` changed (prune, `verify --repair`,
+  `key migrate`, `key rotate` rewrite it before deleting or rewriting
+  objects) or when a snapshot it saw no longer exists (a prune by an older
+  version);
+* an entry is trusted only if it was checked less than `max_age` ago
+  (default 24 h) and agrees with the size the caller expects; trusted hits
+  do not refresh it;
+* 1 trusted hit in `sample_one_in` (default 100, random per backup) is
+  checked anyway; any HEAD that contradicts the index distrusts it for the
+  rest of the backup, every object it answered for is checked again
+  before the manifest is written, and the files whose object is missing
+  are processed again without the index;
+* any error while opening it disables it for that backup.
+
+Residual risk, by design: an object deleted behind the repository's back
+(by hand, by a storage lifecycle rule, or by an older client's
+`verify --repair`) less than `max_age` ago and not sampled is trusted;
+`rsb verify` detects it. Set `max_age` to zero to disable trust.
+
 ## Benchmarks in CI
 
 `.github/workflows/benchmark.yml`:
