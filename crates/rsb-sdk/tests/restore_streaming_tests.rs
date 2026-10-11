@@ -1,6 +1,7 @@
 //! Streaming single-file restore: multi-MB round-trips (clear + encrypted)
 //! and corrupt blobs never touching an existing target.
 
+use rsb_sdk::RestoreOptions;
 use rsb_sdk::core::restore::restore_from_storage;
 use rsb_sdk::core::types::FileMetadata;
 use rsb_sdk::crypto::{EncryptionKey, hash_file_content};
@@ -76,13 +77,11 @@ async fn repo(
 async fn run(storage: &LocalStorage, target: &Path, key: Option<&str>, force: bool) -> ReportData {
     restore_from_storage(
         storage,
-        None,
-        target.to_path_buf(),
-        key,
-        force,
-        false,
-        None,
-        None,
+        RestoreOptions {
+            force,
+            ..RestoreOptions::new(target)
+        }
+        .with_encryption_key(key),
     )
     .await
     .unwrap()

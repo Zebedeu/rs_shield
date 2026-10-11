@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::ui::integrations_screen::IntegrationConfig;
-use rsb_sdk::CancellationToken;
 use rsb_sdk::core::{NotificationEvent, NotificationManager, NotificationPayload};
 use rsb_sdk::operation::operations_helpers::record_restore_operation;
+use rsb_sdk::{CancellationToken, RestoreOptions};
 
 use crate::ui::{
     app::AppConfig,
@@ -184,6 +184,15 @@ pub fn RestoreScreen() -> Element {
                 };
 
                 let token = cancellation_token();
+                let restore_opts = RestoreOptions {
+                    snapshot_id: snap_opt.clone(),
+                    force: true, // UI default is force
+                    versioned: false,
+                    on_progress: Some(progress_cb),
+                    cancellation_token: Some(token),
+                    ..RestoreOptions::new(rst)
+                }
+                .with_encryption_key(key_opt);
 
                 // Sem perfil nem pasta local: restaurar diretamente do bucket S3
                 // configurado no ecrã (antes estas definições eram ignoradas).
@@ -197,18 +206,9 @@ pub fn RestoreScreen() -> Element {
                         Some(s3_endpoint.clone()),
                     )
                     .map_err(|e| e.to_string())?;
-                    return rsb_sdk::core::restore::perform_restore_with_cancellation(
-                        &cfg,
-                        snap_opt.as_deref(),
-                        rst,
-                        key_opt,
-                        true,  // UI default is force
-                        false, // versioned
-                        Some(progress_cb),
-                        Some(token),
-                    )
-                    .await
-                    .map_err(|e| e.to_string());
+                    return rsb_sdk::core::restore::perform_restore(&cfg, restore_opts)
+                        .await
+                        .map_err(|e| e.to_string());
                 }
 
                 let backup_path_opt = if bkp.as_os_str().is_empty() {
@@ -217,16 +217,10 @@ pub fn RestoreScreen() -> Element {
                     Some(bkp.as_path())
                 };
 
-                rsb_sdk::restore_from_config_or_backup_with_cancellation(
+                rsb_sdk::restore_from_config_or_backup(
                     config_path_opt,
                     backup_path_opt,
-                    snap_opt.as_deref(),
-                    rst,
-                    key_opt,
-                    true,  // UI default is force
-                    false, // versioned
-                    Some(progress_cb),
-                    Some(token),
+                    restore_opts,
                 )
                 .await
                 .map_err(|e| e.to_string())

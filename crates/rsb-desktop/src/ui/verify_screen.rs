@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::ui::integrations_screen::IntegrationConfig;
 use rsb_sdk::core::{NotificationEvent, NotificationManager, NotificationPayload};
 use rsb_sdk::operation::operations_helpers::record_verify_operation;
-use rsb_sdk::{CancellationToken, config, perform_verify};
+use rsb_sdk::{CancellationToken, VerifyOptions, config, perform_verify};
 
 use crate::ui::{
     app::AppConfig,
@@ -180,9 +180,17 @@ pub fn VerifyScreen() -> Element {
                 };
 
                 let token = cancellation_token();
-                perform_verify(&cfg, None, false, is_fast, Some(progress_cb), Some(token))
-                    .await
-                    .map_err(|e| e.to_string())
+                perform_verify(
+                    &cfg,
+                    VerifyOptions {
+                        fast: is_fast,
+                        on_progress: Some(progress_cb),
+                        cancellation_token: Some(token),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())
             }
             .await;
 

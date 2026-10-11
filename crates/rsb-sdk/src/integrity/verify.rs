@@ -8,33 +8,13 @@ use crate::core::storage_backend::get_storage;
 use crate::core::types::{FileMetadata, ProgressCallback};
 use crate::crypto::{KeyCache, hash_file_content};
 use crate::integrity::checksum::checksum;
+use crate::options::VerifyOptions;
 use crate::report::ReportData;
 use crate::storage::Storage;
 use crate::{CancellationToken, Config};
 
-/// Verifies a snapshot (latest, or `snapshot_id`). Never modifies the
-/// repository; see [`perform_verify_with_repair`].
-pub async fn perform_verify(
-    config: &Config,
-    snapshot_id: Option<&str>,
-    quiet: bool,
-    fast: bool,
-    on_progress: Option<ProgressCallback>,
-    cancellation_token: Option<CancellationToken>,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
-    perform_verify_with_repair(
-        config,
-        snapshot_id,
-        quiet,
-        fast,
-        false,
-        on_progress,
-        cancellation_token,
-    )
-    .await
-}
-
-/// Verifies every object referenced by a snapshot.
+/// Verifies every object referenced by a snapshot (latest, or
+/// `options.snapshot_id`).
 ///
 /// - `fast`: only checks presence, stored size and stored hash (no
 ///   download-and-decode); cannot prove an object is corrupt.
@@ -46,21 +26,31 @@ pub async fn perform_verify(
 ///   corrupt are **deleted** so that the next backup re-uploads them (the
 ///   backup re-checks that objects it dedups against still exist). Missing
 ///   objects are reported; the next backup re-uploads them if the source
-///   file is still present.
-pub async fn perform_verify_with_repair(
+///   file is still present. Without `repair` the repository is never
+///   modified.
+///
+/// The key is `options.encryption_key`, falling back to
+/// `config.encryption_key`.
+pub async fn perform_verify(
     config: &Config,
-    snapshot_id: Option<&str>,
-    quiet: bool,
-    fast: bool,
-    repair: bool,
-    on_progress: Option<ProgressCallback>,
-    cancellation_token: Option<CancellationToken>,
+    options: VerifyOptions,
 ) -> Result<ReportData, Box<dyn std::error::Error>> {
+    let VerifyOptions {
+        snapshot_id,
+        quiet,
+        fast,
+        repair,
+        encryption_key,
+        on_progress,
+        cancellation_token,
+    } = options;
+    let snapshot_id = snapshot_id.as_deref();
     let start_time = Instant::now();
     let storage = get_storage(config).await?;
-    let key_cache = config
-        .encryption_key
-        .as_deref()
+    let key_cache = encryption_key
+        .as_ref()
+        .map(|k| k.as_str())
+        .or(config.encryption_key.as_deref())
         .map(|k| KeyCache::new(k.as_bytes()));
 
     // Reading the manifest with the key also proves the key is correct, so

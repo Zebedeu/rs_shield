@@ -1,8 +1,8 @@
-use super::cancellation::CancellationToken;
 use super::manifest::find_latest_snapshot_cached;
-use super::types::{FileMetadata, ProgressCallback};
+use super::types::FileMetadata;
 use crate::config::Config;
 use crate::crypto::KeyCache;
+use crate::options::RestoreOptions;
 use crate::report::ReportData;
 use crate::storage::{Storage, sync_dir};
 use crate::storage::{validate_content_hash, validate_storage_path};
@@ -15,42 +15,24 @@ use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info};
 
+/// Restores a snapshot of the repository described by `config`.
+///
+/// Snapshot, target, key, force/versioned, progress and cancellation are
+/// given through [`RestoreOptions`].
 pub async fn perform_restore(
     config: &Config,
-    snapshot_id: Option<&str>,
-    target_path: PathBuf,
-    encryption_key: Option<&str>,
-    force: bool,
-    versioned: bool,
-    on_progress: Option<ProgressCallback>,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
-    perform_restore_with_cancellation(
-        config,
-        snapshot_id,
-        target_path,
-        encryption_key,
-        force,
-        versioned,
-        on_progress,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn perform_restore_with_cancellation(
-    config: &Config,
-    snapshot_id: Option<&str>,
-    target_path: PathBuf,
-    encryption_key: Option<&str>,
-    force: bool,
-    versioned: bool,
-    on_progress: Option<ProgressCallback>,
-    cancellation_token: Option<CancellationToken>,
+    options: RestoreOptions,
 ) -> Result<ReportData, Box<dyn std::error::Error>> {
     let storage = super::storage_backend::get_storage(config).await?;
-    restore_from_storage(
-        &*storage,
+    restore_from_storage(&*storage, options).await
+}
+
+/// Restore implementation working on any [`Storage`] (used by tests too).
+pub async fn restore_from_storage(
+    storage: &dyn Storage,
+    options: RestoreOptions,
+) -> Result<ReportData, Box<dyn std::error::Error>> {
+    let RestoreOptions {
         snapshot_id,
         target_path,
         encryption_key,
@@ -58,22 +40,9 @@ pub async fn perform_restore_with_cancellation(
         versioned,
         on_progress,
         cancellation_token,
-    )
-    .await
-}
-
-/// Restore implementation working on any [`Storage`] (used by tests too).
-#[allow(clippy::too_many_arguments)]
-pub async fn restore_from_storage(
-    storage: &dyn Storage,
-    snapshot_id: Option<&str>,
-    target_path: PathBuf,
-    encryption_key: Option<&str>,
-    force: bool,
-    versioned: bool,
-    on_progress: Option<ProgressCallback>,
-    cancellation_token: Option<CancellationToken>,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
+    } = options;
+    let snapshot_id = snapshot_id.as_deref();
+    let encryption_key = encryption_key.as_ref().map(|k| k.as_str());
     let start_time = Instant::now();
 
     // 🐛 Fix: Validate backup structure before attempting restore
@@ -740,13 +709,10 @@ mod tests {
     async fn run(storage: &LocalStorage, target: &Path, force: bool) -> ReportData {
         restore_from_storage(
             storage,
-            None,
-            target.to_path_buf(),
-            None,
-            force,
-            false,
-            None,
-            None,
+            RestoreOptions {
+                force,
+                ..RestoreOptions::new(target)
+            },
         )
         .await
         .unwrap()

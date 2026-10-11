@@ -1,4 +1,4 @@
-use crate::operation::operations::{OperationsManager, create_operation};
+use crate::operation::operations::{NewOperation, OperationsManager, create_operation};
 
 pub fn record_backup_operation(
     status: String,
@@ -10,17 +10,17 @@ pub fn record_backup_operation(
 ) -> Result<(), String> {
     let mut manager = OperationsManager::new();
 
-    let operation = create_operation(
-        "Backup".to_string(),
+    let operation = create_operation(NewOperation {
+        operation_type: "Backup".to_string(),
         status,
         files_processed,
-        0, // files_skipped
-        0, // files_with_errors
+        files_skipped: 0,
+        files_with_errors: 0,
         duration_secs,
         backup_size,
-        Some(source),
-        Some(destination),
-    );
+        source_path: Some(source),
+        destination_path: Some(destination),
+    });
 
     manager.add_operation(operation)
 }
@@ -34,17 +34,17 @@ pub fn record_restore_operation(
 ) -> Result<(), String> {
     let mut manager = OperationsManager::new();
 
-    let operation = create_operation(
-        "Restore".to_string(),
+    let operation = create_operation(NewOperation {
+        operation_type: "Restore".to_string(),
         status,
         files_processed,
-        0,
-        0,
+        files_skipped: 0,
+        files_with_errors: 0,
         duration_secs,
-        "N/A".to_string(),
-        Some(source),
-        Some(destination),
-    );
+        backup_size: "N/A".to_string(),
+        source_path: Some(source),
+        destination_path: Some(destination),
+    });
 
     manager.add_operation(operation)
 }
@@ -58,17 +58,17 @@ pub fn record_verify_operation(
 ) -> Result<(), String> {
     let mut manager = OperationsManager::new();
 
-    let operation = create_operation(
-        "Verify".to_string(),
+    let operation = create_operation(NewOperation {
+        operation_type: "Verify".to_string(),
         status,
         files_processed,
-        0,
+        files_skipped: 0,
         files_with_errors,
         duration_secs,
-        "N/A".to_string(),
-        Some(backup_path),
-        None,
-    );
+        backup_size: "N/A".to_string(),
+        source_path: Some(backup_path),
+        destination_path: None,
+    });
 
     manager.add_operation(operation)
 }
@@ -82,17 +82,17 @@ pub fn record_prune_operation(
 ) -> Result<(), String> {
     let mut manager = OperationsManager::new();
 
-    let operation = create_operation(
-        "Prune".to_string(),
+    let operation = create_operation(NewOperation {
+        operation_type: "Prune".to_string(),
         status,
-        files_removed,
-        0,
-        0,
+        files_processed: files_removed,
+        files_skipped: 0,
+        files_with_errors: 0,
         duration_secs,
-        format!("Liberado: {}", space_freed),
-        Some(backup_path),
-        None,
-    );
+        backup_size: format!("Liberado: {}", space_freed),
+        source_path: Some(backup_path),
+        destination_path: None,
+    });
 
     manager.add_operation(operation)
 }
@@ -110,17 +110,17 @@ pub async fn record_schedule_operation(
     };
     let duration = duration_secs.unwrap_or(0);
 
-    let operation = create_operation(
-        "Schedule".to_string(),
+    let operation = create_operation(NewOperation {
+        operation_type: "Schedule".to_string(),
         status,
-        0,
-        0,
-        if error.is_some() { 1 } else { 0 },
-        duration,
-        "N/A".to_string(),
-        None,
-        None,
-    );
+        files_processed: 0,
+        files_skipped: 0,
+        files_with_errors: if error.is_some() { 1 } else { 0 },
+        duration_secs: duration,
+        backup_size: "N/A".to_string(),
+        source_path: None,
+        destination_path: None,
+    });
 
     manager.add_operation(operation)
 }
