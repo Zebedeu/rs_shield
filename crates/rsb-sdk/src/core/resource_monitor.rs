@@ -77,7 +77,10 @@ pub fn spawn_resource_monitor(
                 debug!("▶️  Resources OK → Resuming backup.");
             }
 
-            thread::sleep(Duration::from_secs(4));
+            // Parked rather than slept: stopping the monitor (`running` set
+            // to false, then `unpark`) wakes it at once instead of making
+            // every backup wait up to one full interval before it returns.
+            thread::park_timeout(Duration::from_secs(4));
         }
     });
 

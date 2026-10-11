@@ -236,6 +236,7 @@ async fn run_backup(
     let _ = manifest_updater.await;
 
     monitor_running.store(false, Ordering::Relaxed);
+    monitor_handle.thread().unpark();
     let _ = monitor_handle.join();
 
     // ====================== FINALIZE ======================
