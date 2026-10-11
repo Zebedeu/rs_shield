@@ -65,6 +65,37 @@ pub fn config_from_backup_path(
     })
 }
 
+/// Minimal config to restore straight from an S3 repository, without a
+/// profile file. Credentials are resolved by `storage_backend` (env vars,
+/// session credentials, or the encrypted credentials file) — never from here.
+pub fn config_for_s3_restore(
+    bucket: &str,
+    region: Option<String>,
+    endpoint: Option<String>,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    if bucket.trim().is_empty() {
+        return Err("S3 bucket is required for an S3 restore".into());
+    }
+    Ok(Config {
+        source_path: "direct-restore".to_string(),
+        destination_path: String::new(),
+        exclude_patterns: Vec::new(),
+        encryption_key: None,
+        encrypt_patterns: None,
+        pause_on_low_battery: None,
+        pause_on_high_cpu: None,
+        compression_level: None,
+        backup_mode: "incremental".to_string(),
+        s3_bucket: Some(bucket.trim().to_string()),
+        s3_region: region.filter(|r| !r.trim().is_empty()),
+        s3_endpoint: endpoint.filter(|e| !e.trim().is_empty()),
+        s3: None,
+        s3_buckets: None,
+        max_threads: None,
+        channel_buffer_size: 8192,
+    })
+}
+
 /// Unified restore function supporting both config files and direct backup paths
 ///
 /// This function provides a single entry point for restore operations that works

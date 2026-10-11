@@ -57,7 +57,7 @@ pub async fn perform_verify_with_repair(
     cancellation_token: Option<CancellationToken>,
 ) -> Result<ReportData, Box<dyn std::error::Error>> {
     let start_time = Instant::now();
-    let storage = get_storage(config).await;
+    let storage = get_storage(config).await?;
     let key_cache = config
         .encryption_key
         .as_deref()

@@ -64,7 +64,7 @@ pub async fn perform_backup_with_cancellation(
         return Err(format!("Source path is not a directory: {}", source.display()).into());
     }
 
-    let storage = crate::core::storage_backend::get_storage(config).await;
+    let storage = crate::core::storage_backend::get_storage(config).await?;
 
     // ====================== REPOSITORY LOCK ======================
     // Shared lock: concurrent backups are fine, but prune (exclusive) must

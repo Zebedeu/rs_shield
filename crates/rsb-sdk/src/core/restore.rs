@@ -48,7 +48,7 @@ pub async fn perform_restore_with_cancellation(
     on_progress: Option<ProgressCallback>,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<ReportData, Box<dyn std::error::Error>> {
-    let storage = super::storage_backend::get_storage(config).await;
+    let storage = super::storage_backend::get_storage(config).await?;
     restore_from_storage(
         &*storage,
         snapshot_id,

@@ -28,7 +28,7 @@ pub async fn plan_prune_by_count(
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     // Fail before touching storage: keep_last == 0 would delete everything.
     check_keep_last(keep_last)?;
-    let storage = super::storage_backend::get_storage(config).await;
+    let storage = super::storage_backend::get_storage(config).await?;
     let snapshots = list_snapshots(&*storage).await?;
     select_by_count(snapshots, keep_last)
 }
@@ -81,7 +81,7 @@ pub async fn perform_prune_by_age(
     config: &Config,
     retention_days: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let storage = super::storage_backend::get_storage(config).await;
+    let storage = super::storage_backend::get_storage(config).await?;
     let snapshots = list_snapshots(&*storage).await?;
     let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
     // Snapshot names are `%Y-%m-%dT%H%M%S[.mmm]Z` (not RFC3339); the shared
@@ -104,7 +104,7 @@ async fn apply_prune_deletion(
     config: &Config,
     delete_snapshots: &[String],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let storage = super::storage_backend::get_storage(config).await;
+    let storage = super::storage_backend::get_storage(config).await?;
     prune_with_storage(storage, config.encryption_key.as_deref(), delete_snapshots).await
 }
 

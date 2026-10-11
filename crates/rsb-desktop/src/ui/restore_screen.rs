@@ -133,6 +133,23 @@ pub fn RestoreScreen() -> Element {
             let rst = restore_to();
             let snap = snapshot_id();
             let key_val = key();
+            let s3_bucket = app_config.s3_bucket();
+            let s3_region = app_config.s3_region();
+            let s3_endpoint = app_config.s3_endpoint();
+            // Credenciais escritas no formulário ficam só em memória (sessão).
+            let s3_access_key = app_config.s3_access_key();
+            let s3_secret_key = app_config.s3_secret_key();
+            if !s3_access_key.is_empty() && !s3_secret_key.is_empty() {
+                rsb_sdk::core::storage_backend::set_session_s3_credentials(
+                    &s3_access_key,
+                    &s3_secret_key,
+                );
+            }
+            let source_label = if bkp.as_os_str().is_empty() && !s3_bucket.trim().is_empty() {
+                format!("s3://{}", s3_bucket.trim())
+            } else {
+                bkp.to_string_lossy().to_string()
+            };
             let rst_for_record = rst.clone();
 
             let progress_cb = Arc::new(move |current: usize, total: usize, msg: String| {
@@ -158,10 +175,6 @@ pub fn RestoreScreen() -> Element {
                     return Err("❌ Please select a restore target.".to_string());
                 }
 
-                if bkp.as_os_str().is_empty() {
-                    return Err(texts.define_backup_or_s3.to_string());
-                }
-
                 // Use portable restore function to support both config and direct backup paths
                 let profile_path_str = profile_path.read();
                 let config_path_opt = if profile_path_str.as_os_str().is_empty() {
@@ -170,13 +183,40 @@ pub fn RestoreScreen() -> Element {
                     Some(profile_path_str.as_path())
                 };
 
+                let token = cancellation_token();
+
+                // Sem perfil nem pasta local: restaurar diretamente do bucket S3
+                // configurado no ecrã (antes estas definições eram ignoradas).
+                if config_path_opt.is_none() && bkp.as_os_str().is_empty() {
+                    if s3_bucket.trim().is_empty() {
+                        return Err(texts.define_backup_or_s3.to_string());
+                    }
+                    let cfg = rsb_sdk::portable_restore::config_for_s3_restore(
+                        &s3_bucket,
+                        Some(s3_region.clone()),
+                        Some(s3_endpoint.clone()),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    return rsb_sdk::core::restore::perform_restore_with_cancellation(
+                        &cfg,
+                        snap_opt.as_deref(),
+                        rst,
+                        key_opt,
+                        true,  // UI default is force
+                        false, // versioned
+                        Some(progress_cb),
+                        Some(token),
+                    )
+                    .await
+                    .map_err(|e| e.to_string());
+                }
+
                 let backup_path_opt = if bkp.as_os_str().is_empty() {
                     None
                 } else {
                     Some(bkp.as_path())
                 };
 
-                let token = cancellation_token();
                 rsb_sdk::restore_from_config_or_backup_with_cancellation(
                     config_path_opt,
                     backup_path_opt,
@@ -199,7 +239,7 @@ pub fn RestoreScreen() -> Element {
                         report.status.clone(),
                         report.files_processed,
                         report.duration.as_secs(),
-                        bkp.to_string_lossy().to_string(),
+                        source_label.clone(),
                         rst_for_record.to_string_lossy().to_string(),
                     );
 
@@ -226,7 +266,7 @@ pub fn RestoreScreen() -> Element {
                             ),
                             details: Some(format!(
                                 "Origem: {}\nDestino: {}",
-                                bkp.to_string_lossy(),
+                                source_label,
                                 rst_for_record.to_string_lossy()
                             )),
                             timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -258,7 +298,7 @@ pub fn RestoreScreen() -> Element {
                         "Falha".to_string(),
                         0,
                         0,
-                        bkp.to_string_lossy().to_string(),
+                        source_label.clone(),
                         rst_for_record.to_string_lossy().to_string(),
                     );
 
@@ -281,7 +321,7 @@ pub fn RestoreScreen() -> Element {
                             message: format!("Erro: {}", e),
                             details: Some(format!(
                                 "Origem: {}\nDestino: {}",
-                                bkp.to_string_lossy(),
+                                source_label,
                                 rst_for_record.to_string_lossy()
                             )),
                             timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),

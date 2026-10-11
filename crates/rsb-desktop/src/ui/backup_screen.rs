@@ -136,6 +136,14 @@ pub fn BackupScreen() -> Element {
         let s3_endpoint = app_config.s3_endpoint();
         let s3_access_key = app_config.s3_access_key();
         let s3_secret_key = app_config.s3_secret_key();
+        // O SDK ignora segredos vindos do Config (seriam gravados em TOML);
+        // as credenciais do formulário seguem só em memória, por sessão.
+        if !s3_access_key.is_empty() && !s3_secret_key.is_empty() {
+            rsb_sdk::core::storage_backend::set_session_s3_credentials(
+                &s3_access_key,
+                &s3_secret_key,
+            );
+        }
 
         let s3_bucket_opt = if s3_bucket.is_empty() {
             None

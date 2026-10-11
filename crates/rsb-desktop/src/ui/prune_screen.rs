@@ -88,6 +88,13 @@ pub fn PruneScreen() -> Element {
         let s3_endpoint = app_config.s3_endpoint();
         let s3_access_key = app_config.s3_access_key();
         let s3_secret_key = app_config.s3_secret_key();
+        // Credenciais do formulário: só em memória (o SDK ignora segredos no Config).
+        if !s3_access_key.is_empty() && !s3_secret_key.is_empty() {
+            rsb_sdk::core::storage_backend::set_session_s3_credentials(
+                &s3_access_key,
+                &s3_secret_key,
+            );
+        }
 
         let s3_bucket_opt = if s3_bucket.is_empty() {
             None
