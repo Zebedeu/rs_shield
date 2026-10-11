@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! header (45 bytes) = "RSBENCv3" (8) | flags u8 (1) | blob salt (32) | chunk size u32 BE (4)
+//!                     with flag 0x01 (key id): blob salt = key id (4) | random (28)
 //! body              = chunk_0 | chunk_1 | ... | chunk_n      (n >= 0, chunk_n is the final chunk)
 //! chunk_i           = AES-256-GCM(K_blob, nonce_i, AAD, plaintext_i) = ciphertext_i | tag (16)
 //! ```
@@ -60,11 +61,42 @@ pub const V3_MIN_CHUNK_SIZE: u32 = 16;
 pub const V3_MAX_CHUNK_SIZE: u32 = 16 * 1024 * 1024;
 /// HKDF `info` for per-blob keys.
 pub const V3_HKDF_INFO: &[u8] = b"rsb v3 blob";
-/// Flags understood by this version (none defined yet; must be 0).
-const V3_KNOWN_FLAGS: u8 = 0;
+/// Header flag: the first [`KEY_ID_LEN`] bytes of the blob salt are the
+/// key id of the DEK that encrypted the blob (see [`key_id_of`]). Blobs
+/// without it were written before key ids existed and belong to the
+/// repository's primary key.
+pub const V3_FLAG_KEY_ID: u8 = 0x01;
+/// Flags understood by this version.
+const V3_KNOWN_FLAGS: u8 = V3_FLAG_KEY_ID;
+/// Length of a key id.
+pub const KEY_ID_LEN: usize = 4;
+/// Short identifier of a DEK (see [`key_id_of`]).
+pub type KeyId = [u8; KEY_ID_LEN];
+/// HKDF `info` of the key id.
+const KEY_ID_INFO: &[u8] = b"rsb v3 key id";
 
 /// Length of a 32-byte data encryption key.
 pub const DEK_LEN: usize = 32;
+
+/// Key id of a DEK: the first 4 bytes of
+/// `HKDF-SHA256(IKM = DEK, salt = "", info = "rsb v3 key id")`. A PRF output,
+/// so it reveals nothing useful about the DEK; it only tells readers which
+/// DEK of the key file opens a blob.
+pub fn key_id_of(dek: &[u8; DEK_LEN]) -> KeyId {
+    struct Len;
+    impl hkdf::KeyType for Len {
+        fn len(&self) -> usize {
+            KEY_ID_LEN
+        }
+    }
+    let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(dek);
+    let mut out = [0u8; KEY_ID_LEN];
+    // Cannot fail: the output length is far below 255 * 32.
+    if let Ok(okm) = prk.expand(&[KEY_ID_INFO], Len) {
+        let _ = okm.fill(&mut out);
+    }
+    out
+}
 
 /// Stored size of a v3 blob holding `payload_len` bytes with `chunk_size`.
 pub fn v3_blob_len(payload_len: u64, chunk_size: u32) -> u64 {
@@ -108,6 +140,16 @@ pub struct V3Header {
 }
 
 impl V3Header {
+    /// Key id carried by the header ([`V3_FLAG_KEY_ID`]), if any.
+    pub fn key_id(&self) -> Option<KeyId> {
+        if self.flags & V3_FLAG_KEY_ID == 0 {
+            return None;
+        }
+        let mut id = [0u8; KEY_ID_LEN];
+        id.copy_from_slice(&self.salt[..KEY_ID_LEN]);
+        Some(id)
+    }
+
     pub fn to_bytes(&self) -> [u8; V3_HEADER_LEN] {
         let mut h = [0u8; V3_HEADER_LEN];
         h[..8].copy_from_slice(BLOB_MAGIC_V3);
@@ -202,25 +244,51 @@ pub struct StreamEncryptor<W: Write> {
 
 impl<W: Write> StreamEncryptor<W> {
     /// New encryptor with a random blob salt and the default chunk size.
-    pub fn new(dek: &[u8; DEK_LEN], object_id: &str, inner: W) -> io::Result<Self> {
+    /// With `key_id`, the header carries [`V3_FLAG_KEY_ID`] and the first
+    /// [`KEY_ID_LEN`] salt bytes are the key id (28 random bytes remain).
+    pub fn new(
+        dek: &[u8; DEK_LEN],
+        key_id: Option<KeyId>,
+        object_id: &str,
+        inner: W,
+    ) -> io::Result<Self> {
         let mut salt = [0u8; V3_SALT_LEN];
         SystemRandom::new()
             .fill(&mut salt)
             .map_err(|_| io::Error::other("Failed to generate blob salt"))?;
-        Self::with_params(dek, salt, V3_DEFAULT_CHUNK_SIZE, object_id, inner)
+        let flags = match key_id {
+            Some(id) => {
+                salt[..KEY_ID_LEN].copy_from_slice(&id);
+                V3_FLAG_KEY_ID
+            }
+            None => 0,
+        };
+        Self::build(dek, flags, salt, V3_DEFAULT_CHUNK_SIZE, object_id, inner)
     }
 
     /// Deterministic constructor. A salt must never be reused with the same
     /// DEK for different content: only tests use this directly.
+    #[cfg(test)]
     pub(crate) fn with_params(
         dek: &[u8; DEK_LEN],
+        salt: [u8; V3_SALT_LEN],
+        chunk_size: u32,
+        object_id: &str,
+        inner: W,
+    ) -> io::Result<Self> {
+        Self::build(dek, 0, salt, chunk_size, object_id, inner)
+    }
+
+    fn build(
+        dek: &[u8; DEK_LEN],
+        flags: u8,
         salt: [u8; V3_SALT_LEN],
         chunk_size: u32,
         object_id: &str,
         mut inner: W,
     ) -> io::Result<Self> {
         let header = V3Header {
-            flags: 0,
+            flags,
             salt,
             chunk_size,
         };
@@ -284,9 +352,14 @@ impl<W: Write> Write for StreamEncryptor<W> {
 }
 
 /// One-shot v3 encryption of an in-memory payload.
-pub fn encrypt_v3(dek: &[u8; DEK_LEN], object_id: &str, data: &[u8]) -> io::Result<Vec<u8>> {
+pub fn encrypt_v3(
+    dek: &[u8; DEK_LEN],
+    key_id: Option<KeyId>,
+    object_id: &str,
+    data: &[u8],
+) -> io::Result<Vec<u8>> {
     let cap = v3_blob_len(data.len() as u64, V3_DEFAULT_CHUNK_SIZE) as usize;
-    let mut enc = StreamEncryptor::new(dek, object_id, Vec::with_capacity(cap))?;
+    let mut enc = StreamEncryptor::new(dek, key_id, object_id, Vec::with_capacity(cap))?;
     enc.write_all(data)?;
     enc.finish()
 }
@@ -374,8 +447,22 @@ impl<R: AsyncRead + Unpin> StreamDecryptor<R> {
         dek: &[u8; DEK_LEN],
         object_id: &str,
         prefix: &[u8],
-        mut reader: R,
+        reader: R,
     ) -> io::Result<Self> {
+        Self::with_resolver(|_| Ok(dek), object_id, prefix, reader).await
+    }
+
+    /// Like [`StreamDecryptor::new`], but picks the DEK from the parsed
+    /// header (e.g. by its key id) with `resolve`.
+    pub async fn with_resolver<'k, F>(
+        resolve: F,
+        object_id: &str,
+        prefix: &[u8],
+        mut reader: R,
+    ) -> io::Result<Self>
+    where
+        F: FnOnce(&V3Header) -> io::Result<&'k [u8; DEK_LEN]>,
+    {
         if prefix.len() > V3_HEADER_LEN {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -389,6 +476,7 @@ impl<R: AsyncRead + Unpin> StreamDecryptor<R> {
             return Err(malformed("truncated v3 header"));
         }
         let header = V3Header::parse(&header_bytes)?;
+        let dek = resolve(&header)?;
         let ct_chunk = header.chunk_size as usize + V3_TAG_LEN;
         Ok(Self {
             reader,
@@ -571,7 +659,7 @@ mod tests {
         let cs = V3_DEFAULT_CHUNK_SIZE as usize;
         for len in [0, 1, cs, cs + 1, 3 * cs + 17] {
             let pt: Vec<u8> = (0..len).map(|i| (i % 253) as u8).collect();
-            let blob = encrypt_v3(&DEK, OID, &pt).unwrap();
+            let blob = encrypt_v3(&DEK, None, OID, &pt).unwrap();
             assert_eq!(
                 blob.len() as u64,
                 v3_blob_len(len as u64, V3_DEFAULT_CHUNK_SIZE)
@@ -696,8 +784,45 @@ mod tests {
 
     #[test]
     fn distinct_salts_give_distinct_blobs() {
-        let a = encrypt_v3(&DEK, OID, b"same").unwrap();
-        let b = encrypt_v3(&DEK, OID, b"same").unwrap();
+        let a = encrypt_v3(&DEK, None, OID, b"same").unwrap();
+        let b = encrypt_v3(&DEK, None, OID, b"same").unwrap();
         assert_ne!(a, b);
+    }
+
+    #[tokio::test]
+    async fn key_id_flag_roundtrips_and_is_authenticated() {
+        let id = key_id_of(&DEK);
+        assert_ne!(id, key_id_of(&[0x12; 32]));
+        let blob = encrypt_v3(&DEK, Some(id), OID, b"payload").unwrap();
+        let h = V3Header::parse(&blob).unwrap();
+        assert_eq!(h.flags, V3_FLAG_KEY_ID);
+        assert_eq!(h.key_id(), Some(id));
+        // Same length as an unflagged blob: sizes do not depend on the id.
+        assert_eq!(blob.len() as u64, v3_blob_len(7, V3_DEFAULT_CHUNK_SIZE));
+        assert_eq!(decrypt_v3(&DEK, OID, &blob).unwrap(), b"payload");
+        assert_eq!(stream_dec(&blob, OID).await.unwrap(), b"payload");
+        // Unflagged blobs (written before key ids) carry no id.
+        let old = enc(b"payload", 16, OID);
+        assert_eq!(V3Header::parse(&old).unwrap().key_id(), None);
+        // Clearing the flag or changing the id breaks authentication.
+        let mut b = blob.clone();
+        b[8] = 0;
+        assert_eq!(
+            kind(&decrypt_v3(&DEK, OID, &b).unwrap_err()),
+            Some(CryptoError::AuthenticationFailed)
+        );
+        let mut b = blob.clone();
+        b[9] ^= 1;
+        assert_eq!(
+            kind(&decrypt_v3(&DEK, OID, &b).unwrap_err()),
+            Some(CryptoError::AuthenticationFailed)
+        );
+        // Unknown flags are still rejected.
+        let mut b = blob;
+        b[8] = 0x02;
+        assert_eq!(
+            kind(&decrypt_v3(&DEK, OID, &b).unwrap_err()),
+            Some(CryptoError::Malformed)
+        );
     }
 }

@@ -18,9 +18,11 @@
 //     "RSBENCv3" | flags | blob salt(32) | chunk size u32 BE | AEAD chunks...
 //   Encrypted with a per-blob HKDF subkey of the repository DEK stored
 //   (wrapped with Argon2id) in `keys/repo.key`. Readers detect v3 by its
-//   magic before trying v2/legacy.
+//   magic before trying v2/legacy. Flag 0x01 puts the DEK's key id in the
+//   first 4 salt bytes (key rotation).
 
 pub mod keyfile;
+
 pub mod stream;
 
 pub use keyfile::{KdfParams, REPO_KEY_PATH, RepoKey, RepoKeyFile};
@@ -347,6 +349,16 @@ pub struct KeyCache {
     derivations: std::sync::atomic::AtomicUsize,
     derivation_limit: usize,
     repo_key: Option<Arc<RepoKey>>,
+    /// False for a v3-only context: v1/v2 blobs are refused.
+    legacy_allowed: bool,
+}
+
+/// Error for a v1/v2 blob met by a v3-only [`KeyCache`].
+fn legacy_refused() -> io::Error {
+    io::Error::new(
+        ErrorKind::InvalidData,
+        "v1/v2 (pre-v3) blob found where only v3 is accepted (run `rsb key migrate`)",
+    )
 }
 
 /// Derived keys indexed by (salt, PBKDF2 iterations).
@@ -362,6 +374,20 @@ impl KeyCache {
             derivations: Default::default(),
             derivation_limit: MAX_KEY_DERIVATIONS,
             repo_key: None,
+            legacy_allowed: true,
+        }
+    }
+
+    /// Cache that opens v3 blobs with `repo_key` only and refuses every
+    /// v1/v2 blob (used to prove a migration or rotation is complete).
+    pub fn v3_only(repo_key: Arc<RepoKey>) -> Self {
+        KeyCache {
+            password: Zeroizing::new(Vec::new()),
+            keys: Mutex::new(HashMap::new()),
+            derivations: Default::default(),
+            derivation_limit: 0,
+            repo_key: Some(repo_key),
+            legacy_allowed: false,
         }
     }
 
@@ -374,6 +400,7 @@ impl KeyCache {
             derivations: Default::default(),
             derivation_limit: MAX_KEY_DERIVATIONS,
             repo_key: Some(repo_key),
+            legacy_allowed: true,
         }
     }
 
@@ -441,6 +468,9 @@ impl KeyCache {
     /// Decrypt a blob (legacy or v2 format) using cached keys. v3 blobs
     /// need their object id: use [`KeyCache::decrypt_object`].
     pub fn decrypt(&self, encrypted: &[u8]) -> io::Result<Vec<u8>> {
+        if !self.legacy_allowed && !is_v3(encrypted) {
+            return Err(legacy_refused());
+        }
         decrypt_with(encrypted, |salt, iterations| self.key_for(salt, iterations))
     }
 
@@ -450,6 +480,9 @@ impl KeyCache {
     pub fn decrypt_owned(&self, mut blob: Vec<u8>) -> io::Result<Vec<u8>> {
         if is_v3(&blob) {
             return Err(CryptoError::RepoKeyRequired.into());
+        }
+        if !self.legacy_allowed {
+            return Err(legacy_refused());
         }
         // (aad bytes, salt, nonce, iterations, body offset)
         let (aad, salt, nonce, iterations, body_start) = match parse_v2(&blob) {

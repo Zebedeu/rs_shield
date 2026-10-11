@@ -4,7 +4,8 @@
 //! repository (through a per-blob HKDF subkey, see [`super::stream`]). The
 //! DEK is stored wrapped with AES-256-GCM under a key-encryption key (KEK)
 //! derived from the password with Argon2id. Changing the password only
-//! rewraps the DEK; no blob is rewritten.
+//! rewraps the DEK; no blob is rewritten. `rsb key rotate` replaces the DEK
+//! itself and re-encrypts every blob (see [`super::lifecycle`]).
 //!
 //! The file is JSON (see `docs/FORMAT.md`):
 //!
@@ -15,7 +16,8 @@
 //!            "t_cost": 3, "p_cost": 1, "salt": "<base64, 16 bytes>" },
 //!   "wrapped_dek": { "algorithm": "aes-256-gcm", "nonce": "<base64, 12>",
 //!                    "ciphertext": "<base64, 32 + 16>" },
-//!   "legacy_secret": { ... optional, same shape ... },
+//!   "key_id": "<hex, 4 bytes>",
+//!   "rotation": { "key_id": "...", "wrapped_dek": { ... }, "started_at": "..." },
 //!   "created_at": "<RFC 3339>"
 //! }
 //! ```
@@ -24,11 +26,15 @@
 //! parameters ([`kdf_aad`]), so tampering with the stored parameters (e.g.
 //! to weaken them before a password change) makes the unwrap fail.
 //!
-//! `legacy_secret` is only present in repositories migrated from v1/v2: it
-//! holds the password that encrypted the pre-v3 objects, encrypted under a
-//! DEK-derived subkey, so those objects stay readable after a password
-//! change (their keys are PBKDF2(password, per-session salt) and cannot be
-//! rewrapped).
+//! `rotation` only exists while `rsb key rotate` runs (or after it was
+//! interrupted): it holds the new DEK, wrapped by the same KEK with a
+//! distinct AAD. During a rotation new blobs use the new DEK and readers pick
+//! the DEK by the key id in each blob header.
+//!
+//! `legacy_secret` (read only) is found in key files written by earlier
+//! versions for repositories upgraded from v1/v2: it holds the password that
+//! encrypted the pre-v3 objects. This version never writes it: `rsb key
+//! migrate` re-encrypts those objects as v3 and then removes it.
 
 use super::CryptoError;
 use crate::error::{CryptoErrorKind, RsbError};
@@ -46,6 +52,7 @@ use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 pub use super::stream::DEK_LEN;
+use super::stream::{KeyId, V3Header, key_id_of};
 
 /// Storage key of the repository key file.
 pub const REPO_KEY_PATH: &str = "keys/repo.key";
@@ -192,11 +199,41 @@ pub struct RepoKeyFile {
     version: u32,
     kdf: KdfSection,
     wrapped_dek: SealedSection,
+    /// Key id (hex) of `wrapped_dek`; optional (files written before key
+    /// ids existed lack it), checked against the DEK when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_id: Option<String>,
+    /// Read only: written by earlier versions, never by this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     legacy_secret: Option<SealedSection>,
+    /// Present only while a key rotation is in progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rotation: Option<RotationSection>,
     created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     updated_at: Option<String>,
+}
+
+/// New DEK of an unfinished rotation, wrapped under the same KEK as
+/// `wrapped_dek` with AAD [`rotation_aad`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RotationSection {
+    key_id: String,
+    wrapped_dek: SealedSection,
+    started_at: String,
+}
+
+/// AAD of the rotation DEK wrap: [`kdf_aad`] followed by `"rotation"`, so
+/// the two wrapped keys cannot be swapped.
+fn rotation_aad(params: &KdfParams, salt: &[u8; KDF_SALT_LEN]) -> Vec<u8> {
+    let mut aad = kdf_aad(params, salt).to_vec();
+    aad.extend_from_slice(b"rotation");
+    aad
+}
+
+/// Lowercase hex of a key id.
+pub fn key_id_hex(id: &KeyId) -> String {
+    id.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 fn corrupt(msg: impl Into<String>) -> RsbError {
@@ -306,11 +343,31 @@ fn legacy_subkey(dek: &[u8; DEK_LEN]) -> Result<Zeroizing<[u8; 32]>, RsbError> {
     Ok(out)
 }
 
-/// The unlocked repository key: the DEK (and, for migrated repositories,
-/// the password of the pre-v3 objects). Secrets are wiped on drop and never
-/// shown in `Debug`.
+/// One data encryption key and its id.
+#[derive(Clone)]
+struct Dek {
+    id: KeyId,
+    key: Zeroizing<[u8; DEK_LEN]>,
+}
+
+impl Dek {
+    fn new(key: [u8; DEK_LEN]) -> Self {
+        Self {
+            id: key_id_of(&key),
+            key: Zeroizing::new(key),
+        }
+    }
+}
+
+/// The unlocked repository key: the DEK (two of them while a rotation is in
+/// progress) and, for key files written by earlier versions of migrated
+/// repositories, the password of the pre-v3 objects. Secrets are wiped on
+/// drop and never shown in `Debug`.
 pub struct RepoKey {
-    dek: Zeroizing<[u8; DEK_LEN]>,
+    /// The `wrapped_dek` slot. Opens blobs without a key id.
+    primary: Dek,
+    /// The new DEK of an unfinished rotation; when set, it encrypts.
+    pending: Option<Dek>,
     legacy_password: Option<Zeroizing<Vec<u8>>>,
 }
 
@@ -318,6 +375,8 @@ impl fmt::Debug for RepoKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RepoKey")
             .field("dek", &"***REDACTED***")
+            .field("key_id", &self.key_id_hex())
+            .field("rotating", &self.pending.is_some())
             .field("has_legacy_password", &self.legacy_password.is_some())
             .finish()
     }
@@ -326,29 +385,69 @@ impl fmt::Debug for RepoKey {
 impl RepoKey {
     /// Generates a new random DEK.
     pub fn generate() -> Result<Self, RsbError> {
-        Ok(Self {
-            dek: Zeroizing::new(random()?),
-            legacy_password: None,
-        })
+        Ok(Self::from_dek(random()?))
     }
 
     /// Builds a key from raw DEK bytes (tests, recovery tooling).
     pub fn from_dek(dek: [u8; DEK_LEN]) -> Self {
         Self {
-            dek: Zeroizing::new(dek),
+            primary: Dek::new(dek),
+            pending: None,
             legacy_password: None,
         }
     }
 
-    /// Password that encrypted the pre-v3 (v1/v2) objects, if this
-    /// repository was migrated.
+    /// The DEK that encrypts new blobs (the new one during a rotation).
+    fn active(&self) -> &Dek {
+        self.pending.as_ref().unwrap_or(&self.primary)
+    }
+
+    /// Key id of the DEK that encrypts new blobs.
+    pub fn key_id(&self) -> KeyId {
+        self.active().id
+    }
+
+    /// [`RepoKey::key_id`] in hex.
+    pub fn key_id_hex(&self) -> String {
+        key_id_hex(&self.active().id)
+    }
+
+    /// True while a key rotation is unfinished (two DEKs).
+    pub fn is_rotating(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Password that encrypted the pre-v3 (v1/v2) objects, if the key file
+    /// was written by an earlier version that stored it.
     pub fn legacy_password(&self) -> Option<&[u8]> {
         self.legacy_password.as_deref().map(|v| &v[..])
     }
 
+    /// The DEK that opens a blob with this header: by key id when the
+    /// header has one, else the primary DEK. An unknown key id is an
+    /// authentication failure (no DEK of this key file wrote the blob).
+    fn dek_for(&self, header: &V3Header) -> io::Result<&[u8; DEK_LEN]> {
+        match header.key_id() {
+            None => Ok(&self.primary.key),
+            Some(id) => [Some(&self.primary), self.pending.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|d| d.id == id)
+                .map(|d| &*d.key)
+                .ok_or_else(|| CryptoError::AuthenticationFailed.into()),
+        }
+    }
+
+    /// True if a blob with this header was written by the active DEK (and
+    /// carries its key id).
+    pub fn is_active_blob(&self, header: &V3Header) -> bool {
+        header.key_id() == Some(self.active().id)
+    }
+
     /// Encrypts an in-memory payload as a v3 blob bound to `object_id`.
     pub fn encrypt_object(&self, object_id: &str, data: &[u8]) -> io::Result<Vec<u8>> {
-        super::stream::encrypt_v3(&self.dek, object_id, data)
+        let k = self.active();
+        super::stream::encrypt_v3(&k.key, Some(k.id), object_id, data)
     }
 
     /// Streaming v3 encryptor writing into `inner`.
@@ -357,7 +456,8 @@ impl RepoKey {
         object_id: &str,
         inner: W,
     ) -> io::Result<super::stream::StreamEncryptor<W>> {
-        super::stream::StreamEncryptor::new(&self.dek, object_id, inner)
+        let k = self.active();
+        super::stream::StreamEncryptor::new(&k.key, Some(k.id), object_id, inner)
     }
 
     /// Streaming v3 decryptor over `reader`; `prefix` are bytes already
@@ -368,22 +468,35 @@ impl RepoKey {
         prefix: &[u8],
         reader: R,
     ) -> io::Result<super::stream::StreamDecryptor<R>> {
-        super::stream::StreamDecryptor::new(&self.dek, object_id, prefix, reader).await
+        super::stream::StreamDecryptor::with_resolver(
+            |h| self.dek_for(h),
+            object_id,
+            prefix,
+            reader,
+        )
+        .await
     }
 
     /// Decrypts a v3 blob held in memory.
     pub fn decrypt_object(&self, object_id: &str, blob: &[u8]) -> io::Result<Vec<u8>> {
-        super::stream::decrypt_v3(&self.dek, object_id, blob)
+        let header = V3Header::parse(blob)?;
+        super::stream::decrypt_v3(self.dek_for(&header)?, object_id, blob)
     }
 
-    /// Wraps this key under `password` (fresh salt and nonce).
+    /// Wraps this key under `password` (fresh salt and nonce). A pending
+    /// rotation key is wrapped too. The legacy password is never written.
     pub fn wrap(&self, password: &[u8], params: KdfParams) -> Result<RepoKeyFile, RsbError> {
         params.validate_for_create()?;
         let salt: [u8; KDF_SALT_LEN] = random()?;
         let kek = derive_kek(password, &salt, &params)?;
-        let wrapped_dek = seal(&kek, &kdf_aad(&params, &salt), &self.dek[..])?;
-        let legacy_secret = match &self.legacy_password {
-            Some(pw) => Some(seal(&*legacy_subkey(&self.dek)?, LEGACY_SECRET_AAD, pw)?),
+        let wrapped_dek = seal(&kek, &kdf_aad(&params, &salt), &self.primary.key[..])?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let rotation = match &self.pending {
+            Some(p) => Some(RotationSection {
+                key_id: key_id_hex(&p.id),
+                wrapped_dek: seal(&kek, &rotation_aad(&params, &salt), &p.key[..])?,
+                started_at: now.clone(),
+            }),
             None => None,
         };
         Ok(RepoKeyFile {
@@ -396,15 +509,86 @@ impl RepoKey {
                 salt: B64.encode(salt),
             },
             wrapped_dek,
-            legacy_secret,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            key_id: Some(key_id_hex(&self.primary.id)),
+            legacy_secret: match &self.legacy_password {
+                Some(pw) => Some(seal(
+                    &*legacy_subkey(&self.primary.key)?,
+                    LEGACY_SECRET_AAD,
+                    pw,
+                )?),
+                None => None,
+            },
+            rotation,
+            created_at: now,
             updated_at: None,
         })
     }
 
-    fn same_key(&self, other: &RepoKey) -> bool {
+    /// Same DEKs (and legacy password) as `other`.
+    pub(crate) fn same_key(&self, other: &RepoKey) -> bool {
         // Not secret-dependent timing in any useful way (both are ours).
-        self.dek[..] == other.dek[..] && self.legacy_password() == other.legacy_password()
+        let pending_eq = match (&self.pending, &other.pending) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.key[..] == b.key[..],
+            _ => false,
+        };
+        self.primary.key[..] == other.primary.key[..]
+            && pending_eq
+            && self.legacy_password() == other.legacy_password()
+    }
+
+    /// Copy without the legacy password.
+    #[doc(hidden)]
+    pub fn without_legacy(&self) -> RepoKey {
+        RepoKey {
+            primary: self.primary.clone(),
+            pending: self.pending.clone(),
+            legacy_password: None,
+        }
+    }
+
+    /// Copy that starts a rotation: a new random DEK becomes active, the
+    /// current one stays as primary (it still opens the existing blobs).
+    #[doc(hidden)]
+    pub fn begin_rotation(&self) -> Result<RepoKey, RsbError> {
+        if self.pending.is_some() {
+            return Err(RsbError::InvalidInput(
+                "A key rotation is already in progress".into(),
+            ));
+        }
+        let new = loop {
+            let d = Dek::new(random()?);
+            // Ids are 32 bits: never let the two keys share one.
+            if d.id != self.primary.id {
+                break d;
+            }
+        };
+        Ok(RepoKey {
+            primary: self.primary.clone(),
+            pending: Some(new),
+            legacy_password: None,
+        })
+    }
+
+    /// Copy holding only the active DEK (the end state of a rotation). Used
+    /// to prove that no blob still needs the old DEK.
+    #[doc(hidden)]
+    pub fn only_active(&self) -> RepoKey {
+        RepoKey {
+            primary: self.active().clone(),
+            pending: None,
+            legacy_password: None,
+        }
+    }
+
+    /// Key holding only the old (primary) DEK of a rotation.
+    #[doc(hidden)]
+    pub fn only_primary(&self) -> RepoKey {
+        RepoKey {
+            primary: self.primary.clone(),
+            pending: None,
+            legacy_password: None,
+        }
     }
 }
 
@@ -438,21 +622,95 @@ impl RepoKeyFile {
         self.kdf.params
     }
 
+    /// True if the file still holds the legacy (v1/v2) password.
+    pub fn has_legacy_secret(&self) -> bool {
+        self.legacy_secret.is_some()
+    }
+
+    /// True while a key rotation is unfinished.
+    pub fn is_rotating(&self) -> bool {
+        self.rotation.is_some()
+    }
+
+    /// Key id (hex) recorded for the primary DEK, if any.
+    pub fn key_id(&self) -> Option<&str> {
+        self.key_id.as_deref()
+    }
+
+    /// The same file without the legacy secret.
+    #[doc(hidden)]
+    pub fn without_legacy_secret(&self) -> RepoKeyFile {
+        let mut f = self.clone();
+        f.legacy_secret = None;
+        f.updated_at = Some(chrono::Utc::now().to_rfc3339());
+        f
+    }
+
+    fn unwrap_dek(
+        kek: &[u8; 32],
+        aad: &[u8],
+        sealed: &SealedSection,
+        recorded_id: Option<&str>,
+    ) -> Result<Dek, RsbError> {
+        let dek = open(kek, aad, sealed)?.ok_or_else(wrong_password)?;
+        let dek: [u8; DEK_LEN] = dek[..]
+            .try_into()
+            .map_err(|_| corrupt("Repository key file: wrapped key has wrong length"))?;
+        let d = Dek::new(dek);
+        if let Some(id) = recorded_id
+            && !id.eq_ignore_ascii_case(&key_id_hex(&d.id))
+        {
+            return Err(corrupt(
+                "Repository key file: key id does not match the wrapped key",
+            ));
+        }
+        Ok(d)
+    }
+
     /// Unlocks the DEK with `password`. A wrong password yields
     /// `RsbError::Crypto { kind: AuthenticationFailed, .. }`.
     pub fn unwrap_key(&self, password: &[u8]) -> Result<RepoKey, RsbError> {
         let salt: [u8; KDF_SALT_LEN] = b64_fixed(&self.kdf.salt, "kdf salt")?;
         let kek = derive_kek(password, &salt, &self.kdf.params)?;
-        let dek = open(&kek, &kdf_aad(&self.kdf.params, &salt), &self.wrapped_dek)?
-            .ok_or_else(wrong_password)?;
-        let dek: [u8; DEK_LEN] = dek[..]
-            .try_into()
-            .map_err(|_| corrupt("Repository key file: wrapped key has wrong length"))?;
-        let mut key = RepoKey::from_dek(dek);
+        let primary = Self::unwrap_dek(
+            &kek,
+            &kdf_aad(&self.kdf.params, &salt),
+            &self.wrapped_dek,
+            self.key_id.as_deref(),
+        )?;
+        let pending = match &self.rotation {
+            Some(r) => {
+                let d = Self::unwrap_dek(
+                    &kek,
+                    &rotation_aad(&self.kdf.params, &salt),
+                    &r.wrapped_dek,
+                    Some(&r.key_id),
+                )
+                .map_err(|e| {
+                    if e.is_authentication_failure() {
+                        corrupt("Repository key file: rotation key failed authentication")
+                    } else {
+                        e
+                    }
+                })?;
+                if d.id == primary.id {
+                    return Err(corrupt(
+                        "Repository key file: rotation key has the same id as the current key",
+                    ));
+                }
+                Some(d)
+            }
+            None => None,
+        };
+        let mut key = RepoKey {
+            primary,
+            pending,
+            legacy_password: None,
+        };
         if let Some(s) = &self.legacy_secret {
-            let pw = open(&*legacy_subkey(&key.dek)?, LEGACY_SECRET_AAD, s)?.ok_or_else(|| {
-                corrupt("Repository key file: legacy secret failed authentication")
-            })?;
+            let pw = open(&*legacy_subkey(&key.primary.key)?, LEGACY_SECRET_AAD, s)?.ok_or_else(
+                || corrupt("Repository key file: legacy secret failed authentication"),
+            )?;
             key.legacy_password = Some(pw);
         }
         Ok(key)
@@ -460,12 +718,15 @@ impl RepoKeyFile {
 }
 
 /// Runs Argon2 on the blocking pool (it is CPU and memory heavy).
-async fn unwrap_blocking(file: RepoKeyFile, password: &[u8]) -> Result<RepoKey, RsbError> {
+pub(crate) async fn unwrap_blocking(
+    file: RepoKeyFile,
+    password: &[u8],
+) -> Result<RepoKey, RsbError> {
     let pw = Zeroizing::new(password.to_vec());
     tokio::task::spawn_blocking(move || file.unwrap_key(&pw)).await?
 }
 
-async fn wrap_blocking(
+pub(crate) async fn wrap_blocking(
     key: Arc<RepoKey>,
     password: &[u8],
     params: KdfParams,
@@ -479,6 +740,18 @@ pub async fn read_key_file(storage: &dyn Storage) -> Result<Option<RepoKeyFile>,
     match storage.read(REPO_KEY_PATH).await {
         Ok(raw) => RepoKeyFile::from_bytes(&raw).map(Some),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Reads the raw bytes of `keys/repo.key` (a clear error if it is missing).
+pub(crate) async fn read_key_file_raw(storage: &dyn Storage) -> Result<Vec<u8>, RsbError> {
+    match storage.read(REPO_KEY_PATH).await {
+        Ok(r) => Ok(r),
+        Err(e) if e.kind() == ErrorKind::NotFound => Err(RsbError::NotFound(format!(
+            "{} not found: run `rsb key init` (or an encrypted backup) first",
+            REPO_KEY_PATH
+        ))),
         Err(e) => Err(e.into()),
     }
 }
@@ -502,7 +775,10 @@ pub async fn load_repo_key(
 
 /// Exclusive repository lock, retried briefly (concurrent backups hold a
 /// shared lock only for their duration).
-async fn lock_exclusive(storage: &Arc<dyn Storage>, op: &str) -> Result<RepoLock, RsbError> {
+pub(crate) async fn lock_exclusive(
+    storage: &Arc<dyn Storage>,
+    op: &str,
+) -> Result<RepoLock, RsbError> {
     let mut last = None;
     for attempt in 0..5u32 {
         match RepoLock::acquire(storage.clone(), LockKind::Exclusive, op).await {
@@ -520,10 +796,58 @@ async fn lock_exclusive(storage: &Arc<dyn Storage>, op: &str) -> Result<RepoLock
         .unwrap_or_else(|| RsbError::Other("repository lock unavailable".into())))
 }
 
-async fn release(lock: RepoLock) {
+pub(crate) async fn release(lock: RepoLock) {
     if let Err(e) = lock.release().await {
         warn!("Failed to release repository lock: {}", e);
     }
+}
+
+/// Storage key of a new timestamped key file copy.
+pub(crate) fn backup_copy_path() -> String {
+    format!(
+        "{}{}",
+        REPO_KEY_BACKUP_PREFIX,
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
+    )
+}
+
+/// Replaces `keys/repo.key` (currently `old_raw`) with `new_file`, safely:
+/// writes a timestamped copy of the current file, writes the new one (an
+/// atomic replacement per object on every backend), reads it back and
+/// checks that `password` unlocks it to `expected`; only then deletes the
+/// copy. If the check fails the previous file is written back and the copy
+/// is kept. Returns the key read back.
+pub(crate) async fn replace_key_file(
+    storage: &dyn Storage,
+    old_raw: &[u8],
+    new_file: &RepoKeyFile,
+    password: &[u8],
+    expected: &RepoKey,
+) -> Result<RepoKey, RsbError> {
+    let backup = backup_copy_path();
+    storage.write(&backup, old_raw).await?;
+    storage.write(REPO_KEY_PATH, &new_file.to_bytes()?).await?;
+
+    let verified = match load_repo_key(storage, password).await {
+        Ok(Some(k)) if k.same_key(expected) => Some(k),
+        _ => None,
+    };
+    let Some(key) = verified else {
+        warn!(
+            "New {} did not verify; restoring the previous one (copy kept at {})",
+            REPO_KEY_PATH, backup
+        );
+        storage.write(REPO_KEY_PATH, old_raw).await?;
+        return Err(RsbError::Storage(format!(
+            "The rewritten {} could not be verified; the previous key file was restored \
+             (a copy is kept at {})",
+            REPO_KEY_PATH, backup
+        )));
+    };
+    if let Err(e) = storage.delete(&backup).await {
+        warn!("Could not delete temporary key backup {}: {}", backup, e);
+    }
+    Ok(key)
 }
 
 /// Inspects existing snapshots before a repository is upgraded to v3.
@@ -532,7 +856,10 @@ async fn release(lock: RepoLock) {
 /// (password-derived) format, after checking that `password` opens it:
 /// creating a key file with a mistyped password would otherwise split the
 /// repository between two passwords. Clear snapshots are ignored.
-async fn probe_legacy_snapshots(storage: &dyn Storage, password: &[u8]) -> Result<bool, RsbError> {
+pub(crate) async fn probe_legacy_snapshots(
+    storage: &dyn Storage,
+    password: &[u8],
+) -> Result<bool, RsbError> {
     let mut snaps = match storage.list("snapshots").await {
         Ok(s) => s,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
@@ -549,7 +876,8 @@ async fn probe_legacy_snapshots(storage: &dyn Storage, password: &[u8]) -> Resul
         if super::stream::is_v3(&raw) {
             // Should not happen without a key file: refuse to guess.
             return Err(corrupt(format!(
-                "{} is a v3 blob but {} is missing; restore the key file from a backup",
+                "{} is a v3 blob but {} is missing; restore the key file from a backup \
+                 (`rsb key import`)",
                 snap, REPO_KEY_PATH
             )));
         }
@@ -571,7 +899,7 @@ async fn probe_legacy_snapshots(storage: &dyn Storage, password: &[u8]) -> Resul
 }
 
 /// Clear manifests are zstd frames or plain TOML text.
-fn looks_encrypted(raw: &[u8]) -> bool {
+pub(crate) fn looks_encrypted(raw: &[u8]) -> bool {
     const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
     !(raw.starts_with(&ZSTD_MAGIC) || std::str::from_utf8(raw).is_ok())
 }
@@ -580,8 +908,10 @@ fn looks_encrypted(raw: &[u8]) -> bool {
 ///
 /// Holds the exclusive repository lock so two first backups cannot race
 /// and create two different keys. If the repository already holds v1/v2
-/// encrypted snapshots, `password` must open the newest one and is kept as
-/// the legacy secret (see module docs).
+/// encrypted snapshots, `password` must open the newest one: the v1/v2
+/// objects stay readable with the same password until `rsb key migrate`
+/// re-encrypts them as v3 (and `rsb key change-password` refuses to run
+/// while any remain).
 pub async fn init_repo_key(
     storage: Arc<dyn Storage>,
     password: &[u8],
@@ -629,7 +959,8 @@ async fn init_locked(
         "🔑 Created repository key {} (format v3{})",
         REPO_KEY_PATH,
         if has_legacy {
-            ", existing v1/v2 objects stay readable"
+            "; existing v1/v2 objects stay readable with the same password until \
+             `rsb key migrate` re-encrypts them"
         } else {
             ""
         }
@@ -669,6 +1000,11 @@ pub async fn open_or_init_repo_key(
 /// parameters, default: keep the stored ones if they meet the creation
 /// minimum, else [`KdfParams::DEFAULT`]). No blob is rewritten.
 ///
+/// Refused while v1/v2 objects or manifests remain (run `rsb key migrate`
+/// first: their keys derive from the old password and cannot be rewrapped)
+/// and while a key rotation is unfinished. The new file never holds the
+/// legacy password.
+///
 /// Procedure (exclusive lock held): unlock with `old_password` → write a
 /// timestamped copy `keys/repo.key.bak-<ts>` of the current file → write the
 /// new file (atomic per object on every backend) → read it back and check it
@@ -698,16 +1034,7 @@ async fn change_locked(
     new_password: &[u8],
     params: Option<KdfParams>,
 ) -> Result<(), RsbError> {
-    let raw = match storage.read(REPO_KEY_PATH).await {
-        Ok(r) => r,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            return Err(RsbError::NotFound(format!(
-                "{} not found: run `rsb key init` (or an encrypted backup) first",
-                REPO_KEY_PATH
-            )));
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let raw = read_key_file_raw(storage).await?;
     let current = RepoKeyFile::from_bytes(&raw)?;
     let params = params.unwrap_or_else(|| {
         let p = current.params();
@@ -718,37 +1045,18 @@ async fn change_locked(
         }
     });
     let key = Arc::new(unwrap_blocking(current.clone(), old_password).await?);
+    if key.is_rotating() {
+        return Err(RsbError::InvalidInput(
+            "A key rotation is unfinished: run `rsb key rotate` again to complete it before \
+             changing the password"
+                .into(),
+        ));
+    }
     let mut new_file = wrap_blocking(key.clone(), new_password, params).await?;
+    let expected = key;
     new_file.created_at = current.created_at.clone();
     new_file.updated_at = Some(chrono::Utc::now().to_rfc3339());
-
-    let backup = format!(
-        "{}{}",
-        REPO_KEY_BACKUP_PREFIX,
-        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
-    );
-    storage.write(&backup, &raw).await?;
-    storage.write(REPO_KEY_PATH, &new_file.to_bytes()?).await?;
-
-    let verified = match load_repo_key(storage, new_password).await {
-        Ok(Some(k)) => k.same_key(&key),
-        _ => false,
-    };
-    if !verified {
-        warn!(
-            "New {} did not verify; restoring the previous one (copy kept at {})",
-            REPO_KEY_PATH, backup
-        );
-        storage.write(REPO_KEY_PATH, &raw).await?;
-        return Err(RsbError::Storage(format!(
-            "The rewritten {} could not be verified; the previous key file was restored \
-             (a copy is kept at {})",
-            REPO_KEY_PATH, backup
-        )));
-    }
-    if let Err(e) = storage.delete(&backup).await {
-        warn!("Could not delete temporary key backup {}: {}", backup, e);
-    }
+    replace_key_file(storage, &raw, &new_file, new_password, &expected).await?;
     info!("🔑 Repository password changed");
     Ok(())
 }
@@ -801,6 +1109,7 @@ mod tests {
         let file = key.wrap(b"pw", fast()).unwrap();
         let back = RepoKeyFile::from_bytes(&file.to_bytes().unwrap()).unwrap();
         assert!(back.unwrap_key(b"pw").unwrap().same_key(&key));
+        assert_eq!(back.key_id(), Some(key.key_id_hex().as_str()));
         let err = back.unwrap_key(b"nope").unwrap_err();
         assert!(matches!(
             err,
@@ -849,16 +1158,30 @@ mod tests {
         let mut f = file.clone();
         f.kdf.params = weak;
         f.kdf.salt = B64.encode(salt);
-        f.wrapped_dek = seal(&kek, &kdf_aad(&weak, &salt), &key.dek[..]).unwrap();
+        f.wrapped_dek = seal(&kek, &kdf_aad(&weak, &salt), &key.primary.key[..]).unwrap();
         let f = RepoKeyFile::from_bytes(&f.to_bytes().unwrap()).unwrap();
         assert!(f.unwrap_key(b"pw").unwrap().same_key(&key));
     }
 
+    /// Key files written by earlier versions may hold `legacy_secret`: it
+    /// is still read, but never written again.
     #[test]
     fn legacy_secret_survives_rewrap() {
-        let mut key = RepoKey::generate().unwrap();
-        key.legacy_password = Some(Zeroizing::new(b"old-pw".to_vec()));
-        let f1 = key.wrap(b"a", fast()).unwrap();
+        let key = RepoKey::generate().unwrap();
+        let mut f1 = key.wrap(b"a", fast()).unwrap();
+        assert!(!f1.has_legacy_secret());
+        f1.legacy_secret = Some(
+            seal(
+                &legacy_subkey(&key.primary.key).unwrap(),
+                LEGACY_SECRET_AAD,
+                b"old-pw",
+            )
+            .unwrap(),
+        );
+        // An old file (no key id) with a legacy secret.
+        f1.key_id = None;
+        let f1 = RepoKeyFile::from_bytes(&f1.to_bytes().unwrap()).unwrap();
+        assert!(f1.has_legacy_secret());
         let k1 = f1.unwrap_key(b"a").unwrap();
         assert_eq!(k1.legacy_password(), Some(&b"old-pw"[..]));
         let f2 = k1.wrap(b"b", fast()).unwrap();
@@ -866,6 +1189,66 @@ mod tests {
             f2.unwrap_key(b"b").unwrap().legacy_password(),
             Some(&b"old-pw"[..])
         );
+        assert!(!f1.without_legacy_secret().has_legacy_secret());
+    }
+
+    #[test]
+    fn key_id_mismatch_is_corrupt() {
+        let key = RepoKey::generate().unwrap();
+        let mut f = key.wrap(b"pw", fast()).unwrap();
+        f.key_id = Some("00000000".into());
+        if key.key_id_hex() == "00000000" {
+            return;
+        }
+        assert!(matches!(
+            f.unwrap_key(b"pw").unwrap_err(),
+            RsbError::Crypto {
+                kind: CryptoErrorKind::Corrupt,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rotation_state_roundtrips_and_selects_keys_by_id() {
+        let old = RepoKey::generate().unwrap();
+        let blob_old = old.encrypt_object("oid", b"old data").unwrap();
+        // Blob written before key ids existed (no flag): primary key.
+        let unflagged =
+            crate::crypto::stream::encrypt_v3(&old.primary.key, None, "oid", b"unflagged").unwrap();
+        let rot = old.begin_rotation().unwrap();
+        assert!(rot.is_rotating());
+        assert_ne!(rot.key_id(), old.key_id());
+        let blob_new = rot.encrypt_object("oid", b"new data").unwrap();
+
+        let f = rot.wrap(b"pw", fast()).unwrap();
+        assert!(f.is_rotating());
+        let back = RepoKeyFile::from_bytes(&f.to_bytes().unwrap())
+            .unwrap()
+            .unwrap_key(b"pw")
+            .unwrap();
+        assert!(back.same_key(&rot));
+        for (blob, pt) in [
+            (&blob_old, &b"old data"[..]),
+            (&blob_new, b"new data"),
+            (&unflagged, b"unflagged"),
+        ] {
+            assert_eq!(back.decrypt_object("oid", blob).unwrap(), pt);
+        }
+        // The end state opens only blobs of the new key.
+        let fin = back.only_active();
+        assert_eq!(fin.decrypt_object("oid", &blob_new).unwrap(), b"new data");
+        let e = fin.decrypt_object("oid", &blob_old).unwrap_err();
+        assert!(crate::crypto::is_authentication_error(&e));
+        // The old key alone does not open new blobs.
+        let e = old.decrypt_object("oid", &blob_new).unwrap_err();
+        assert!(crate::crypto::is_authentication_error(&e));
+        // Swapping the two wrapped keys is detected.
+        let mut swapped = f.clone();
+        let r = swapped.rotation.as_mut().unwrap();
+        std::mem::swap(&mut r.wrapped_dek, &mut swapped.wrapped_dek);
+        assert!(swapped.unwrap_key(b"pw").is_err());
+        assert!(rot.begin_rotation().is_err());
     }
 
     #[test]
