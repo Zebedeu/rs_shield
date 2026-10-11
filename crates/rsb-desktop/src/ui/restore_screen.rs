@@ -9,6 +9,7 @@ use rsb_sdk::core::{NotificationEvent, NotificationManager, NotificationPayload}
 use rsb_sdk::operation::operations_helpers::record_restore_operation;
 use rsb_sdk::{CancellationToken, RestoreOptions};
 
+use crate::ui::s3_settings;
 use crate::ui::{
     app::AppConfig,
     error_handler::format_user_error,
@@ -137,14 +138,7 @@ pub fn RestoreScreen() -> Element {
             let s3_region = app_config.s3_region();
             let s3_endpoint = app_config.s3_endpoint();
             // Credenciais escritas no formulário ficam só em memória (sessão).
-            let s3_access_key = app_config.s3_access_key();
-            let s3_secret_key = app_config.s3_secret_key();
-            if !s3_access_key.is_empty() && !s3_secret_key.is_empty() {
-                rsb_sdk::core::storage_backend::set_session_s3_credentials(
-                    &s3_access_key,
-                    &s3_secret_key,
-                );
-            }
+            s3_settings::apply_session_credentials(&app_config);
             let source_label = if bkp.as_os_str().is_empty() && !s3_bucket.trim().is_empty() {
                 format!("s3://{}", s3_bucket.trim())
             } else {

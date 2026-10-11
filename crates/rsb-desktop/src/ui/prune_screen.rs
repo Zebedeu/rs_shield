@@ -1,3 +1,4 @@
+use crate::ui::s3_settings::S3Settings;
 use crate::ui::{
     app::AppConfig,
     error_handler::format_user_error,
@@ -83,68 +84,18 @@ pub fn PruneScreen() -> Element {
             Some(key_val)
         };
 
-        let s3_bucket = app_config.s3_bucket();
-        let s3_region = app_config.s3_region();
-        let s3_endpoint = app_config.s3_endpoint();
-        let s3_access_key = app_config.s3_access_key();
-        let s3_secret_key = app_config.s3_secret_key();
-        // Credenciais do formulário: só em memória (o SDK ignora segredos no Config).
-        if !s3_access_key.is_empty() && !s3_secret_key.is_empty() {
-            rsb_sdk::core::storage_backend::set_session_s3_credentials(
-                &s3_access_key,
-                &s3_secret_key,
-            );
-        }
+        // Bucket/região/endpoint do ecrã; as chaves digitadas ficam só em
+        // memória (credenciais de sessão), nunca no Config.
+        let s3 = S3Settings::from_app(&app_config);
 
-        let s3_bucket_opt = if s3_bucket.is_empty() {
-            None
-        } else {
-            Some(s3_bucket)
-        };
-        let s3_region_opt = if s3_region.is_empty() {
-            None
-        } else {
-            Some(s3_region)
-        };
-        let s3_endpoint_opt = if s3_endpoint.is_empty() {
-            None
-        } else {
-            Some(s3_endpoint)
-        };
-        let s3_access_key_opt = if s3_access_key.is_empty() {
-            None
-        } else {
-            Some(s3_access_key)
-        };
-        let s3_secret_key_opt = if s3_secret_key.is_empty() {
-            None
-        } else {
-            Some(s3_secret_key)
-        };
-
-        let s3_config = if s3_bucket_opt.is_some() {
-            Some(config::S3Config {
-                bucket: s3_bucket_opt.clone(),
-                region: s3_region_opt.clone(),
-                endpoint: s3_endpoint_opt.clone(),
-                access_key: s3_access_key_opt,
-                secret_key: s3_secret_key_opt,
-            })
-        } else {
-            None
-        };
-
-        let cfg = config::Config {
+        let mut cfg = config::Config {
             source_path: String::new(),
             destination_path: path.to_string_lossy().into_owned(),
             exclude_patterns: vec![],
             encryption_key: key_opt,
-            s3_bucket: s3_bucket_opt,
-            s3_region: s3_region_opt,
-            s3_endpoint: s3_endpoint_opt,
-            s3: s3_config,
             ..Default::default()
         };
+        s3.apply_to(&mut cfg);
 
         spawn(async move {
             let path_for_record = path.clone();

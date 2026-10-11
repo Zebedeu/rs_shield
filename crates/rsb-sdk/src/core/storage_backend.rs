@@ -136,22 +136,22 @@ async fn load_s3_credentials_securely(
     }
 
     // 3. Encrypted file (persistent)
-    if let Ok(home) = env::var("HOME") {
-        let cred_path = format!("{}/.rs-shield/s3_credentials.enc", home);
-        if std::path::Path::new(&cred_path).exists() {
-            match CredentialsManager::load_encrypted(&cred_path) {
-                Ok(creds) => {
-                    info!("🔑 S3 credentials loaded from encrypted file");
-                    return Ok(aws_credential_types::Credentials::new(
-                        creds.access_key.as_str(),
-                        creds.secret_key.as_str(),
-                        creds.session_token.as_ref().map(|s| s.to_string()),
-                        None,
-                        "rsb-encrypted",
-                    ));
-                }
-                Err(e) => warn!("Failed to load encrypted credentials: {}", e),
+    if let Some(cred_path) =
+        CredentialsManager::default_credentials_path().and_then(|p| p.to_str().map(str::to_string))
+        && std::path::Path::new(&cred_path).exists()
+    {
+        match CredentialsManager::load_encrypted(&cred_path) {
+            Ok(creds) => {
+                info!("🔑 S3 credentials loaded from encrypted file");
+                return Ok(aws_credential_types::Credentials::new(
+                    creds.access_key.as_str(),
+                    creds.secret_key.as_str(),
+                    creds.session_token.as_ref().map(|s| s.to_string()),
+                    None,
+                    "rsb-encrypted",
+                ));
             }
+            Err(e) => warn!("Failed to load encrypted credentials: {}", e),
         }
     }
 

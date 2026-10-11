@@ -31,6 +31,16 @@ impl fmt::Debug for S3Credentials {
 }
 
 impl S3Credentials {
+    /// Credenciais a partir das chaves digitadas (espaços nas pontas
+    /// removidos; sem session token).
+    pub fn from_keys(access_key: &str, secret_key: &str) -> Self {
+        S3Credentials {
+            access_key: SecureString::new(access_key.trim().to_string()),
+            secret_key: SecureString::new(secret_key.trim().to_string()),
+            session_token: None,
+        }
+    }
+
     /// Validate credentials
     pub fn validate(&self) -> Result<(), String> {
         if self.access_key.is_empty() {
@@ -51,7 +61,41 @@ impl S3Credentials {
 
 pub struct CredentialsManager;
 
+/// Diretório (relativo a `$HOME`) do ficheiro de credenciais cifrado.
+pub const CREDENTIALS_DIR: &str = ".rs-shield";
+/// Nome do ficheiro de credenciais S3 cifrado.
+pub const CREDENTIALS_FILE: &str = "s3_credentials.enc";
+
 impl CredentialsManager {
+    /// `<home>/.rs-shield/s3_credentials.enc`.
+    pub fn credentials_path_in(home: &std::path::Path) -> std::path::PathBuf {
+        home.join(CREDENTIALS_DIR).join(CREDENTIALS_FILE)
+    }
+
+    /// Caminho por omissão do ficheiro de credenciais S3 cifrado
+    /// (`$HOME/.rs-shield/s3_credentials.enc`) — o mesmo que
+    /// `storage_backend` lê. `None` se não houver diretório home.
+    pub fn default_credentials_path() -> Option<std::path::PathBuf> {
+        std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(dirs::home_dir)
+            .map(|home| Self::credentials_path_in(&home))
+    }
+
+    /// Guarda as chaves S3 no ficheiro cifrado por omissão (password mestra
+    /// no keyring do SO). Nunca escreve as chaves em claro nem em logs.
+    /// Devolve o caminho do ficheiro escrito.
+    pub fn save_default(credentials: &S3Credentials) -> Result<std::path::PathBuf, String> {
+        let path = Self::default_credentials_path()
+            .ok_or("Home directory not found: cannot store S3 credentials")?;
+        let path_str = path
+            .to_str()
+            .ok_or("Invalid characters in credentials path")?;
+        Self::save_encrypted(path_str, credentials, false)?;
+        Ok(path)
+    }
+
     /// Save encrypted credentials to file with master password in keyring
     pub fn save_encrypted(
         file_path: &str,
@@ -469,6 +513,30 @@ mod tests {
         };
 
         assert!(invalid_short.validate().is_err());
+    }
+
+    #[test]
+    fn test_from_keys_trims_and_default_path() {
+        let c =
+            S3Credentials::from_keys("  AKIA1234567890AB ", "\tvery-long-secret-key-1234567890\n");
+        assert_eq!(c.access_key.as_str(), "AKIA1234567890AB");
+        assert_eq!(c.secret_key.as_str(), "very-long-secret-key-1234567890");
+        assert!(c.session_token.is_none());
+        assert!(c.validate().is_ok());
+        assert!(!format!("{:?}", c).contains("AKIA"));
+
+        let home = std::path::Path::new("/home/someone");
+        assert_eq!(
+            CredentialsManager::credentials_path_in(home),
+            std::path::PathBuf::from("/home/someone/.rs-shield/s3_credentials.enc")
+        );
+        if let Some(p) = CredentialsManager::default_credentials_path() {
+            assert!(
+                p.ends_with(".rs-shield/s3_credentials.enc"),
+                "{}",
+                p.display()
+            );
+        }
     }
 
     #[test]
