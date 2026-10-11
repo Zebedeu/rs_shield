@@ -16,7 +16,6 @@ rsb-sdk = { path = "../rsb-sdk", features = ["cli"] }
 # CLI
 
 clap = { workspace = true }
-atty = { workspace = true }
 indicatif = { workspace = true }
 console = { workspace = true }
 rpassword = { workspace = true }
@@ -66,6 +65,15 @@ anyhow = { workspace = true }
 # TLS
 
 openssl = { workspace = true }
+
+# SECURITY (verificador PBKDF2 + keyring, sem segredos em TOML)
+
+keyring = { workspace = true }
+pbkdf2 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

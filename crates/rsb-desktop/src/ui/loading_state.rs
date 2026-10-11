@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)] // Dots/Pulse: estilos disponíveis ainda sem uso
 pub enum LoadingStyle {
     Spinner,     // Animated spinner
     Dots,        // Animated dots

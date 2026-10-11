@@ -1,7 +1,40 @@
 use lettre::transport::smtp::SmtpTransport;
 use lettre::{Message, Transport};
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+/// Constrói o transporte SMTP.
+/// Com TLS (STARTTLS) envia credenciais; sem TLS só é permitido envio
+/// anónimo — recusamos enviar credenciais em texto claro.
+fn build_smtp_transport(config: &EmailConfig) -> Result<SmtpTransport, Box<dyn std::error::Error>> {
+    if config.use_tls {
+        Ok(SmtpTransport::starttls_relay(&config.smtp_server)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
+            .port(config.smtp_port)
+            .credentials(lettre::transport::smtp::authentication::Credentials::new(
+                config.sender_email.clone(),
+                config.sender_password.clone(),
+            ))
+            .build())
+    } else {
+        if !config.sender_password.is_empty() {
+            error!(
+                "❌ Refusing to send SMTP credentials over a plaintext connection (use_tls=false)"
+            );
+            return Err(
+                "Refusing to send SMTP credentials without TLS. Enable use_tls or remove the password for unauthenticated relay."
+                    .into(),
+            );
+        }
+        warn!(
+            "⚠️ Sending email over plaintext SMTP (no TLS, no authentication) to {}",
+            config.smtp_server
+        );
+        Ok(SmtpTransport::builder_dangerous(&config.smtp_server)
+            .port(config.smtp_port)
+            .build())
+    }
+}
 
 /// Email configuration for notifications
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,20 +216,7 @@ pub async fn send_email_notification(
         )?;
 
     // Create SMTP transport
-    let transport = if config.use_tls {
-        SmtpTransport::starttls_relay(&config.smtp_server)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-            .port(config.smtp_port)
-            .credentials(lettre::transport::smtp::authentication::Credentials::new(
-                config.sender_email.clone(),
-                config.sender_password.clone(),
-            ))
-            .build()
-    } else {
-        SmtpTransport::builder_dangerous(&config.smtp_server)
-            .port(config.smtp_port)
-            .build()
-    };
+    let transport = build_smtp_transport(config)?;
 
     // Send email
     match transport.send(&email) {
@@ -233,20 +253,7 @@ pub fn send_email_notification_blocking(
         )?;
 
     // Create SMTP transport
-    let transport = if config.use_tls {
-        SmtpTransport::starttls_relay(&config.smtp_server)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-            .port(config.smtp_port)
-            .credentials(lettre::transport::smtp::authentication::Credentials::new(
-                config.sender_email.clone(),
-                config.sender_password.clone(),
-            ))
-            .build()
-    } else {
-        SmtpTransport::builder_dangerous(&config.smtp_server)
-            .port(config.smtp_port)
-            .build()
-    };
+    let transport = build_smtp_transport(config)?;
 
     // Send email
     match transport.send(&email) {

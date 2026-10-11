@@ -3,20 +3,39 @@
 
 use rsb_sdk::{config_from_backup_path, validate_backup_structure};
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use tempfile::TempDir;
 
 // Helper function to create a mock backup structure
-fn create_mock_backup(backup_path: &PathBuf) {
+// (mirrors the real repository layout: `snapshots/<%Y-%m-%dT%H%M%S%.3fZ>.toml`,
+// content-addressed objects under `data/clear`, a `locks/` directory, and a
+// stray temp file left by an interrupted atomic write).
+fn create_mock_backup(backup_path: &Path) {
     fs::create_dir_all(backup_path.join("snapshots")).unwrap();
     fs::create_dir_all(backup_path.join("data/clear")).unwrap();
+    fs::create_dir_all(backup_path.join("locks")).unwrap();
     fs::write(
-        backup_path.join("snapshots/manifest_20260525.toml"),
+        backup_path.join("snapshots/2026-05-25T120000.000Z.toml"),
         "[metadata]\ntype = \"full\"\ndate = \"2026-05-25\"\n[files]\n",
     )
     .unwrap();
-    fs::write(backup_path.join("data/clear/file1.bin"), b"test data").unwrap();
-    fs::write(backup_path.join("data/clear/file2.bin"), b"more data").unwrap();
+    fs::write(
+        backup_path.join("snapshots/.2026-05-25T120001.000Z.toml.rsb-tmp-0123abcd"),
+        "partial",
+    )
+    .unwrap();
+    fs::write(
+        backup_path
+            .join("data/clear/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"),
+        b"test data",
+    )
+    .unwrap();
+    fs::write(
+        backup_path
+            .join("data/clear/60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"),
+        b"more data",
+    )
+    .unwrap();
 }
 
 #[test]

@@ -167,25 +167,24 @@ fn test_rapid_pause_resume() {
 #[test]
 fn test_multiple_thread_access() {
     let should_pause = Arc::new(AtomicBool::new(false));
+    // The barrier orders the store before every load (sleeps raced on
+    // loaded CI runners).
+    let flag_set = Arc::new(std::sync::Barrier::new(6));
     let mut handles = vec![];
-    let should_pause_for_spawn = should_pause.clone();
 
-    // Create multiple threads that read the flag after it's set
     for _ in 0..5 {
-        let flag = should_pause_for_spawn.clone();
+        let flag = should_pause.clone();
+        let flag_set = flag_set.clone();
         let handle = thread::spawn(move || {
-            // Give time for flag to be set
-            thread::sleep(Duration::from_millis(50));
+            flag_set.wait();
             flag.load(Ordering::Relaxed)
         });
         handles.push(handle);
     }
 
-    // Small delay to let threads start
-    thread::sleep(Duration::from_millis(10));
-
-    // Set the flag while threads are running
+    // Set the flag while threads are running, then release them
     should_pause.store(true, Ordering::Relaxed);
+    flag_set.wait();
 
     // All threads should see the updated value
     for handle in handles {

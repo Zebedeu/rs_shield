@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::ui::components::{
+    Button, ButtonSize, ButtonVariant, Card, CardVariant, Input, InputVariant,
+};
 use crate::ui::{app::AppConfig, i18n::get_texts};
 use rsb_sdk::credentials::SecureString;
 use rsb_sdk::credentials::credentials_manager::{CredentialsManager, S3Credentials};
@@ -149,166 +152,203 @@ pub fn CreateProfileScreen() -> Element {
     };
 
     let profile_saved_msg =
-        use_memo(move || texts.profile_saved_as.replace("{0}", &profile_name()));
+        use_memo(move || format!("Profile will be saved as: {}.toml", profile_name()));
 
     rsx! {
-        div { class: "card",
-            h2 { class: "page-title", "{texts.create_profile_title}" }
-
-            div { class: "form-group",
-                label { class: "label-text", "{texts.profile_name_label}" }
-                input {
-                    class: "input-field",
-                    r#type: "text",
-                    placeholder: "E.g.: documents_backup",
-                    value: "{profile_name}",
-                    oninput: move |evt| {
-                        profile_name.set(evt.value());
-                        message.set(String::new());
-                    }
-                }
-                p { class: "hint", "{profile_saved_msg()}" }
+        div { class: "flex flex-col gap-4 p-4 bg-slate-50 dark:bg-slate-900",
+            // Header
+            div { class: "space-y-1",
+                h1 { class: "text-lg font-semibold text-slate-900 dark:text-slate-100", "➕ Create Profile" }
+                p { class: "text-sm text-slate-600 dark:text-slate-400", "Set up a new backup profile with your preferences" }
             }
 
-            div { class: "form-group",
-                label { class: "label-text", "{texts.source_dir_label}" }
-                div { class: "flex gap-3",
-                    input {
-                        class: "input-field",
-                        r#type: "text",
-                        placeholder: "{texts.select_source_folder}",
-                        value: "{source_path.read().to_string_lossy()}",
-                        readonly: true
+            // Main form card
+            Card { variant: CardVariant::Elevated,
+                div { class: "space-y-4",
+                    // Profile name
+                    Input {
+                        label: texts.profile_name_label.to_string(),
+                        placeholder: "documents_backup".to_string(),
+                        value: "{profile_name}",
+                        helper_text: profile_saved_msg().to_string(),
+                        oninput: Some(EventHandler::new(move |evt: FormEvent| {
+                            profile_name.set(evt.value());
+                            message.set(String::new());
+                        })),
                     }
-                    button {
-                        class: "btn-icon",
-                        onclick: handle_select_source,
-                        disabled: is_loading(),
-                        "📂"
-                    }
-                }
-                p { class: "hint", "{texts.source_dir_hint}" }
-            }
 
-            div { class: "form-group",
-                label { class: "label-text", "{texts.dest_dir_label}" }
-                div { class: "flex gap-3",
-                    input {
-                        class: "input-field",
-                        r#type: "text",
-                        placeholder: "{texts.select_dest_folder}",
-                        value: "{dest_path.read().to_string_lossy()}",
-                        readonly: true
-                    }
-                    button {
-                        class: "btn-icon",
-                        onclick: handle_select_dest,
-                        disabled: is_loading(),
-                        "📂"
-                    }
-                }
-                p { class: "hint", "{texts.dest_dir_hint}" }
-            }
-
-            div { class: "form-group",
-                label { class: "label-text", "{texts.exclude_patterns_label}" }
-                textarea {
-                    class: "input-field min-h-[120px] font-mono text-sm",
-                    placeholder: "One pattern per line:\n*.tmp\nnode_modules\n.git\n.DS_Store\n__pycache__",
-                    value: "{exclude_patterns}",
-                    oninput: move |evt| exclude_patterns.set(evt.value())
-                }
-                p { class: "hint",
-                    "{texts.exclude_patterns_hint}\n"
-                    "- \"*.ext\" for wildcards (e.g., *.tmp, *.log)\n"
-                    "- \".hidden\" for hidden files (e.g., .git, .DS_Store)\n"
-                    "- \"folder\" for entire folders (e.g., node_modules, __pycache__)"
-                }
-            }
-
-            div { class: "card-section mt-4 border-t border-slate-200 dark:border-slate-700 pt-4",
-                div {
-                    class: "flex items-center justify-between cursor-pointer select-none",
-                    onclick: move |_| use_s3.set(!use_s3()),
-                    h3 { class: "section-title mb-0", "{texts.s3_config_optional}" }
-                    div { class: if use_s3() { "text-indigo-600 transform rotate-180 transition-transform" } else { "text-slate-400 transition-transform" },
-                        "▼"
-                    }
-                }
-
-                if use_s3() {
-                    div { class: "mt-4 space-y-4 animate-fade-in",
-                        div { class: "form-group",
-                            label { class: "label-text", "Bucket Name" }
+                    // Source directory
+                    div { class: "space-y-2",
+                        label { class: "text-sm font-semibold text-slate-700 dark:text-slate-300",
+                            "{texts.source_dir_label}"
+                        }
+                        div { class: "flex gap-2",
                             input {
-                                class: "input-field", r#type: "text", placeholder: "e.g., my-backup-bucket",
-                                value: "{s3_bucket}", oninput: move |evt| s3_bucket.set(evt.value())
+                                class: "flex-1 px-4 py-2 text-sm rounded-md border border-slate-300 dark:border-slate-600 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 cursor-not-allowed",
+                                r#type: "text",
+                                placeholder: "Select folder",
+                                value: "{source_path.read().to_string_lossy()}",
+                                readonly: true
+                            }
+                            Button {
+                                variant: ButtonVariant::Secondary,
+                                size: ButtonSize::SM,
+                                disabled: is_loading(),
+                                onclick: handle_select_source,
+                                "📂 Select"
                             }
                         }
-                        div { class: "grid grid-cols-2 gap-4",
-                            div { class: "form-group",
-                                label { class: "label-text", "Region" }
-                                input {
-                                    class: "input-field", r#type: "text", placeholder: "e.g., us-east-1",
-                                    value: "{s3_region}", oninput: move |evt| s3_region.set(evt.value())
+                        p { class: "text-xs text-slate-600 dark:text-slate-400",
+                            "{texts.source_dir_hint}"
+                        }
+                    }
+
+                    // Destination directory
+                    div { class: "space-y-2",
+                        label { class: "text-sm font-semibold text-slate-700 dark:text-slate-300",
+                            "{texts.dest_dir_label}"
+                        }
+                        div { class: "flex gap-2",
+                            input {
+                                class: "flex-1 px-4 py-2 text-sm rounded-md border border-slate-300 dark:border-slate-600 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 cursor-not-allowed",
+                                r#type: "text",
+                                placeholder: "Select folder",
+                                value: "{dest_path.read().to_string_lossy()}",
+                                readonly: true
+                            }
+                            Button {
+                                variant: ButtonVariant::Secondary,
+                                size: ButtonSize::SM,
+                                disabled: is_loading(),
+                                onclick: handle_select_dest,
+                                "📂 Select"
+                            }
+                        }
+                        p { class: "text-xs text-slate-600 dark:text-slate-400",
+                            "{texts.dest_dir_hint}"
+                        }
+                    }
+
+                    // Exclude patterns (textarea)
+                    div { class: "space-y-2",
+                        label { class: "text-sm font-semibold text-slate-700 dark:text-slate-300",
+                            "{texts.exclude_patterns_label}"
+                        }
+                        textarea {
+                            class: "w-full px-3 py-2.5 text-sm rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all duration-150 resize-none",
+                            placeholder: "*.tmp\nnode_modules\n.git\n.DS_Store\n__pycache__",
+                            value: "{exclude_patterns}",
+                            oninput: move |evt: Event<FormData>| exclude_patterns.set(evt.value()),
+                            rows: "8"
+                        }
+                        p { class: "text-xs text-slate-600 dark:text-slate-400",
+                            "One pattern per line. Wildcards: *.ext, Hidden: .folder, Folders: node_modules"
+                        }
+                    }
+                }
+            }
+
+            // S3 Configuration (collapsible)
+            Card { variant: CardVariant::Outlined,
+                div { class: "space-y-4",
+                    div {
+                        class: "flex items-center justify-between cursor-pointer select-none hover:opacity-75 transition-opacity",
+                        onclick: move |_| use_s3.set(!use_s3()),
+                        h3 { class: "text-lg font-semibold text-slate-900 dark:text-slate-100", "☁️ S3 Configuration (Optional)" }
+                        div {
+                            class: if use_s3() { "text-indigo-600 dark:text-indigo-400 transform rotate-180 transition-transform" } else { "text-slate-400 dark:text-slate-500 transition-transform" },
+                            "▼"
+                        }
+                    }
+
+                    if use_s3() {
+                        div { class: "space-y-4 pt-4 border-t border-slate-200 dark:border-slate-700",
+                            Input {
+                                label: "Bucket Name".to_string(),
+                                placeholder: "my-backup-bucket".to_string(),
+                                value: "{s3_bucket}",
+                                oninput: Some(EventHandler::new(move |evt: FormEvent| s3_bucket.set(evt.value()))),
+                            }
+
+                            div { class: "grid grid-cols-2 gap-4",
+                                Input {
+                                    label: "Region".to_string(),
+                                    placeholder: "us-east-1".to_string(),
+                                    value: "{s3_region}",
+                                    oninput: Some(EventHandler::new(move |evt: FormEvent| s3_region.set(evt.value()))),
+                                }
+                                Input {
+                                    label: "Endpoint (Optional)".to_string(),
+                                    placeholder: "https://s3.amazonaws.com".to_string(),
+                                    value: "{s3_endpoint}",
+                                    oninput: Some(EventHandler::new(move |evt: FormEvent| s3_endpoint.set(evt.value()))),
                                 }
                             }
-                            div { class: "form-group",
-                                label { class: "label-text", "Endpoint (Optional)" }
-                                input {
-                                    class: "input-field", r#type: "text", placeholder: "e.g., https://s3.amazonaws.com",
-                                    value: "{s3_endpoint}", oninput: move |evt| s3_endpoint.set(evt.value())
-                                }
+
+                            Input {
+                                label: "Access Key ID".to_string(),
+                                placeholder: "AKIA...".to_string(),
+                                value: "{s3_access_key}",
+                                oninput: Some(EventHandler::new(move |evt: FormEvent| s3_access_key.set(evt.value()))),
+                            }
+
+                            Input {
+                                variant: InputVariant::Password,
+                                label: "Secret Access Key".to_string(),
+                                placeholder: "••••••••".to_string(),
+                                value: "{s3_secret_key}",
+                                helper_text: "⚠️ Credentials saved in config. Use environment variables for better security.".to_string(),
+                                oninput: Some(EventHandler::new(move |evt: FormEvent| s3_secret_key.set(evt.value()))),
                             }
                         }
-                        div { class: "form-group",
-                            label { class: "label-text", "Access Key ID" }
-                            input {
-                                class: "input-field", r#type: "text", placeholder: "AWS_ACCESS_KEY_ID",
-                                value: "{s3_access_key}", oninput: move |evt| s3_access_key.set(evt.value())
-                            }
+                    } else {
+                        p { class: "text-sm text-slate-600 dark:text-slate-400 pt-2",
+                            "Click to configure remote backup to AWS S3, MinIO, Cloudflare R2, or compatible services."
                         }
-                        div { class: "form-group",
-                            label { class: "label-text", "Secret Access Key" }
-                            input {
-                                class: "input-field", r#type: "password", placeholder: "AWS_SECRET_ACCESS_KEY",
-                                value: "{s3_secret_key}", oninput: move |evt| s3_secret_key.set(evt.value())
-                            }
-                            p { class: "hint text-amber-600 dark:text-amber-400",
-                                "⚠️ Note: Credentials will be saved in the configuration file. For greater security, use environment variables or IAM roles if possible."
-                            }
-                        }
-                    }
-                } else {
-                    p { class: "hint mt-2",
-                        "Click to expand if you want to configure remote backup for AWS S3, MinIO, Cloudflare R2, etc."
                     }
                 }
             }
 
+            // Status message
             if !message().is_empty() {
                 div {
-                    class: "alert",
-                    class: if is_success() { "alert-success" } else { "alert-error" },
-                    "{message}"
+                    class: if is_success() {
+                        "flex items-start gap-3 p-4 rounded-lg bg-emerald-50 dark:bg-emerald-900/20 border-l-4 border-emerald-500"
+                    } else {
+                        "flex items-start gap-3 p-4 rounded-lg bg-red-50 dark:bg-red-900/20 border-l-4 border-red-500"
+                    },
+                    span { class: "text-xl flex-shrink-0 mt-0.5", if is_success() { "✅" } else { "❌" } }
+                    p { class: "text-sm", "{message}" }
                 }
             }
 
-            button {
-                class: "btn-primary",
-                class: if is_loading() { "btn-disabled" } else { "" },
-                onclick: handle_create,
-                disabled: is_loading() || profile_name().is_empty(),
-                if is_loading() {
-                    "⏳ Creating profile..."
-                } else {
+            // Action buttons
+            div { class: "flex flex-col sm:flex-row gap-3",
+                Button {
+                    variant: ButtonVariant::Primary,
+                    size: ButtonSize::MD,
+                    loading: is_loading(),
+                    disabled: is_loading() || profile_name().is_empty() || source_path().as_os_str().is_empty(),
+                    class: "flex-1".to_string(),
+                    onclick: handle_create,
                     "✨ Create Profile"
                 }
             }
 
-            div { class: "card-section",
-                h3 { class: "section-title", "{texts.next_steps_title}" }
-                p { class: "hint", "{texts.next_steps_hint}" }
+            // Helper text
+            Card { variant: CardVariant::Filled,
+                div { class: "space-y-2",
+                    h3 { class: "font-semibold text-slate-900 dark:text-slate-100", "📝 Next Steps" }
+                    p { class: "text-sm text-slate-600 dark:text-slate-400",
+                        "After creating this profile, you'll be able to:"
+                    }
+                    ul { class: "list-disc list-inside text-sm text-slate-600 dark:text-slate-400 space-y-1",
+                        li { "Run backups manually or on schedule" }
+                        li { "Monitor real-time synchronization" }
+                        li { "Manage snapshots and recovery" }
+                        li { "Configure advanced settings" }
+                    }
+                }
             }
         }
     }

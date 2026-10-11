@@ -186,22 +186,21 @@ impl NotificationLogger {
             let entry = entry?;
             let path = entry.path();
 
-            if path.extension().is_some_and(|ext| ext == "jsonl") {
-                if let Ok(metadata) = path.metadata() {
-                    if let Ok(modified) = metadata.modified() {
-                        let age = now.timestamp().saturating_sub(
-                            modified
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as i64,
-                        );
+            if path.extension().is_some_and(|ext| ext == "jsonl")
+                && let Ok(metadata) = path.metadata()
+                && let Ok(modified) = metadata.modified()
+            {
+                let age = now.timestamp().saturating_sub(
+                    modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                );
 
-                        if age > (days as i64 * 86400) {
-                            fs::remove_file(&path)?;
-                            removed += 1;
-                            info!("🗑️ Old log removed: {}", path.display());
-                        }
-                    }
+                if age > (days as i64 * 86400) {
+                    fs::remove_file(&path)?;
+                    removed += 1;
+                    info!("🗑️ Old log removed: {}", path.display());
                 }
             }
         }

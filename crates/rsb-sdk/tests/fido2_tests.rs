@@ -18,6 +18,34 @@ fn test_fido2_list_credentials_empty() {
 
 #[test]
 fn test_fido2_storage_path() {
+    // Usar uma entrada de keyring própria: tocar no DEK real faz o macOS pedir
+    // autorização a cada binário de teste novo (o teste ficava bloqueado).
+    let service = format!("rsb-fido2-dek-test-{}", uuid::Uuid::new_v4());
+    // SAFETY: único teste deste binário que lê esta variável.
+    unsafe { std::env::set_var("RSB_FIDO2_KEYRING_SERVICE", &service) };
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            if let Ok(entry) = keyring::Entry::new(&self.0, "default") {
+                let _ = entry.delete_password();
+            }
+        }
+    }
+    // CI runners without a secret service (e.g. Linux without D-Bus
+    // `org.freedesktop.secrets`) have no keyring backend: skip there.
+    let probe = keyring::Entry::new(&service, "default")
+        .and_then(|entry| entry.set_password("probe").map(|_| entry));
+    match probe {
+        Ok(entry) => {
+            let _ = entry.delete_password();
+        }
+        Err(e) => {
+            eprintln!("skipping test_fido2_storage_path: no keyring backend ({e})");
+            return;
+        }
+    }
+    let _cleanup = Cleanup(service);
+
     let temp_file = NamedTempFile::new().unwrap();
     let path = temp_file.path().to_path_buf();
 

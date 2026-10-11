@@ -54,9 +54,13 @@ pub enum Fido2Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Show codes on screen (default: true)
-        #[arg(long, default_value = "true")]
+        /// Show codes on screen (default: true; use `--display false` or `--no-display`)
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         display: bool,
+
+        /// Do not show codes on screen (requires --output)
+        #[arg(long)]
+        no_display: bool,
     },
 
     /// List recovery codes for a user (shows count only, not codes)
@@ -95,9 +99,13 @@ impl Fido2Command {
         match self {
             Self::Register { .. } => {
                 info!("🔐 Starting Auth registration flow...");
-                fido2_web::run_server(manager, Html(include_str!("../assets/fido2_auth.html")))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                fido2_web::run_server_with_mode(
+                    manager,
+                    Html(include_str!("../assets/fido2_auth.html")),
+                    fido2_web::ServerMode::Register,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             }
 
             Self::Authenticate { .. } => {
@@ -128,35 +136,57 @@ impl Fido2Command {
                 }
             }
             Self::Delete { user_id, .. } => {
+                // Operação destrutiva: exige sessão autenticada do próprio utilizador.
+                require_auth_as(&user_id).await?;
                 info!("🗑️  Deleting Auth credential for user: {}", user_id);
 
                 let mut mg = manager.lock().await;
 
-                // 🔥 carregar antes
-                let _ = mg.load_from_file(&path);
+                // 🔥 carregar antes (falha = abortar, para não gravar um estado vazio)
+                mg.load_from_file(&path)
+                    .map_err(|e| anyhow::anyhow!("❌ Failed to load credentials: {}", e))?;
 
-                match mg.revoke_user(&user_id) {
-                    Ok(_) => {
-                        // 🔥 salvar depois
-                        let _ = mg.save_to_file(&path);
-                        println!("✅ Credential deleted successfully");
-                    }
-                    Err(e) => println!("❌ Error deleting credential: {}", e),
+                if !mg.has_credential(&user_id) {
+                    return Err(anyhow::anyhow!("❌ Unknown user: {}", user_id));
                 }
+
+                mg.revoke_user(&user_id)
+                    .map_err(|e| anyhow::anyhow!("❌ Error deleting credential: {}", e))?;
+                // 🔥 salvar depois
+                mg.save_to_file(&path)
+                    .map_err(|e| anyhow::anyhow!("❌ Failed to save credentials: {}", e))?;
+                println!("✅ Credential deleted successfully");
             }
 
             Self::GenerateCodes {
                 user_id,
                 output,
                 display,
+                no_display,
                 ..
             } => {
+                let display = display && !no_display;
+                if !display && output.is_none() {
+                    return Err(anyhow::anyhow!(
+                        "❌ Codes would be neither displayed nor saved. Use --output <file> with --no-display."
+                    ));
+                }
+
+                // Gerar códigos substitui os existentes: exige sessão autenticada
+                // do próprio utilizador (senão qualquer pessoa podia sequestrar a conta).
+                require_auth_as(&user_id).await?;
                 info!("🔑 Generating recovery codes for user: {}", user_id);
 
                 let mut mg = manager.lock().await;
 
-                // Load existing credentials
-                let _ = mg.load_from_file(&path);
+                // Load existing credentials (falha = abortar)
+                mg.load_from_file(&path)
+                    .map_err(|e| anyhow::anyhow!("❌ Failed to load credentials: {}", e))?;
+
+                // Recusar utilizadores desconhecidos (sem credencial FIDO2 registada).
+                if !mg.has_credential(&user_id) {
+                    return Err(anyhow::anyhow!("❌ Unknown user: {}", user_id));
+                }
 
                 match mg.generate_backup_codes(&user_id) {
                     Ok(codes) => {
@@ -187,15 +217,18 @@ impl Fido2Command {
                                 chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
                                 codes.join("\n")
                             );
-                            std::fs::write(&output_path, content)?;
+                            // 0600: os códigos dão acesso à conta.
+                            rsb_sdk::config::write_file_secure(&output_path, content.as_bytes())?;
                             println!("💾 Codes saved to: {}", output_path.display());
                         }
 
                         // Save updated manager to storage
-                        let _ = mg.save_to_file(&path);
+                        mg.save_to_file(&path).map_err(|e| {
+                            anyhow::anyhow!("❌ Failed to save recovery codes: {}", e)
+                        })?;
                         println!("\n⚠️  REMINDER: Generate new codes after using some!");
                     }
-                    Err(e) => println!("❌ Error generating codes: {}", e),
+                    Err(e) => return Err(anyhow::anyhow!("❌ Error generating codes: {}", e)),
                 }
             }
 
@@ -272,4 +305,23 @@ impl Fido2Command {
                 .unwrap_or_else(|_| PathBuf::from(".rs-shield/fido2_credentials.json"))
         })
     }
+}
+
+/// Exige uma sessão válida (check_fido2_auth) cujo `sub` seja `user_id`.
+async fn require_auth_as(user_id: &str) -> Result<()> {
+    let token = rsb_sdk::server::routes::check_fido2_auth()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let claims = rsb_sdk::auth::JwtManager::from_env()
+        .map_err(|e| anyhow::anyhow!("{}", e))?
+        .verify_token(&token)
+        .map_err(|e| anyhow::anyhow!("❌ Invalid session: {}", e))?;
+    if claims.sub != user_id {
+        return Err(anyhow::anyhow!(
+            "❌ Authenticated as '{}', cannot manage credentials of '{}'",
+            claims.sub,
+            user_id
+        ));
+    }
+    Ok(())
 }

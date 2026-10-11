@@ -95,6 +95,8 @@ impl NotificationHistory {
 
     /// Add webhook sent notification
     pub fn add_webhook_sent(&mut self, webhook_url: &str, success: bool) {
+        // Nunca guardar o URL completo: path/query contêm segredos do webhook.
+        let webhook_url = crate::core::chat_integrations::redact_url(webhook_url);
         self.add_entry(NotificationHistoryEntry {
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Local::now().to_rfc3339(),

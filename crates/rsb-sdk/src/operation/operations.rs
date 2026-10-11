@@ -85,6 +85,12 @@ pub struct OperationsManager {
     history: OperationsHistory,
 }
 
+impl Default for OperationsManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OperationsManager {
     pub fn new() -> Self {
         let history_file = get_history_file_path();
@@ -138,6 +144,8 @@ pub fn ensure_history_directory() -> Result<(), String> {
     Ok(())
 }
 
+// TODO(fase 2): substituir por uma struct de opções.
+#[allow(clippy::too_many_arguments)]
 pub fn create_operation(
     operation_type: String,
     status: String,

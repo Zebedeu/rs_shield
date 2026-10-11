@@ -1,4 +1,4 @@
-use crate::auth::{JwtManager, SessionClaims, SessionStore};
+use crate::auth::SessionStore;
 use crate::server::handlers::AuthHandlerState;
 use axum::{
     Json,
@@ -7,7 +7,6 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use std::sync::Arc;
 use tracing::{error, warn};
 
 /// Custom extractor to validate JWT from the Authorization header
@@ -47,7 +46,7 @@ where
         }
 
         let token = &auth_header[7..];
-        let claims = state.jwt_manager.verify_token(token).map_err(|_| {
+        let _claims = state.jwt_manager.verify_token(token).map_err(|_| {
             (
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse::unauthorized("Invalid token")),
@@ -135,6 +134,32 @@ pub async fn require_auth_middleware<S: SessionStore + Clone + 'static>(
             ))
         }
     }
+}
+
+/// Verifica se o cabeçalho Host é exatamente `localhost:<port>` ou
+/// `127.0.0.1:<port>` (proteção contra DNS rebinding em servidores locais).
+pub fn is_allowed_local_host(headers: &HeaderMap, port: u16) -> bool {
+    let host = match headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+    {
+        Some(h) => h.trim().to_ascii_lowercase(),
+        None => return false,
+    };
+    host == format!("localhost:{}", port) || host == format!("127.0.0.1:{}", port)
+}
+
+/// Middleware: rejeita pedidos cujo Host não é o servidor local esperado.
+pub async fn local_host_guard_middleware(
+    State(port): State<u16>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if !is_allowed_local_host(request.headers(), port) {
+        warn!("Rejected request with unexpected Host header");
+        return Err(StatusCode::MISDIRECTED_REQUEST);
+    }
+    Ok(next.run(request).await)
 }
 
 /// Middleware to log request information
@@ -231,5 +256,25 @@ impl ErrorResponse {
             error: "internal_error".to_string(),
             message: message.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    #[test]
+    fn test_is_allowed_local_host() {
+        let mut h = HeaderMap::new();
+        assert!(!is_allowed_local_host(&h, 3000));
+        h.insert("host", HeaderValue::from_static("localhost:3000"));
+        assert!(is_allowed_local_host(&h, 3000));
+        assert!(!is_allowed_local_host(&h, 3001));
+        h.insert("host", HeaderValue::from_static("127.0.0.1:3000"));
+        assert!(is_allowed_local_host(&h, 3000));
+        h.insert("host", HeaderValue::from_static("evil.example:3000"));
+        assert!(!is_allowed_local_host(&h, 3000));
+        h.insert("host", HeaderValue::from_static("localhost"));
+        assert!(!is_allowed_local_host(&h, 3000));
     }
 }

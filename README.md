@@ -51,8 +51,8 @@ cargo run --bin rsb-cli -- --help
 rs-shield/
 ├── rsb-cli/        # Command-line interface
 ├── rsb-sdk/       # Core encryption & backup engine
-├── rsb-desktop/    # Desktop GUI (Dioxus + Tailwind)
-└── tests/          # Integration tests
+└── rsb-desktop/    # Desktop GUI (Dioxus + Tailwind)
+# Integration tests live in each crate's tests/ (mainly crates/rsb-sdk/tests)
 ```
 
 ## 🔒 Security

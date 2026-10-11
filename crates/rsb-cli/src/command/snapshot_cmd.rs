@@ -16,7 +16,7 @@ pub enum SnapshotCommand {
         /// Path to backup directory (portable mode)
         #[arg(short, long)]
         backup: Option<PathBuf>,
-        /// Decryption key (if manifests are encrypted)
+        /// Decryption key if manifests are encrypted (DEPRECATED: visible in `ps`; prefer env RSB_ENCRYPTION_KEY)
         #[arg(short, long)]
         key: Option<String>,
     },
@@ -31,7 +31,7 @@ pub enum SnapshotCommand {
         backup: Option<PathBuf>,
         /// Snapshot ID
         id: String,
-        /// Decryption key (if manifest is encrypted)
+        /// Decryption key if manifest is encrypted (DEPRECATED: visible in `ps`; prefer env RSB_ENCRYPTION_KEY)
         #[arg(short, long)]
         key: Option<String>,
     },
@@ -60,7 +60,7 @@ pub enum SnapshotCommand {
         from: String,
         /// Second snapshot ID
         to: String,
-        /// Decryption key (if manifests are encrypted)
+        /// Decryption key if manifests are encrypted (DEPRECATED: visible in `ps`; prefer env RSB_ENCRYPTION_KEY)
         #[arg(short, long)]
         key: Option<String>,
     },
@@ -76,6 +76,7 @@ impl SnapshotCommand {
             } => {
                 let dest_path = self.resolve_destination_path(config, backup)?;
                 let storage = LocalStorage::new(dest_path.to_string_lossy().as_ref());
+                let key = Self::resolve_key(key)?;
                 self.list(&storage, key.as_deref()).await?
             }
 
@@ -88,6 +89,7 @@ impl SnapshotCommand {
                 let dest_path = self.resolve_destination_path(config, backup)?;
                 let storage = LocalStorage::new(dest_path.to_string_lossy().as_ref());
                 let path = format!("snapshots/{}.toml", id);
+                let key = Self::resolve_key(key)?;
 
                 let manifest = self
                     .load_manifest(&storage, &path, key.as_deref())
@@ -113,6 +115,13 @@ impl SnapshotCommand {
             }
 
             SnapshotCommand::Delete { config, backup, id } => {
+                // Operação destrutiva: exige sessão autenticada.
+                rsb_sdk::server::routes::check_fido2_auth()
+                    .await
+                    .map_err(|e| anyhow!("{}", e))?;
+                if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+                    return Err(anyhow!("Invalid snapshot id: {}", id));
+                }
                 let dest_path = self.resolve_destination_path(config, backup)?;
                 let snapshots_path = dest_path.join("snapshots");
                 let path = snapshots_path.join(format!("{}.toml", id));
@@ -138,6 +147,7 @@ impl SnapshotCommand {
             } => {
                 let dest_path = self.resolve_destination_path(config, backup)?;
                 let storage = LocalStorage::new(dest_path.to_string_lossy().as_ref());
+                let key = Self::resolve_key(key)?;
                 self.diff(&storage, from, to, key.as_deref()).await?
             }
         }
@@ -156,24 +166,15 @@ impl SnapshotCommand {
             return Ok(backup_path.clone());
         }
 
-        // Try --config
-        if let Some(config_path) = config {
-            return self.extract_destination_from_config(config_path);
-        }
+        // --config explícito ou auto-descoberta segura (nunca Cargo.toml;
+        // erro se houver mais de um perfil candidato).
+        let config_path = crate::helpers::resolve_profile_path(config.clone(), None)?;
+        self.extract_destination_from_config(&config_path)
+    }
 
-        // Auto-discover .toml in current directory
-        let current_dir = std::env::current_dir()?;
-        for entry in fs::read_dir(&current_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                return self.extract_destination_from_config(&path);
-            }
-        }
-
-        Err(anyhow!(
-            "No config found. Use --config <path> or --backup <path>, or place a .toml file in current directory"
-        ))
+    /// Chave de manifestos: --key (com aviso) → env RSB_ENCRYPTION_KEY.
+    fn resolve_key(key: &Option<String>) -> Result<Option<String>> {
+        crate::helpers::obtain_encryption_key(key.clone(), None, None, false)
     }
 
     /// Compare two snapshots
@@ -248,7 +249,7 @@ impl SnapshotCommand {
                     human_bytes(*from_size),
                     human_bytes(*to_size),
                     sign,
-                    human_bytes(size_change.abs() as u64)
+                    human_bytes(size_change.unsigned_abs())
                 );
             }
         }

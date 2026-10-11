@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use battery::units::ratio::percent;
 use sysinfo::{CpuRefreshKind, RefreshKind, System};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 pub fn spawn_resource_monitor(
     battery_threshold: Option<u8>,
@@ -38,38 +38,34 @@ pub fn spawn_resource_monitor(
             let mut reason = String::new();
 
             // ==================== BATTERY ====================
-            if let Some(threshold) = battery_threshold {
-                if last_battery_check.elapsed() >= BATTERY_CHECK_INTERVAL {
-                    if let Some(manager) = &battery_manager {
-                        if let Ok(mut batteries) = manager.batteries() {
-                            if let Some(Ok(battery)) = batteries.next() {
-                                if battery.state() == battery::State::Discharging {
-                                    let charge = battery.state_of_charge().get::<percent>();
-                                    if charge < threshold as f32 {
-                                        pause = true;
-                                        reason = format!("Low battery ({:.0}%)", charge);
-                                    }
-                                }
-                            }
-                        }
+            if let Some(threshold) = battery_threshold
+                && last_battery_check.elapsed() >= BATTERY_CHECK_INTERVAL
+            {
+                if let Some(manager) = &battery_manager
+                    && let Ok(mut batteries) = manager.batteries()
+                    && let Some(Ok(battery)) = batteries.next()
+                    && battery.state() == battery::State::Discharging
+                {
+                    let charge = battery.state_of_charge().get::<percent>();
+                    if charge < threshold as f32 {
+                        pause = true;
+                        reason = format!("Low battery ({:.0}%)", charge);
                     }
-                    last_battery_check = std::time::Instant::now();
                 }
+                last_battery_check = std::time::Instant::now();
             }
 
             // ==================== CPU - MORE REALISTIC THRESHOLDS ====================
-            if !pause {
-                if let Some(threshold) = cpu_threshold {
-                    system.refresh_cpu_all();
-                    let usage = system.global_cpu_usage();
+            if !pause && let Some(threshold) = cpu_threshold {
+                system.refresh_cpu_all();
+                let usage = system.global_cpu_usage();
 
-                    // More sensible threshold for intensive backups
-                    let effective_threshold = threshold.max(65); // minimum 65% if the user defined something low
+                // More sensible threshold for intensive backups
+                let effective_threshold = threshold.max(65); // minimum 65% if the user defined something low
 
-                    if usage > effective_threshold as f32 {
-                        pause = true;
-                        reason = format!("High CPU usage ({:.1}%)", usage);
-                    }
+                if usage > effective_threshold as f32 {
+                    pause = true;
+                    reason = format!("High CPU usage ({:.1}%)", usage);
                 }
             }
 

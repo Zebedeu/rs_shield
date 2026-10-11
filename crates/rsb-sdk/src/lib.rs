@@ -19,8 +19,8 @@ pub mod utils;
 
 pub use crate::core::cancellation::CancellationToken;
 pub use config::{Config, create_profile, load_config};
-pub use core::{perform_prune, perform_restore};
-pub use credentials::{CredentialsManager, SecureString, encryption};
+pub use core::{perform_prune, perform_prune_by_age, perform_restore, plan_prune_by_count};
+pub use credentials::{CredentialsManager, S3Credentials, SecureString, encryption};
 pub use integrity::perform_verify;
 pub use portable_restore::{
     BackupValidation, config_from_backup_path, restore_from_config_or_backup,

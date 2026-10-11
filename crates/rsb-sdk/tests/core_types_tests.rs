@@ -4,8 +4,9 @@ use rsb_sdk::core::types::{CHUNK_SIZE, ChunkMetadata, FileMetadata, MULTIPART_TH
 
 #[test]
 fn test_constants() {
-    assert_eq!(MULTIPART_THRESHOLD, 4 * 1024 * 1024 * 1024);
-    assert_eq!(CHUNK_SIZE, 512 * 1024 * 1024);
+    assert_eq!(MULTIPART_THRESHOLD, 64 * 1024 * 1024);
+    assert_eq!(CHUNK_SIZE, 32 * 1024 * 1024);
+    assert!((CHUNK_SIZE as u64) <= MULTIPART_THRESHOLD);
 }
 
 #[test]
@@ -138,7 +139,7 @@ fn test_chunk_metadata_large_file() {
     };
 
     assert_eq!(chunk.stored_size, CHUNK_SIZE as u64);
-    assert_eq!(chunk.stored_size, 512 * 1024 * 1024);
+    assert_eq!(chunk.stored_size, 32 * 1024 * 1024);
 }
 
 #[test]

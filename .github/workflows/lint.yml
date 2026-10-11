@@ -49,7 +49,7 @@ jobs:
             librsvg2-dev libxdo-dev
       
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   deny:
     name: Deny (Dependencies)

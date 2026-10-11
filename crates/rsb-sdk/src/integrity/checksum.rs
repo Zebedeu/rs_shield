@@ -5,13 +5,13 @@ pub fn checksum(
 ) -> Result<(), String> {
     let actual_size = data.len() as u64;
 
-    if let Some(expected) = expected_size {
-        if actual_size != expected {
-            return Err(format!(
-                "Size mismatch: expected {}, got {}",
-                expected, actual_size
-            ));
-        }
+    if let Some(expected) = expected_size
+        && actual_size != expected
+    {
+        return Err(format!(
+            "Size mismatch: expected {}, got {}",
+            expected, actual_size
+        ));
     }
 
     if let Some(expected) = expected_hash {

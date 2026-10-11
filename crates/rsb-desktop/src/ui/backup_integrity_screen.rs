@@ -12,6 +12,7 @@ use crate::ui::{
 #[derive(Clone, Debug)]
 struct IntegrityStatus {
     backup_path: String,
+    #[allow(dead_code)]
     status: String,
     is_valid: bool,
     snapshots_count: usize,
@@ -23,9 +24,9 @@ struct IntegrityStatus {
 
 #[component]
 pub fn BackupIntegrityScreen() -> Element {
-    let mut app_config = use_context::<AppConfig>();
+    let app_config = use_context::<AppConfig>();
     let texts = get_texts(app_config.language());
-    let mut backup_path = use_signal(|| PathBuf::new());
+    let mut backup_path = use_signal(PathBuf::new);
     let mut status_msg = use_signal(|| "🔍 Select a backup folder".to_string());
     let mut is_checking = use_signal(|| false);
     let mut progress = use_signal(|| 0.0);
@@ -93,17 +94,17 @@ pub fn BackupIntegrityScreen() -> Element {
             let mut data_files_count = 0;
             let mut encrypted_files_count = 0;
 
-            if data_dir.exists() {
-                if let Ok(entries) = fs::read_dir(&data_dir) {
-                    for entry in entries.flatten() {
-                        if let Ok(metadata) = entry.metadata() {
-                            if metadata.is_file() {
-                                if entry.path().to_string_lossy().contains("enc") {
-                                    encrypted_files_count += 1;
-                                } else {
-                                    data_files_count += 1;
-                                }
-                            }
+            if data_dir.exists()
+                && let Ok(entries) = fs::read_dir(&data_dir)
+            {
+                for entry in entries.flatten() {
+                    if let Ok(metadata) = entry.metadata()
+                        && metadata.is_file()
+                    {
+                        if entry.path().to_string_lossy().contains("enc") {
+                            encrypted_files_count += 1;
+                        } else {
+                            data_files_count += 1;
                         }
                     }
                 }

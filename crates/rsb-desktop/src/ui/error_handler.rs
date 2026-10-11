@@ -2,6 +2,23 @@
 /// Masks technical errors and provides localized messages in English
 use tracing::warn;
 
+const SECURITY_KEY_ERROR: &str =
+    "🔑 Security key error. Please reconnect your security key or verify the connection.";
+
+fn is_security_key_error(e: &str) -> bool {
+    [
+        "fido",
+        "webauthn",
+        "ctap",
+        "u2f",
+        "security key",
+        "security-key",
+        "authenticator",
+    ]
+    .iter()
+    .any(|k| e.contains(k))
+}
+
 /// Convert technical error messages to user-friendly messages
 /// Technical errors are logged but not shown to the user
 pub fn format_user_error(error: impl std::fmt::Display, context: &str) -> String {
@@ -12,6 +29,11 @@ pub fn format_user_error(error: impl std::fmt::Display, context: &str) -> String
 
     // Return user-friendly message based on error type
     match error_str.as_str() {
+        // Hardware security key (FIDO2/WebAuthn/CTAP) errors. Checked first so
+        // e.g. "FIDO2 device timeout" or "WebAuthn credential not found" are not
+        // reported as generic timeout/path errors.
+        e if is_security_key_error(e) => SECURITY_KEY_ERROR.to_string(),
+
         // Network/Connection errors
         e if e.contains("connection refused") || e.contains("connection reset") => {
             "❌ Connection error. Please check your network and try again.".to_string()
@@ -60,10 +82,8 @@ pub fn format_user_error(error: impl std::fmt::Display, context: &str) -> String
             "📄 Failed to process data. Please try reloading the application.".to_string()
         }
 
-        // Hardware/FIDO2 errors
-        e if e.contains("fido2") || e.contains("security key") || e.contains("credential") => {
-            "🔑 Security key error. Please reconnect it or verify the connection.".to_string()
-        }
+        // Hardware/FIDO2 credential errors
+        e if e.contains("credential") => SECURITY_KEY_ERROR.to_string(),
 
         // Recovery code errors
         e if e.contains("recovery") && e.contains("code") => {
@@ -84,6 +104,7 @@ pub fn format_user_error(error: impl std::fmt::Display, context: &str) -> String
 }
 
 /// Format error message with specific operation context
+#[allow(dead_code)] // usado só em testes, por agora
 pub fn format_operation_error(error: impl std::fmt::Display, operation: &str) -> String {
     let friendly_msg = format_user_error(&error, operation);
 
@@ -132,6 +153,7 @@ pub fn format_operation_error(error: impl std::fmt::Display, operation: &str) ->
 }
 
 /// Extract just the user-friendly message without the emoji prefix
+#[allow(dead_code)] // usado só em testes, por agora
 pub fn get_error_message_only(error: impl std::fmt::Display, context: &str) -> String {
     format_user_error(error, context)
         .replace("❌ ", "")
@@ -169,5 +191,21 @@ mod tests {
         let error = "FIDO2 credential failed";
         let result = format_user_error(error, "test");
         assert!(result.contains("security key"));
+    }
+
+    #[test]
+    fn test_webauthn_errors_map_to_security_key() {
+        for err in [
+            "WebAuthn assertion timeout",
+            "fido2 authentication failed",
+            "CTAP2 device not found",
+            "Security-Key unplugged",
+        ] {
+            let result = format_user_error(err, "test");
+            assert!(result.contains("security key"), "{err} -> {result}");
+        }
+        // fido2 operation context must not double-prefix the message.
+        let msg = format_operation_error("FIDO2 credential failed", "fido2");
+        assert!(!msg.contains("Security key error: "));
     }
 }

@@ -3,11 +3,10 @@
 
 use rsb_sdk::{config_from_backup_path, validate_backup_structure};
 use std::fs;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 // Helper function to create a mock backup structure
-fn create_mock_backup(backup_path: &PathBuf) {
+fn create_mock_backup(backup_path: &std::path::Path) {
     fs::create_dir_all(backup_path.join("snapshots")).unwrap();
     fs::create_dir_all(backup_path.join("data/clear")).unwrap();
     fs::write(

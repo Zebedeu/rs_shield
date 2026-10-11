@@ -2,12 +2,28 @@ use crate::core::file_processor;
 use crate::utils::{matches_exclude_pattern, walk_filtered};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+/// Discovers files to back up. Walker errors (unreadable directories,
+/// permission denied, ...) are dropped here; prefer
+/// [`discover_files_with_errors`] so they can be reported.
 pub fn discover_files(
     source: &Path,
     exclude_patterns: &[String],
 ) -> Result<Vec<(PathBuf, PathBuf)>, Box<dyn std::error::Error>> {
+    discover_files_with_errors(source, exclude_patterns).map(|(files, _)| files)
+}
+
+/// Like [`discover_files`], but also returns every walker error as a
+/// message so the backup does not report a clean success when parts of the
+/// source tree could not be read.
+/// (absolute path, path relative to the source root) pairs.
+pub type DiscoveredFiles = Vec<(PathBuf, PathBuf)>;
+
+pub fn discover_files_with_errors(
+    source: &Path,
+    exclude_patterns: &[String],
+) -> Result<(DiscoveredFiles, Vec<String>), Box<dyn std::error::Error>> {
     if !source.exists() {
         return Err(format!("Source path does not exist: {}", source.display()).into());
     }
@@ -30,6 +46,7 @@ pub fn discover_files(
     }
 
     let walker = walk_filtered(source, exclude_patterns, true);
+    let mut walk_errors: Vec<String> = Vec::new();
 
     let mut files: Vec<(PathBuf, PathBuf)> = walker
         .filter_map(|e| {
@@ -52,7 +69,8 @@ pub fn discover_files(
                     None
                 }
                 Err(e) => {
-                    debug!("Walker error: {}", e);
+                    warn!("Walker error: {}", e);
+                    walk_errors.push(format!("Could not read part of the source tree: {}", e));
                     None
                 }
             }
@@ -68,7 +86,7 @@ pub fn discover_files(
         source.display()
     );
 
-    Ok(files)
+    Ok((files, walk_errors))
 }
 
 #[cfg(test)]
@@ -77,6 +95,29 @@ mod tests {
 
     #[test]
     fn test_discover_empty_directory() {
-        // TODO: Add test for empty directory
+        let dir = tempfile::tempdir().unwrap();
+        let (files, errors) = discover_files_with_errors(dir.path(), &[]).unwrap();
+        assert!(files.is_empty());
+        assert!(errors.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unreadable_subdir_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ok.txt"), b"x").unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("secret.txt"), b"y").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Running as root bypasses permissions; only assert when it applies.
+        let readable_anyway = std::fs::read_dir(&locked).is_ok();
+        let (files, errors) = discover_files_with_errors(dir.path(), &[]).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(files.iter().any(|(_, rel)| rel == Path::new("ok.txt")));
+        if !readable_anyway {
+            assert!(!errors.is_empty());
+        }
     }
 }

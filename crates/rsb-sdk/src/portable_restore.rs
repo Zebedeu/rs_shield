@@ -65,6 +65,37 @@ pub fn config_from_backup_path(
     })
 }
 
+/// Minimal config to restore straight from an S3 repository, without a
+/// profile file. Credentials are resolved by `storage_backend` (env vars,
+/// session credentials, or the encrypted credentials file) — never from here.
+pub fn config_for_s3_restore(
+    bucket: &str,
+    region: Option<String>,
+    endpoint: Option<String>,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    if bucket.trim().is_empty() {
+        return Err("S3 bucket is required for an S3 restore".into());
+    }
+    Ok(Config {
+        source_path: "direct-restore".to_string(),
+        destination_path: String::new(),
+        exclude_patterns: Vec::new(),
+        encryption_key: None,
+        encrypt_patterns: None,
+        pause_on_low_battery: None,
+        pause_on_high_cpu: None,
+        compression_level: None,
+        backup_mode: "incremental".to_string(),
+        s3_bucket: Some(bucket.trim().to_string()),
+        s3_region: region.filter(|r| !r.trim().is_empty()),
+        s3_endpoint: endpoint.filter(|e| !e.trim().is_empty()),
+        s3: None,
+        s3_buckets: None,
+        max_threads: None,
+        channel_buffer_size: 8192,
+    })
+}
+
 /// Unified restore function supporting both config files and direct backup paths
 ///
 /// This function provides a single entry point for restore operations that works
@@ -92,6 +123,8 @@ pub fn config_from_backup_path(
 /// - Config file cannot be loaded
 /// - Backup structure is invalid
 /// - Restore operation fails
+// TODO(fase 2): substituir por uma struct de opções.
+#[allow(clippy::too_many_arguments)]
 pub async fn restore_from_config_or_backup(
     config_path: Option<&Path>,
     backup_path: Option<&Path>,
@@ -174,7 +207,11 @@ pub fn validate_backup_structure(backup_path: &Path) -> BackupValidation {
     // Count files if structure valid
     if snapshots_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&snapshots_dir) {
-            validation.snapshots_count = entries.count();
+            validation.snapshots_count = entries
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .filter(|e| is_snapshot_manifest_name(&e.file_name().to_string_lossy()))
+                .count();
         }
 
         if validation.snapshots_count == 0 {
@@ -189,9 +226,14 @@ pub fn validate_backup_structure(backup_path: &Path) -> BackupValidation {
     }
 
     if data_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&data_dir) {
-            validation.data_files_count = entries.count();
-        }
+        // Data objects live under `data/clear/<hash>` and `data/enc/<hash>`;
+        // count the objects themselves, not the `clear`/`enc` subdirectories.
+        validation.data_files_count = walkdir::WalkDir::new(&data_dir)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| !is_temp_or_hidden(&e.file_name().to_string_lossy()))
+            .count();
 
         if validation.data_files_count == 0 {
             validation.warnings.push("No data files found".to_string());
@@ -199,6 +241,18 @@ pub fn validate_backup_structure(backup_path: &Path) -> BackupValidation {
     }
 
     validation
+}
+
+/// True for leftovers of an interrupted atomic write (`.<name>.rsb-tmp-<id>`)
+/// and other hidden files, which are not part of the backup contents.
+fn is_temp_or_hidden(name: &str) -> bool {
+    name.starts_with('.') || name.contains(crate::storage::TMP_MARKER)
+}
+
+/// True for a snapshot manifest file (`<timestamp>[-n].toml`), ignoring
+/// temp files from atomic writes and unrelated entries.
+fn is_snapshot_manifest_name(name: &str) -> bool {
+    !is_temp_or_hidden(name) && name.len() > ".toml".len() && name.ends_with(".toml")
 }
 
 /// Backup validation result structure
@@ -230,6 +284,8 @@ pub struct BackupValidation {
 ///
 /// # Returns
 /// ReportData with restore operation details
+// TODO(fase 2): substituir por uma struct de opções.
+#[allow(clippy::too_many_arguments)]
 pub async fn restore_from_config_or_backup_with_cancellation(
     config_path: Option<&Path>,
     backup_path: Option<&Path>,

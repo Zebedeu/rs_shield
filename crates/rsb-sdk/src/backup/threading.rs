@@ -2,10 +2,10 @@ use crate::config::Config;
 use tracing::debug;
 
 pub fn determine_optimal_threads(_config: &Config, max_threads: Option<usize>) -> usize {
-    if let Some(threads) = max_threads {
-        if threads > 0 {
-            return threads.min(256); // maximum limit for parallel I/O
-        }
+    if let Some(threads) = max_threads
+        && threads > 0
+    {
+        return threads.min(256); // maximum limit for parallel I/O
     }
 
     // 2. Automatic logic based on cores

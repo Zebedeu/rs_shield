@@ -7,7 +7,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 #[derive(Clone, Zeroize, ZeroizeOnDrop, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SecureString {
-    #[serde(flatten)]
     value: String,
 }
 

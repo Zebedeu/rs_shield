@@ -1,4 +1,3 @@
-use super::telegram_validator::TelegramValidator;
 use dioxus::prelude::*;
 use rsb_sdk::core::{ChatIntegration, EmailConfig};
 use rsb_sdk::utils::ensure_directory_exists;
@@ -54,12 +53,11 @@ impl IntegrationConfig {
         };
         let config_path = config_dir.join("integrations.json");
 
-        if config_path.exists() {
-            if let Ok(content) = fs::read_to_string(&config_path) {
-                if let Ok(config) = serde_json::from_str(&content) {
-                    return config;
-                }
-            }
+        if config_path.exists()
+            && let Ok(content) = fs::read_to_string(&config_path)
+            && let Ok(config) = serde_json::from_str(&content)
+        {
+            return config;
         }
 
         Self {
@@ -84,7 +82,17 @@ impl IntegrationConfig {
         }
 
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(config_path, json)?;
+        // AVISO: contém sender_password / bot_token / webhook em claro.
+        // chmod 0600 best-effort + aviso para migrar para keyring.
+        eprintln!(
+            "⚠️ integrations.json contém segredos (SMTP/webhooks) em claro. Restrinja permissões e prefira keyring/env."
+        );
+        fs::write(&config_path, json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
+        }
         Ok(())
     }
 
@@ -107,30 +115,30 @@ impl IntegrationConfig {
     pub fn to_chat_integrations(&self) -> Vec<ChatIntegration> {
         let mut integrations = Vec::new();
 
-        if let Some(slack) = &self.slack {
-            if slack.enabled {
-                integrations.push(ChatIntegration::Slack {
-                    webhook_url: slack.webhook_url.clone(),
-                    mention_user: slack.mention_user.clone(),
-                });
-            }
+        if let Some(slack) = &self.slack
+            && slack.enabled
+        {
+            integrations.push(ChatIntegration::Slack {
+                webhook_url: slack.webhook_url.clone(),
+                mention_user: slack.mention_user.clone(),
+            });
         }
 
-        if let Some(telegram) = &self.telegram {
-            if telegram.enabled {
-                integrations.push(ChatIntegration::Telegram {
-                    bot_token: telegram.bot_token.clone(),
-                    chat_id: telegram.chat_id.clone(),
-                });
-            }
+        if let Some(telegram) = &self.telegram
+            && telegram.enabled
+        {
+            integrations.push(ChatIntegration::Telegram {
+                bot_token: telegram.bot_token.clone(),
+                chat_id: telegram.chat_id.clone(),
+            });
         }
 
-        if let Some(discord) = &self.discord {
-            if discord.enabled {
-                integrations.push(ChatIntegration::Discord {
-                    webhook_url: discord.webhook_url.clone(),
-                });
-            }
+        if let Some(discord) = &self.discord
+            && discord.enabled
+        {
+            integrations.push(ChatIntegration::Discord {
+                webhook_url: discord.webhook_url.clone(),
+            });
         }
 
         integrations
@@ -220,11 +228,11 @@ pub fn IntegrationScreen() -> Element {
     };
 
     rsx! {
-        div { class: "flex flex-col h-full gap-6 p-6 bg-slate-50 dark:bg-slate-900",
+        div { class: "flex flex-col h-full gap-4 p-4 bg-slate-50 dark:bg-slate-900",
             // Header
             div {
-                h1 { class: "text-3xl font-bold text-slate-900 dark:text-slate-100 mb-2", "⚙️ Integrações" }
-                p { class: "text-slate-600 dark:text-slate-400",
+                h1 { class: "text-xl font-bold text-slate-900 dark:text-slate-100 mb-2", "⚙️ Integrações" }
+                p { class: "text-sm text-slate-600 dark:text-slate-400",
                     "Configure notificações por Email, Slack, Telegram e Discord"
                 }
             }
@@ -293,14 +301,14 @@ pub fn IntegrationScreen() -> Element {
             }
 
             // Save Button
-            div { class: "flex gap-4 pt-4 border-t border-slate-200 dark:border-slate-700",
+            div { class: "flex flex-col gap-3 pt-3 border-t border-slate-200 dark:border-slate-700",
                 button {
-                    class: "btn btn-primary flex-1",
+                    class: "btn btn-primary flex-1 text-sm py-2",
                     onclick: handle_save_config,
                     "💾 Salvar Configurações"
                 }
                 button {
-                    class: "btn btn-secondary flex-1",
+                    class: "btn btn-secondary flex-1 text-sm py-2",
                     onclick: handle_test_config,
                     disabled: testing(),
                     if testing() {
@@ -373,10 +381,11 @@ fn EmailForm(
     };
 
     rsx! {
-        div { class: "space-y-6 p-6 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700",
+        div { class: "space-y-4 p-4 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700",
             // Enable Toggle
             div { class: "flex items-center justify-between",
                 label { class: "text-lg font-semibold text-slate-700 dark:text-slate-300", "Ativar Email" }
+                    label { class: "text-base font-semibold text-slate-700 dark:text-slate-300", "Ativar Email" }
                 input {
                     r#type: "checkbox",
                     class: "checkbox",
@@ -539,7 +548,7 @@ fn SlackForm(
     };
 
     rsx! {
-    div { class: "space-y-6 p-6 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700",
+    div { class: "space-y-4 p-4 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700",
         // Enable Toggle
         div { class: "flex items-center justify-between",
             label { class: "text-lg font-semibold text-slate-700 dark:text-slate-300", "Ativar Slack" }
@@ -626,7 +635,7 @@ fn TelegramForm(
     };
 
     rsx! {
-        div { class: "space-y-6 p-6 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700",
+        div { class: "space-y-4 p-4 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700",
             // Enable Toggle
             div { class: "flex items-center justify-between",
                 label { class: "text-lg font-semibold text-slate-700 dark:text-slate-300", "Ativar Telegram" }
@@ -733,7 +742,7 @@ fn DiscordForm(
     };
 
     rsx! {
-        div { class: "space-y-6 p-6 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700",
+        div { class: "space-y-4 p-4 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700",
             // Enable Toggle
             div { class: "flex items-center justify-between",
                 label { class: "text-lg font-semibold text-slate-700 dark:text-slate-300", "Ativar Discord" }

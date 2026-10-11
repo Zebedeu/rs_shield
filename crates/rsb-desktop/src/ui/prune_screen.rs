@@ -21,6 +21,8 @@ pub fn PruneScreen() -> Element {
     let mut is_running = use_signal(|| false);
     let mut status_msg = use_signal(|| texts.ready.to_string());
     let mut key = use_signal(String::new);
+    // Confirmação explícita: sem isto o botão destrutivo não executa.
+    let mut confirm_delete = use_signal(|| false);
 
     let handle_load_profile = move |_| {
         spawn(async move {
@@ -62,12 +64,18 @@ pub fn PruneScreen() -> Element {
         if is_running() {
             return;
         }
+        if !confirm_delete() {
+            status_msg.set("⚠️ Confirme que entende que a limpeza apaga snapshots antigos (marque a caixa de confirmação).".to_string());
+            return;
+        }
         is_running.set(true);
         status_msg.set(texts.starting.to_string());
 
         let path = repo_path();
         let days_str = retention_days();
-        let days = days_str.parse::<usize>().unwrap_or(30);
+        // `saturating` + clamp: antes `unwrap_or(30)` mascarava input inválido
+        // e o valor (dias) era passado como `keep_last` (contagem) — bug crítico.
+        let days: u32 = days_str.parse().unwrap_or(30).clamp(1, 3650);
         let key_val = key();
         let key_opt = if key_val.is_empty() {
             None
@@ -80,6 +88,13 @@ pub fn PruneScreen() -> Element {
         let s3_endpoint = app_config.s3_endpoint();
         let s3_access_key = app_config.s3_access_key();
         let s3_secret_key = app_config.s3_secret_key();
+        // Credenciais do formulário: só em memória (o SDK ignora segredos no Config).
+        if !s3_access_key.is_empty() && !s3_secret_key.is_empty() {
+            rsb_sdk::core::storage_backend::set_session_s3_credentials(
+                &s3_access_key,
+                &s3_secret_key,
+            );
+        }
 
         let s3_bucket_opt = if s3_bucket.is_empty() {
             None
@@ -145,7 +160,8 @@ pub fn PruneScreen() -> Element {
                 if path.as_os_str().is_empty() && cfg.s3_bucket.is_none() {
                     return Err(texts.please_define_paths.to_string());
                 }
-                core::perform_prune(&cfg, days)
+                // Retenção POR IDADE (dias) — nunca apaga o snapshot mais recente.
+                core::perform_prune_by_age(&cfg, days)
                     .await
                     .map_err(|e| e.to_string())
             })
@@ -215,7 +231,7 @@ pub fn PruneScreen() -> Element {
                 }
                 button {
                     class: "btn-icon",
-                onclick: move |evt| handle_load_profile(evt),
+                onclick: handle_load_profile,
                     disabled: is_running(),
                     "📂"
                 }
@@ -274,10 +290,21 @@ pub fn PruneScreen() -> Element {
             p { class: "hint", "Backups older than this period will be removed" }}
         }
 
+        div { class: "form-group",
+            label { class: "label-text",
+                input {
+                    r#type: "checkbox",
+                    checked: confirm_delete(),
+                    onchange: move |_| confirm_delete.toggle()
+                }
+                " Confirmo que a limpeza apaga snapshots/dados antigos de forma irreversível"
+            }
+        }
+
         button {
             class: "w-full btn-warning mb-4",
             onclick: handle_prune,
-            disabled: is_running(),
+            disabled: is_running() || !confirm_delete(),
             if is_running() { "{texts.executing}..." } else { "{texts.start_prune}" }
         }
 

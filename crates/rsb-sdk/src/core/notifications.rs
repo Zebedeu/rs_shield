@@ -158,7 +158,7 @@ impl NotificationManager {
     ) -> Result<(), String> {
         let notification = match payload.event {
             NotificationEvent::BackupCompleted => {
-                let details = payload
+                let _details = payload
                     .details
                     .as_deref()
                     .unwrap_or("Backup completed successfully");
@@ -268,7 +268,7 @@ impl NotificationManager {
             }
         }
 
-        for (idx, integration) in self.chat_integrations.iter().enumerate() {
+        for integration in self.chat_integrations.iter() {
             let channel_name = match integration {
                 ChatIntegration::Slack { .. } => "Slack",
                 ChatIntegration::Telegram { .. } => "Telegram",

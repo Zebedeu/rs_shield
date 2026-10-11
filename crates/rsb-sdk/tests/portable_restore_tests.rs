@@ -1,7 +1,6 @@
 //! Comprehensive tests for portable restore functionality
 //! Tests direct backup restoration without config files, cross-platform support, and validation
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -496,18 +495,18 @@ fn validate_backup_structure(backup_path: &Path) -> BackupValidation {
     if data_dir.exists() {
         // Count files recursively in data directory
         if let Ok(entries) = fs::read_dir(&data_dir) {
-            for entry in entries {
-                if let Ok(entry) = entry {
+            for entry in entries.flatten() {
+                {
                     if entry.path().is_file() {
                         validation.data_files_count += 1;
                     } else if entry.path().is_dir() {
                         // Count files in subdirectories
                         if let Ok(subentries) = fs::read_dir(entry.path()) {
                             for subentry in subentries {
-                                if let Ok(subentry) = subentry {
-                                    if subentry.path().is_file() {
-                                        validation.data_files_count += 1;
-                                    }
+                                if let Ok(subentry) = subentry
+                                    && subentry.path().is_file()
+                                {
+                                    validation.data_files_count += 1;
                                 }
                             }
                         }
@@ -596,7 +595,6 @@ fn validate_backup_integrity(
         snapshots_invalid: 0,
         data_files_valid: 0,
         data_files_invalid: 0,
-        checksums: HashMap::new(),
     };
 
     let snapshots_dir = backup_path.join("snapshots");
@@ -620,13 +618,11 @@ fn validate_backup_integrity(
                                 // Check in subdirectories (like data/clear/)
                                 let mut found = false;
                                 if let Ok(entries) = fs::read_dir(backup_path.join("data")) {
-                                    for entry in entries {
-                                        if let Ok(entry) = entry {
-                                            let subfile = entry.path().join(file_key);
-                                            if subfile.exists() {
-                                                found = true;
-                                                break;
-                                            }
+                                    for entry in entries.flatten() {
+                                        let subfile = entry.path().join(file_key);
+                                        if subfile.exists() {
+                                            found = true;
+                                            break;
                                         }
                                     }
                                 }
@@ -673,14 +669,13 @@ struct BackupIntegrity {
     pub snapshots_invalid: usize,
     pub data_files_valid: usize,
     pub data_files_invalid: usize,
-    pub checksums: HashMap<String, String>,
 }
 
 /// Simulation helper for restore operation
 fn restore_from_config_or_backup_simulation(
     config_path: Option<&Path>,
     backup_path: Option<&Path>,
-    target_path: &Path,
+    _target_path: &Path,
     _encryption_key: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if config_path.is_none() && backup_path.is_none() {
@@ -699,4 +694,70 @@ fn restore_from_config_or_backup_simulation(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// REAL VALIDATOR (rsb_sdk::validate_backup_structure) AGAINST THE REAL LAYOUT
+// ============================================================================
+
+#[test]
+fn test_real_validator_counts_objects_and_ignores_locks_and_temp_files() {
+    let temp_dir = TempDir::new().unwrap();
+    let b = temp_dir.path();
+    fs::create_dir_all(b.join("snapshots")).unwrap();
+    fs::create_dir_all(b.join("data/clear")).unwrap();
+    fs::create_dir_all(b.join("data/enc")).unwrap();
+    fs::create_dir_all(b.join("locks")).unwrap();
+    fs::write(b.join("locks/abc.lock"), "lock").unwrap();
+    fs::write(b.join("snapshots/2026-05-25T120000.000Z.toml"), "").unwrap();
+    fs::write(b.join("snapshots/2026-05-25T120000.000Z-1.toml"), "").unwrap();
+    fs::write(
+        b.join("snapshots/.2026-05-25T120001.000Z.toml.rsb-tmp-ab12"),
+        "x",
+    )
+    .unwrap();
+    fs::write(b.join("data/clear/aaaa"), "1").unwrap();
+    fs::write(b.join("data/enc/bbbb"), "2").unwrap();
+    fs::write(b.join("data/enc/.bbbb.rsb-tmp-cd34"), "x").unwrap();
+
+    let v = rsb_sdk::validate_backup_structure(b);
+    assert!(v.is_valid, "{:?}", v.issues);
+    assert_eq!(v.snapshots_count, 2);
+    assert_eq!(v.data_files_count, 2);
+    assert!(v.warnings.is_empty());
+}
+
+#[test]
+fn test_real_validator_still_flags_incomplete_backups() {
+    // Only a leftover temp manifest -> no real snapshot.
+    let temp_dir = TempDir::new().unwrap();
+    let b = temp_dir.path();
+    fs::create_dir_all(b.join("snapshots")).unwrap();
+    fs::create_dir_all(b.join("data/clear")).unwrap();
+    fs::write(
+        b.join("snapshots/.2026-05-25T120001.000Z.toml.rsb-tmp-ab12"),
+        "x",
+    )
+    .unwrap();
+    fs::write(b.join("data/clear/aaaa"), "1").unwrap();
+
+    let v = rsb_sdk::validate_backup_structure(b);
+    assert!(!v.is_valid);
+    assert_eq!(v.snapshots_count, 0);
+    assert!(v.issues.iter().any(|i| i.contains("snapshots")));
+
+    // data/ with only empty clear/enc subdirs -> warning, zero data files.
+    let empty = TempDir::new().unwrap();
+    fs::create_dir_all(empty.path().join("snapshots")).unwrap();
+    fs::create_dir_all(empty.path().join("data/clear")).unwrap();
+    fs::create_dir_all(empty.path().join("data/enc")).unwrap();
+    fs::write(
+        empty.path().join("snapshots/2026-05-25T120000.000Z.toml"),
+        "",
+    )
+    .unwrap();
+    let v = rsb_sdk::validate_backup_structure(empty.path());
+    assert!(v.is_valid);
+    assert_eq!(v.data_files_count, 0);
+    assert!(!v.warnings.is_empty());
 }

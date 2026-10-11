@@ -14,17 +14,21 @@ pub fn TabButton(
     };
     rsx! {
         button {
-            class: active_class,
+            class: "{active_class} text-xs",
             onclick: onclick,
-            span { class: "text-lg", "{icon}" }
-            span { "{label}" }
+            span { class: "text-xs", "{icon}" }
+            span { class: "text-xs font-medium", "{label}" }
         }
     }
 }
 
 #[component]
 pub fn ProgressBar(progress: f64) -> Element {
-    let width_percent = (progress * 100.0).min(100.0).max(0.0);
+    let width_percent = if progress.is_nan() {
+        0.0
+    } else {
+        (progress * 100.0).clamp(0.0, 100.0)
+    };
     rsx! {
         div { class: "progress-container",
             div {

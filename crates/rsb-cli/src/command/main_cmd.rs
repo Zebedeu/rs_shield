@@ -14,6 +14,15 @@ pub enum ListProfilesFormat {
     /// CSV format
     Csv,
 }
+/// Tipo de armazenamento para o backup (override do perfil)
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageChoice {
+    /// S3 ou compatível (usa a configuração S3 do perfil)
+    S3,
+    /// Sistema de ficheiros local
+    Local,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Create a new backup profile
@@ -34,15 +43,15 @@ pub enum Commands {
         #[arg(short = 'm', long, default_value = "incremental")]
         mode: String,
 
-        /// Compression level 0-11
-        #[arg(short = 'z', long, default_value = "3")]
+        /// Compression level 0-22 (zstd; 0 = default)
+        #[arg(short = 'z', long, default_value = "3", value_parser = clap::value_parser!(u8).range(0..=22))]
         compression: u8,
 
         /// Enable encryption
         #[arg(short = 'e', long)]
         encrypt: bool,
 
-        /// Encryption password
+        /// Encryption password (DEPRECATED: visible in `ps`/shell history; omit to be prompted)
         #[arg(short = 'k', long)]
         password: Option<String>,
 
@@ -80,9 +89,13 @@ pub enum Commands {
         #[arg(short = 'm', long)]
         mode: Option<String>,
 
-        /// Encryption key
+        /// Encryption key (DEPRECATED: visible in `ps`/history; prefer env RSB_ENCRYPTION_KEY, keyring or prompt)
         #[arg(short = 'k', long)]
         key: Option<String>,
+
+        /// Storage override: "s3" or "local" (default: what the profile configures)
+        #[arg(long, value_enum)]
+        storage: Option<StorageChoice>,
 
         /// Simulate backup without writing files
         #[arg(short = 'd', long)]
@@ -130,15 +143,15 @@ pub enum Commands {
         #[arg(short = 't', long, required = true)]
         target: PathBuf,
 
-        /// Restore specific files
+        /// Restore specific files (not yet supported)
         #[arg(short = 'i', long)]
         files: Option<String>,
 
-        /// Restore from date
+        /// Restore from date (not yet supported)
         #[arg(short = 'd', long)]
         date: Option<String>,
 
-        /// Decryption key
+        /// Decryption key (DEPRECATED: visible in `ps`/history; prefer env RSB_ENCRYPTION_KEY or prompt)
         #[arg(short = 'k', long)]
         key: Option<String>,
 
@@ -188,9 +201,13 @@ pub enum Commands {
         #[arg(short = 'r', long)]
         report: bool,
 
-        /// Decryption key
+        /// Decryption key (DEPRECATED: visible in `ps`/history; prefer env RSB_ENCRYPTION_KEY or prompt)
         #[arg(short = 'k', long)]
         key: Option<String>,
+
+        /// Delete objects proven corrupt (forces a full check) so the next backup re-uploads them
+        #[arg(long)]
+        repair: bool,
     },
 
     /// Delete old snapshots
@@ -207,12 +224,16 @@ pub enum Commands {
         retention: Option<String>,
 
         /// Keep last N backups
-        #[arg(short = 'k', long)]
+        #[arg(short = 'l', long)]
         keep_last: Option<usize>,
 
         /// Preview deletion
         #[arg(short = 'd', long)]
         dry_run: bool,
+
+        /// Confirm destructive deletion (required unless --dry-run)
+        #[arg(long)]
+        confirm: bool,
 
         /// Quiet mode
         #[arg(short = 'q', long)]
@@ -250,11 +271,11 @@ pub enum Commands {
         #[arg(short = 's', long)]
         sync_to: PathBuf,
 
-        /// Encryption key
+        /// Encryption key (DEPRECATED: visible in `ps`/history; prefer env RSB_ENCRYPTION_KEY, keyring or prompt)
         #[arg(short = 'k', long)]
-        key: String,
+        key: Option<String>,
 
-        /// Poll interval in seconds
+        /// Quiet period in seconds: a backup starts once no change has arrived for this long
         #[arg(short = 'i', long, default_value = "2")]
         interval: u64,
 
@@ -304,7 +325,7 @@ pub enum Commands {
         #[arg(short = 'b', long)]
         backup: PathBuf,
 
-        /// Encryption key (if encrypted)
+        /// Encryption key if encrypted (DEPRECATED: visible in `ps`/history; prefer env RSB_ENCRYPTION_KEY or prompt)
         #[arg(short = 'k', long)]
         key: Option<String>,
 

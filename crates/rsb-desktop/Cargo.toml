@@ -67,3 +67,6 @@ anyhow = { workspace = true }
 
 openssl = { workspace = true }
 web-sys = "0.3.98"
+
+[dev-dependencies]
+tempfile = { workspace = true }

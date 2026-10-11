@@ -13,18 +13,17 @@ pub async fn load_previous_metadata(
     let mut metadata_by_hash = HashMap::new();
 
     if let Ok((_, content)) = crate::core::manifest::find_latest_snapshot(storage, None, key).await
+        && let Ok(prev) = toml::from_str::<HashMap<PathBuf, FileMetadata>>(&content)
     {
-        if let Ok(prev) = toml::from_str::<HashMap<PathBuf, FileMetadata>>(&content) {
-            metadata_by_hash.reserve(prev.len());
-            // Index by hash for fast O(1) deduplication lookups during backup
-            for (_, meta) in prev {
-                metadata_by_hash.insert(meta.hash.clone(), meta);
-            }
-            debug!(
-                "✅ Loaded {} file hashes from previous snapshot for deduplication",
-                metadata_by_hash.len()
-            );
+        metadata_by_hash.reserve(prev.len());
+        // Index by hash for fast O(1) deduplication lookups during backup
+        for (_, meta) in prev {
+            metadata_by_hash.insert(meta.hash.clone(), meta);
         }
+        debug!(
+            "✅ Loaded {} file hashes from previous snapshot for deduplication",
+            metadata_by_hash.len()
+        );
     }
 
     Ok(metadata_by_hash)
@@ -37,24 +36,25 @@ pub struct CachedEncryptionKey {
 }
 
 impl CachedEncryptionKey {
-    /// Creates a cached encryption key from a password
+    /// Creates a cached encryption key from a password.
+    ///
+    /// If a password is given and key derivation fails, an error is returned:
+    /// the backup must never silently fall back to writing unencrypted data.
     pub fn new(password: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
-        let key =
-            password.and_then(
-                |pwd| match crate::crypto::EncryptionKey::new(pwd.as_bytes()) {
-                    Ok(k) => {
-                        debug!(
-                            "✅ Pre-derived encryption key (saved ~{:?} PBKDF2 iterations)",
-                            600_000
-                        );
-                        Some(std::sync::Arc::new(k))
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to pre-derive encryption key: {}", e);
-                        None
-                    }
-                },
-            );
+        let key = match password {
+            Some(pwd) => {
+                let k = crate::crypto::EncryptionKey::new(pwd.as_bytes()).map_err(|e| {
+                    tracing::error!("Failed to pre-derive encryption key: {}", e);
+                    format!("Failed to derive encryption key; aborting backup: {}", e)
+                })?;
+                debug!(
+                    "✅ Pre-derived encryption key (saved ~{:?} PBKDF2 iterations)",
+                    crate::crypto::PBKDF2_ITERATIONS
+                );
+                Some(std::sync::Arc::new(k))
+            }
+            None => None,
+        };
 
         Ok(Self { key })
     }
@@ -76,5 +76,11 @@ mod tests {
     fn test_cached_encryption_key_none() {
         let key = CachedEncryptionKey::new(None).unwrap();
         assert!(!key.is_some());
+    }
+
+    #[test]
+    fn test_cached_encryption_key_some() {
+        let key = CachedEncryptionKey::new(Some("password")).unwrap();
+        assert!(key.is_some());
     }
 }

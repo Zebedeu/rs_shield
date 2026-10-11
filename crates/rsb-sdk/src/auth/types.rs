@@ -23,6 +23,12 @@ pub struct SessionClaims {
     pub iat: i64,            // issued at (unix timestamp)
     pub exp: i64,            // expiration
     pub aud: String,         // "rsb-shield"
+    #[serde(default = "default_iss")]
+    pub iss: String, // "rsb-shield"
+}
+
+fn default_iss() -> String {
+    "rsb-shield".to_string()
 }
 
 impl SessionClaims {
