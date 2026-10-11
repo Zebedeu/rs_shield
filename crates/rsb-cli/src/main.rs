@@ -911,6 +911,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             cmd.execute(Arc::new(Mutex::new(manager))).await?;
         }
+        Commands::Key(cmd) => {
+            cmd.execute().await?;
+        }
         Commands::Snapshots(cmd) => {
             cmd.execute().await?;
         }
