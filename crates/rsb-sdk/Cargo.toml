@@ -63,6 +63,7 @@ ring = { workspace = true }
 blake3 = { workspace = true }
 sha2 = { workspace = true }
 pbkdf2 = { workspace = true }
+argon2 = { workspace = true }
 aes-gcm = { workspace = true }
 
 zeroize = { workspace = true }
