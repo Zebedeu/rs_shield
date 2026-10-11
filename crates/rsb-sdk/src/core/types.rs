@@ -48,6 +48,11 @@ pub struct FileMetadata {
     /// Indicates if compression was applied
     #[serde(default = "default_true")]
     pub compressed: bool,
+
+    /// Original (plaintext) size in bytes. Written since format v3; bounds
+    /// decompression on restore/verify. `None` in older manifests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 pub type ProgressCallback = Arc<dyn Fn(usize, usize, String) + Send + Sync>;
@@ -74,6 +79,7 @@ impl FileMetadata {
             stored_size: None,
             chunks: None,
             compressed,
+            size: None,
         }
     }
 
@@ -92,6 +98,33 @@ impl FileMetadata {
             stored_size: Some(total_stored_size),
             chunks: Some(chunks),
             compressed,
+            size: None,
+        }
+    }
+
+    /// Records the plaintext size (see [`FileMetadata::size`]).
+    pub fn with_size(mut self, size: u64) -> Self {
+        self.size = Some(size);
+        self
+    }
+
+    /// Upper bound of the decoded size of the whole file: the recorded
+    /// `size`, or the largest file older versions could have written.
+    pub fn max_plain_size(&self) -> u64 {
+        use super::limits::{LEGACY_MAX_CHUNK_SIZE, LEGACY_MAX_OBJECT_SIZE};
+        match (self.size, &self.chunks) {
+            (Some(s), _) => s,
+            (None, Some(chunks)) => (chunks.len() as u64).saturating_mul(LEGACY_MAX_CHUNK_SIZE),
+            (None, None) => LEGACY_MAX_OBJECT_SIZE,
+        }
+    }
+
+    /// Upper bound of the decoded size of one of this entry's objects.
+    pub fn max_object_plain_size(&self) -> u64 {
+        use super::limits::LEGACY_MAX_CHUNK_SIZE;
+        match &self.chunks {
+            Some(_) => self.max_plain_size().min(LEGACY_MAX_CHUNK_SIZE),
+            None => self.max_plain_size(),
         }
     }
 

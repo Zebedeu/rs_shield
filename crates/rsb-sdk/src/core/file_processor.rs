@@ -106,7 +106,10 @@ pub fn process_file(
     // corrupt objects so that the next backup re-uploads them).
     if let Some(cached) = previous_metadata_cache.get(&current_hash) {
         if cached_objects_present(storage, rt_handle, cached, data.len() as u64)? {
-            return Ok((FileStatus::Skipped, cached.clone()));
+            return Ok((
+                FileStatus::Skipped,
+                cached.clone().with_size(data.len() as u64),
+            ));
         }
         warn!(
             "Object for {} referenced by the previous snapshot is missing or damaged; re-uploading",
@@ -143,7 +146,8 @@ pub fn process_file(
                 mode.is_compressed(),
                 None,
                 Some(existing),
-            );
+            )
+            .with_size(data.len() as u64);
             return Ok((FileStatus::Skipped, metadata));
         }
         warn!(
@@ -161,7 +165,8 @@ pub fn process_file(
             compression_level > 0,
             None,
             None,
-        );
+        )
+        .with_size(data.len() as u64);
         return Ok((FileStatus::Processed, metadata));
     }
 
@@ -183,7 +188,8 @@ pub fn process_file(
         compression_level > 0,
         Some(stored_hash),
         Some(stored_size),
-    );
+    )
+    .with_size(data.len() as u64);
 
     Ok((FileStatus::Processed, metadata))
 }
@@ -395,6 +401,7 @@ fn process_file_multipart_streaming(
     let mut full_hasher = blake3::Hasher::new();
     // (chunk hash, plain length, stored size if the object exists)
     let mut scanned: Vec<(String, u64, Option<u64>)> = Vec::new();
+    let mut file_size: u64 = 0;
     loop {
         let n = read_full(&mut file, &mut buf)?;
         if n == 0 {
@@ -402,6 +409,7 @@ fn process_file_multipart_streaming(
         }
         let chunk_data = &buf[..n];
         full_hasher.update(chunk_data);
+        file_size += n as u64;
         let chunk_hash = hash_file_content(chunk_data)?;
         let data_path = format!("data/{}/{}", kind, chunk_hash);
         let size = rt_handle.block_on(storage.size(&data_path))?;
@@ -424,7 +432,7 @@ fn process_file_multipart_streaming(
                     })
             });
         if same {
-            return Ok((FileStatus::Skipped, cached.clone()));
+            return Ok((FileStatus::Skipped, cached.clone().with_size(file_size)));
         }
     }
 
@@ -531,7 +539,8 @@ fn process_file_multipart_streaming(
         mode.is_compressed(),
         chunks_meta,
         total_stored_size,
-    );
+    )
+    .with_size(file_size);
     let status = if needs_write {
         FileStatus::Processed
     } else {
@@ -697,6 +706,7 @@ fn build_file_metadata(
         stored_size,
         chunks: None,
         compressed,
+        size: None,
     }
 }
 
@@ -882,6 +892,7 @@ mod tests {
             );
             let raw = std::fs::read(repo.path().join("data/enc").join(&meta.hash)).unwrap();
             assert_eq!(meta.stored_size, Some(raw.len() as u64));
+            assert_eq!(meta.size, Some(content.len() as u64));
             assert_eq!(meta.stored_hash, Some(hash_file_content(&raw).unwrap()));
             assert_eq!(decode_like_restore(raw, &meta, Some(&key)), content);
             std::fs::remove_file(repo.path().join("data/enc").join(&meta.hash)).unwrap();

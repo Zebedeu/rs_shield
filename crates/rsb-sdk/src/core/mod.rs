@@ -3,6 +3,7 @@ pub mod cancellation;
 pub mod chat_integrations;
 pub mod email_notifications;
 pub mod file_processor;
+pub mod limits;
 pub mod manifest;
 pub mod notification_history;
 pub mod notification_logger;

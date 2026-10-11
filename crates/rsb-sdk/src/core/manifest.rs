@@ -1,4 +1,5 @@
 // manifest.rs - Performance + reliability version
+use super::limits::{MAX_MANIFEST_SIZE, too_large, zstd_decode_bounded};
 use super::types::{ChunkMetadata, FileMetadata};
 use crate::crypto::encrypt_data_with_key;
 use crate::crypto::{KeyCache, RepoKey};
@@ -10,7 +11,6 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use tracing::{debug, error, info};
-use zstd::stream::copy_decode;
 
 /// Legacy snapshot name format (1-second resolution), e.g. `2026-02-07T103000Z`.
 pub const SNAPSHOT_NAME_FORMAT_SECS: &str = "%Y-%m-%dT%H%M%SZ";
@@ -226,6 +226,12 @@ pub async fn read_manifest_cached(
     path: &str,
     cache: Option<&KeyCache>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    // Bound what a malicious repository can make us read and inflate.
+    if let Some(n) = storage.size(path).await?
+        && n > MAX_MANIFEST_SIZE
+    {
+        return Err(Box::new(too_large(path, MAX_MANIFEST_SIZE)));
+    }
     let raw = storage.read(path).await?;
 
     let decrypted = if let Some(cache) = cache {
@@ -239,8 +245,15 @@ pub async fn read_manifest_cached(
     };
 
     // Tries to decompress (Zstd) - check magic number or just try decoding
-    let mut decompressed = Vec::new();
-    if copy_decode(&decrypted[..], &mut decompressed).is_ok() {
+    // Bounded: a tiny zstd frame of zeros would otherwise inflate to GiBs.
+    let decoded = zstd_decode_bounded(&decrypted, MAX_MANIFEST_SIZE, path);
+    if let Err(e) = &decoded
+        && e.kind() == std::io::ErrorKind::FileTooLarge
+    {
+        error!("{}", e);
+        return Err(decoded.unwrap_err().into());
+    }
+    if let Ok(decompressed) = decoded {
         return String::from_utf8(decompressed).map_err(|e| {
             debug!("Manifest UTF-8 decode failed after decompression: {:?}", e);
 
@@ -423,6 +436,55 @@ mod tests {
         assert!(validate_snapshot_id("..").is_err());
         assert!(validate_snapshot_id("").is_err());
         assert!(validate_snapshot_id("x\\y").is_err());
+    }
+
+    #[tokio::test]
+    async fn manifest_zstd_bomb_is_refused() {
+        let storage = crate::storage::MemoryStorage::new();
+        // Valid unencrypted manifest framing: a zstd frame inflating past
+        // MAX_MANIFEST_SIZE from a few KiB of input.
+        let bomb = zstd::stream::encode_all(
+            std::io::Read::take(std::io::repeat(b' '), MAX_MANIFEST_SIZE + 1),
+            1,
+        )
+        .unwrap();
+        assert!(bomb.len() < 1024 * 1024);
+        storage
+            .write("snapshots/2026-01-01T000000Z.toml", &bomb)
+            .await
+            .unwrap();
+        let err = find_latest_snapshot(&storage, None, None)
+            .await
+            .unwrap_err();
+        let io = err.downcast_ref::<std::io::Error>().expect("io error");
+        assert_eq!(io.kind(), std::io::ErrorKind::FileTooLarge);
+    }
+
+    #[tokio::test]
+    async fn oversized_manifest_object_is_refused_before_reading() {
+        struct Huge;
+        #[async_trait::async_trait]
+        impl Storage for Huge {
+            async fn write(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+                Ok(())
+            }
+            async fn read(&self, _: &str) -> std::io::Result<Vec<u8>> {
+                panic!("must not read an oversized manifest");
+            }
+            async fn exists(&self, _: &str) -> std::io::Result<bool> {
+                Ok(true)
+            }
+            async fn list(&self, _: &str) -> std::io::Result<Vec<String>> {
+                Ok(vec!["snapshots/2026-01-01T000000Z.toml".into()])
+            }
+            async fn delete(&self, _: &str) -> std::io::Result<()> {
+                Ok(())
+            }
+            async fn size(&self, _: &str) -> std::io::Result<Option<u64>> {
+                Ok(Some(MAX_MANIFEST_SIZE + 1))
+            }
+        }
+        assert!(find_latest_snapshot(&Huge, None, None).await.is_err());
     }
 
     #[tokio::test]
