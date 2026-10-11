@@ -232,6 +232,30 @@ rsb verify --config mybackup.toml --snapshot 2026-05-25T10:30:00
 rsb verify --config mybackup.toml --report
 ```
 
+### Repository Key (format v3)
+
+Encrypted repositories keep a random data key in `keys/repo.key`, wrapped
+with your password (Argon2id). The first encrypted backup creates it
+automatically. See [FORMAT.md](FORMAT.md) for details. Both commands require
+an authenticated session (`rsb login`) and only read passwords from an
+interactive prompt.
+
+```bash
+# Create keys/repo.key explicitly (upgrades an existing v1/v2 repository;
+# enter the password of the existing backups)
+rsb key init mybackup.toml
+rsb key init --repo /path/to/backup
+
+# Change the password (rewraps the key; no backup data is rewritten)
+rsb key change-password mybackup.toml
+
+# Optional Argon2 tuning (minimums: --m-cost-kib 19456, --t-cost 2)
+rsb key change-password mybackup.toml --m-cost-kib 131072 --t-cost 3
+```
+
+> ⚠️ Keep a copy of `keys/repo.key`: without it, v3 backups cannot be
+> decrypted, even with the password.
+
 ### Snapshot Management
 
 Manage backup snapshots and versions.
