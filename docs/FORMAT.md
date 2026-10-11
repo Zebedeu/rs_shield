@@ -123,10 +123,18 @@ another file. Manifests are bound to their snapshot key, so a manifest cannot
 be renamed to pose as a different (e.g. newer) snapshot.
 
 **Streaming.** Backups compress and then encrypt in a pipeline
-(zstd, then the v3 chunk encryptor, then a hasher, then a spool). The spool is
+(zstd, then the v3 chunk encryptor, then a hasher, then a spool); clear
+objects use the same pipeline without the encryptor. The spool is
 held in memory up to 8 MiB and then spills to a temporary file, which is
 uploaded with `Storage::write_file` (a plain PutObject of known length on S3,
-copy into a temp file plus atomic rename on local storage). Restores decrypt
+copy into a temp file plus atomic rename on local storage). Files up to
+1 MiB are read once into memory; larger files and the chunks of multipart
+files are read in 1 MiB pieces twice: a first pass hashes them (dedup
+decision), and only content that must be stored is read again through the
+pipeline, with its hash checked against the first pass before anything is
+uploaded (a file that changed in between is reported, never stored). Backup
+memory is therefore bounded per worker thread (read buffer, zstd context,
+one v3 chunk, spool), whatever the file size. Restores decrypt
 v3 chunk by chunk. Memory per blob is one ciphertext chunk plus two 1 MiB
 buffers, and every chunk is authenticated before it is written. Output goes to
 a temp file that replaces the target only after the full-file hash matches,

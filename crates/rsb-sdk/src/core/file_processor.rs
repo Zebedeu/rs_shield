@@ -1,6 +1,6 @@
 // file_processor.rs - dedup, compression and (v3 streaming) encryption of files
 use super::types::{CHUNK_SIZE, ChunkMetadata, FileMetadata, FileStatus, MULTIPART_THRESHOLD};
-use crate::crypto::stream::V3Header;
+use crate::crypto::stream::{V3_HEADER_LEN, V3Header};
 use crate::crypto::{
     BLOB_MAGIC_V2, BLOB_MAGIC_V3, RepoKey, V3_DEFAULT_CHUNK_SIZE, hash_file_content, v3_blob_len,
 };
@@ -27,6 +27,11 @@ pub(crate) const SPOOL_MEM_LIMIT: usize = 8 * 1024 * 1024;
 /// zstd level used when an existing object forces compression but the
 /// profile has compression disabled.
 const FALLBACK_COMPRESSION_LEVEL: u8 = 3;
+/// Files up to this size are read into memory in one go; larger ones are
+/// streamed (hash pass, then store pass) through a [`READ_BUF`] buffer.
+const INLINE_READ_MAX: u64 = 1024 * 1024;
+/// Read buffer of the streaming passes.
+const READ_BUF: usize = 1024 * 1024;
 
 /// How an existing object in `data/{enc,clear}/<hash>` was stored.
 ///
@@ -94,22 +99,35 @@ pub fn process_file(
     }
 
     // =============== NORMAL FILES ===============
-    // Read once into memory: the bytes we hash are exactly the bytes we
-    // compress/store (no mmap → no SIGBUS if the file is truncated, and no
-    // window where hash and stored content can diverge).
-    let data = std::fs::read(src)?;
-    ensure_unchanged(src, &before, Some(data.len() as u64))?;
-    let current_hash = hash_file_content(&data)?;
+    // Small files are read once into memory: the bytes we hash are exactly
+    // the bytes we compress/store. Larger files are hashed in a streaming
+    // pass and, only when they must be stored, streamed a second time
+    // through compression/encryption while their hash is checked against
+    // the first pass, so a file that changed in between is reported and
+    // never stored. Memory per file stays bounded by the read buffer and
+    // the upload spool, whatever the file size. No mmap (no SIGBUS if the
+    // file is truncated).
+    let inline = if before.len() <= INLINE_READ_MAX {
+        let data = std::fs::read(src)?;
+        ensure_unchanged(src, &before, Some(data.len() as u64))?;
+        Some(data)
+    } else {
+        None
+    };
+    let (current_hash, plain_len) = match &inline {
+        Some(data) => (hash_file_content(data)?, data.len() as u64),
+        None => hash_reader(&mut std::fs::File::open(src)?)?,
+    };
 
     // Fast deduplication against the previous snapshot - but only if the
     // object it points to is still there (`verify` with repair deletes
     // corrupt objects so that the next backup re-uploads them).
     if let Some(cached) = previous_metadata_cache.get(&current_hash) {
-        if cached_objects_present(storage, rt_handle, cached, data.len() as u64)? {
-            return Ok((
-                FileStatus::Skipped,
-                cached.clone().with_size(data.len() as u64),
-            ));
+        if cached_objects_present(storage, rt_handle, cached, plain_len)? {
+            if inline.is_none() {
+                ensure_unchanged(src, &before, Some(plain_len))?;
+            }
+            return Ok((FileStatus::Skipped, cached.clone().with_size(plain_len)));
         }
         warn!(
             "Object for {} referenced by the previous snapshot is missing or damaged; re-uploading",
@@ -136,10 +154,13 @@ pub fn process_file(
             rt_handle,
             &data_path,
             existing,
-            data.len() as u64,
+            plain_len,
             &current_hash,
             should_encrypt,
         )? {
+            if inline.is_none() {
+                ensure_unchanged(src, &before, Some(plain_len))?;
+            }
             let metadata = build_file_metadata(
                 current_hash,
                 should_encrypt,
@@ -147,14 +168,12 @@ pub fn process_file(
                 None,
                 Some(existing),
             )
-            .with_size(data.len() as u64);
+            .with_size(plain_len);
             return Ok((FileStatus::Skipped, metadata));
         }
         warn!(
             "Stored object {} has implausible size {} for {} bytes of content; rewriting it",
-            data_path,
-            existing,
-            data.len()
+            data_path, existing, plain_len
         );
     }
 
@@ -166,21 +185,32 @@ pub fn process_file(
             None,
             None,
         )
-        .with_size(data.len() as u64);
+        .with_size(plain_len);
         return Ok((FileStatus::Processed, metadata));
     }
 
     // Compress + encrypt (streamed) + upload.
+    let mut file;
+    let source = match &inline {
+        Some(data) => Source::Bytes(data),
+        None => {
+            file = std::fs::File::open(src)?;
+            Source::Reader(&mut file)
+        }
+    };
     let (stored_size, stored_hash) = store_object(
         storage,
         rt_handle,
         &data_path,
         &current_hash,
-        &data,
+        source,
         compression_level,
         should_encrypt,
         encryption_key.as_deref(),
     )?;
+    if inline.is_none() {
+        ensure_unchanged(src, &before, Some(plain_len))?;
+    }
 
     let metadata = build_file_metadata(
         current_hash,
@@ -189,7 +219,7 @@ pub fn process_file(
         Some(stored_hash),
         Some(stored_size),
     )
-    .with_size(data.len() as u64);
+    .with_size(plain_len);
 
     Ok((FileStatus::Processed, metadata))
 }
@@ -226,7 +256,7 @@ fn plausible_stored_size(stored: u64, plain_len: u64, encrypted: bool) -> bool {
 }
 
 /// Fills `buf` from `reader` until full or EOF; returns bytes read.
-fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+fn read_full(reader: &mut (impl Read + ?Sized), buf: &mut [u8]) -> io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
         match reader.read(&mut buf[filled..]) {
@@ -237,6 +267,62 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
         }
     }
     Ok(filled)
+}
+
+/// Error for a file whose content no longer matches its first read.
+fn changed_while_reading() -> io::Error {
+    io::Error::other("file changed while being backed up; it will be picked up by the next backup")
+}
+
+/// BLAKE3 (hex) and length of everything `reader` yields, read
+/// [`READ_BUF`] bytes at a time.
+fn hash_reader(reader: &mut impl Read) -> io::Result<(String, u64)> {
+    let mut buf = vec![0u8; READ_BUF];
+    let mut hasher = blake3::Hasher::new();
+    let mut len = 0u64;
+    loop {
+        let n = read_full(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        len += n as u64;
+    }
+    Ok((hasher.finalize().to_hex().to_string(), len))
+}
+
+/// Hashes the next chunk (up to [`CHUNK_SIZE`] bytes) of `reader` through
+/// `buf`, also feeding `full` when given. Returns (chunk hash, length);
+/// length 0 at EOF.
+fn hash_chunk(
+    reader: &mut impl Read,
+    buf: &mut [u8],
+    mut full: Option<&mut blake3::Hasher>,
+) -> io::Result<(String, u64)> {
+    let mut hasher = blake3::Hasher::new();
+    let mut len = 0usize;
+    while len < CHUNK_SIZE {
+        let want = buf.len().min(CHUNK_SIZE - len);
+        let n = read_full(reader, &mut buf[..want])?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        if let Some(f) = full.as_deref_mut() {
+            f.update(&buf[..n]);
+        }
+        len += n;
+    }
+    Ok((hasher.finalize().to_hex().to_string(), len as u64))
+}
+
+/// Plaintext of an object to store.
+enum Source<'a> {
+    /// Bytes already in memory (and already hashed by the caller).
+    Bytes(&'a [u8]),
+    /// Streamed content; its BLAKE3 must equal the object id, which is
+    /// checked before anything is uploaded.
+    Reader(&'a mut dyn Read),
 }
 
 // ====================== EXISTING-OBJECT CLASSIFICATION ======================
@@ -270,10 +356,14 @@ fn classify_existing_object(
         if stored_size != plain_len {
             return Ok(Some(StoredMode::Compressed));
         }
-        let raw = rt_handle.block_on(storage.read(data_path))?;
-        if raw.len() as u64 == plain_len && hash_file_content(&raw)? == content_hash {
+        // Streamed: no copy of the object in memory in the common case.
+        if hash_stored_object(storage, rt_handle, data_path)?
+            == (content_hash.to_string(), plain_len)
+        {
             return Ok(Some(StoredMode::Uncompressed));
         }
+        // Rare: a zstd frame exactly as long as the content.
+        let raw = rt_handle.block_on(storage.read(data_path))?;
         let mut decoded = Vec::with_capacity(plain_len as usize);
         if zstd::stream::copy_decode(&raw[..], &mut decoded).is_ok()
             && hash_file_content(&decoded)? == content_hash
@@ -289,8 +379,9 @@ fn classify_existing_object(
     {
         return Ok(Some(StoredMode::Compressed));
     }
-    let raw = rt_handle.block_on(storage.read(data_path))?;
-    let raw_len = raw.len() as u64;
+    // The framing is told by the header alone: read that, not the object.
+    let raw = read_stored_prefix(storage, rt_handle, data_path, V3_HEADER_LEN)?;
+    let raw_len = stored_size;
     if raw.starts_with(BLOB_MAGIC_V3) {
         // The chunk size comes from the header (it may differ from ours).
         let Ok(header) = V3Header::parse(&raw) else {
@@ -317,6 +408,46 @@ fn classify_existing_object(
         Some(_) => Ok(Some(StoredMode::Compressed)),
         None => Ok(None),
     }
+}
+
+/// BLAKE3 (hex) and length of a stored object, streamed.
+fn hash_stored_object(
+    storage: &Arc<dyn Storage>,
+    rt_handle: &Handle,
+    path: &str,
+) -> io::Result<(String, u64)> {
+    use tokio::io::AsyncReadExt;
+    rt_handle.block_on(async {
+        let mut reader = storage.read_stream(path).await?;
+        let mut buf = vec![0u8; READ_BUF];
+        let mut hasher = blake3::Hasher::new();
+        let mut len = 0u64;
+        loop {
+            let n = reader.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            len += n as u64;
+        }
+        Ok((hasher.finalize().to_hex().to_string(), len))
+    })
+}
+
+/// First `max` bytes of a stored object (fewer if it is shorter).
+fn read_stored_prefix(
+    storage: &Arc<dyn Storage>,
+    rt_handle: &Handle,
+    path: &str,
+    max: usize,
+) -> io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    rt_handle.block_on(async {
+        let reader = storage.read_stream(path).await?;
+        let mut out = Vec::with_capacity(max);
+        reader.take(max as u64).read_to_end(&mut out).await?;
+        Ok(out)
+    })
 }
 
 /// True if every object referenced by `cached` (a previous snapshot's
@@ -374,7 +505,8 @@ struct ChunkPlan {
 /// Streams a large file in `CHUNK_SIZE` pieces.
 ///
 /// All chunks of a file share one `compressed` flag in the manifest, so
-/// the file is processed in two passes (memory stays bounded by one chunk):
+/// the file is processed in two passes (memory stays bounded by one read
+/// buffer and the upload spool, whatever the chunk or file size):
 /// 1. plan: hash every chunk and stat its object, without writing anything.
 ///    If the previous snapshot has this exact file and all its objects are
 ///    present, reuse that entry. Otherwise classify the existing chunks and
@@ -394,7 +526,9 @@ fn process_file_multipart_streaming(
     compression_level: u8,
 ) -> io::Result<(FileStatus, FileMetadata)> {
     let kind = if should_encrypt { "enc" } else { "clear" };
-    let mut buf = vec![0u8; CHUNK_SIZE];
+    // Both passes stream through one small buffer: memory does not grow
+    // with the chunk or file size.
+    let mut buf = vec![0u8; READ_BUF];
 
     // ---- Pass 1: hash + stat ----
     let mut file = std::fs::File::open(src)?;
@@ -403,17 +537,14 @@ fn process_file_multipart_streaming(
     let mut scanned: Vec<(String, u64, Option<u64>)> = Vec::new();
     let mut file_size: u64 = 0;
     loop {
-        let n = read_full(&mut file, &mut buf)?;
+        let (chunk_hash, n) = hash_chunk(&mut file, &mut buf, Some(&mut full_hasher))?;
         if n == 0 {
             break;
         }
-        let chunk_data = &buf[..n];
-        full_hasher.update(chunk_data);
-        file_size += n as u64;
-        let chunk_hash = hash_file_content(chunk_data)?;
+        file_size += n;
         let data_path = format!("data/{}/{}", kind, chunk_hash);
         let size = rt_handle.block_on(storage.size(&data_path))?;
-        scanned.push((chunk_hash, n as u64, size));
+        scanned.push((chunk_hash, n, size));
     }
     let file_hash = full_hasher.finalize().to_hex().to_string();
 
@@ -490,23 +621,23 @@ fn process_file_multipart_streaming(
         let mut file = std::fs::File::open(src)?;
         let mut seen: HashSet<&str> = HashSet::new();
         for plan in &plans {
-            let n = read_full(&mut file, &mut buf)?;
-            let chunk_data = &buf[..n];
-            if n == 0 || hash_file_content(chunk_data)? != plan.hash {
-                return Err(io::Error::other(
-                    "file changed while being backed up; it will be picked up by the next backup",
-                ));
-            }
             if plan.existing.is_some() || !seen.insert(plan.hash.as_str()) {
+                // Not stored again, but still checked against pass 1.
+                let (hash, n) = hash_chunk(&mut file, &mut buf, None)?;
+                if n == 0 || hash != plan.hash {
+                    return Err(changed_while_reading());
+                }
                 continue;
             }
             let data_path = format!("data/{}/{}", kind, plan.hash);
+            // Streamed; its hash is checked against pass 1 before upload.
+            let mut part = (&mut file).take(CHUNK_SIZE as u64);
             let (stored_size, stored_hash) = store_object(
                 storage,
                 rt_handle,
                 &data_path,
                 &plan.hash,
-                chunk_data,
+                Source::Reader(&mut part),
                 write_level,
                 should_encrypt,
                 encryption_key,
@@ -568,66 +699,95 @@ fn should_encrypt_file(
 }
 
 /// Compresses (if `compression_level > 0`), encrypts (only if
-/// `should_encrypt` and a key is present) and uploads `data` to `data_path`.
-/// Used for whole files and chunks alike, so the `enc`/`clear` location
-/// always matches the stored bytes. Returns (stored size, stored BLAKE3).
+/// `should_encrypt` and a key is present) and uploads `source` to
+/// `data_path`. Used for whole files and chunks alike, so the `enc`/`clear`
+/// location always matches the stored bytes. Returns (stored size, stored
+/// BLAKE3).
 ///
-/// Encrypted objects are produced as a stream (zstd → v3 chunk encryptor →
-/// hasher → spool) and uploaded with [`Storage::write_file`] once the spool
-/// exceeds [`SPOOL_MEM_LIMIT`], so the compressed/encrypted copy of a file
-/// is never held in memory as a whole. `object_id` (the content hash) is
-/// bound into the v3 blob.
+/// Objects are produced as a stream (zstd → v3 chunk encryptor, if
+/// encrypted → hasher → spool) and uploaded with [`Storage::write_file`]
+/// once the spool exceeds [`SPOOL_MEM_LIMIT`], so neither the plaintext of
+/// a streamed source nor its compressed/encrypted copy is ever held in
+/// memory as a whole. A [`Source::Reader`] is hashed on the way and must
+/// match `object_id` (the content hash), otherwise nothing is uploaded.
+/// `object_id` is bound into v3 blobs.
 #[allow(clippy::too_many_arguments)]
 fn store_object(
     storage: &Arc<dyn Storage>,
     rt_handle: &Handle,
     data_path: &str,
     object_id: &str,
-    data: &[u8],
+    source: Source<'_>,
     compression_level: u8,
     should_encrypt: bool,
     encryption_key: Option<&RepoKey>,
 ) -> io::Result<(u64, String)> {
     let key = match (should_encrypt, encryption_key) {
-        (true, Some(k)) => k,
+        (true, Some(k)) => Some(k),
         (true, None) => {
             // Never silently store in clear what was meant to be encrypted.
             return Err(io::Error::other(
                 "encryption requested but no repository key is loaded",
             ));
         }
-        (false, _) => {
-            let stored = if compression_level > 0 {
-                zstd::stream::encode_all(data, compression_level as i32)?
-            } else {
-                data.to_vec()
-            };
-            let hash = hash_file_content(&stored)?;
-            rt_handle.block_on(storage.write(data_path, &stored))?;
-            return Ok((stored.len() as u64, hash));
-        }
+        (false, _) => None,
     };
 
-    let sink = HashingWriter {
-        inner: Spool::new(SPOOL_MEM_LIMIT),
-        hasher: blake3::Hasher::new(),
-        len: 0,
+    let sink = HashingWriter::new(Spool::new(SPOOL_MEM_LIMIT));
+    let sink = match key {
+        Some(k) => {
+            let enc = k.encryptor(object_id, sink)?;
+            compress_into(enc, source, compression_level, object_id)?.finish()?
+        }
+        None => compress_into(sink, source, compression_level, object_id)?,
     };
-    let mut enc = key.encryptor(object_id, sink)?;
-    if compression_level > 0 {
-        let mut z = ZstdEncoder::new(&mut enc, compression_level as i32)?;
-        z.write_all(data)?;
-        z.finish()?;
-    } else {
-        enc.write_all(data)?;
-    }
-    let sink = enc.finish()?;
-    let (len, hash) = (sink.len, sink.hasher.finalize().to_hex().to_string());
-    match sink.inner {
+    let (spool, len, hash) = sink.into_parts();
+    match spool {
         Spool::Memory { buf, .. } => rt_handle.block_on(storage.write(data_path, &buf))?,
         Spool::File(tmp) => rt_handle.block_on(storage.write_file(data_path, tmp.path()))?,
     }
     Ok((len, hash))
+}
+
+/// Writes `source` into `w`, zstd-compressed when `level > 0`. A streamed
+/// source must hash to `expected_hash`.
+fn compress_into<W: Write>(
+    w: W,
+    source: Source<'_>,
+    level: u8,
+    expected_hash: &str,
+) -> io::Result<W> {
+    if level > 0 {
+        let mut z = ZstdEncoder::new(w, level as i32)?;
+        copy_source(source, &mut z, expected_hash)?;
+        z.finish()
+    } else {
+        let mut w = w;
+        copy_source(source, &mut w, expected_hash)?;
+        Ok(w)
+    }
+}
+
+fn copy_source(source: Source<'_>, w: &mut impl Write, expected_hash: &str) -> io::Result<()> {
+    match source {
+        Source::Bytes(data) => w.write_all(data),
+        Source::Reader(reader) => {
+            let mut buf = vec![0u8; READ_BUF];
+            let mut hasher = blake3::Hasher::new();
+            loop {
+                let n = read_full(reader, &mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                w.write_all(&buf[..n])?;
+            }
+            if hasher.finalize().to_hex().as_str() != expected_hash {
+                return Err(changed_while_reading());
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Counts and hashes everything written through it.
@@ -996,5 +1156,129 @@ mod tests {
         assert_eq!(status, FileStatus::Processed);
         assert_eq!(meta.hash, hash);
         assert_eq!(std::fs::read(&obj).unwrap(), b"hello world");
+    }
+    /// Mixed content: compressible runs and pseudo-random bytes.
+    fn mixed_content(len: usize, seed: u64) -> Vec<u8> {
+        let mut x = seed | 1;
+        (0..len)
+            .map(|i| {
+                if (i / 65536) % 2 == 0 {
+                    (i % 251) as u8
+                } else {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x as u8
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streamed_files_round_trip_clear_and_encrypted() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        // Above INLINE_READ_MAX: hashed, then streamed into the store.
+        let content = mixed_content(3 * 1024 * 1024 + 11, 7);
+        let src = src_dir.path().join("medium.bin");
+        std::fs::write(&src, &content).unwrap();
+        for key in [None, Some(Arc::new(RepoKey::generate().unwrap()))] {
+            for level in [0u8, 3] {
+                let repo = tempfile::tempdir().unwrap();
+                let storage: Arc<dyn Storage> =
+                    Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
+                let (status, meta) = run(&rt, &storage, &src, key.clone(), &HashMap::new(), level);
+                assert_eq!(status, FileStatus::Processed);
+                assert_eq!(meta.hash, hash_file_content(&content).unwrap());
+                let kind = if key.is_some() { "enc" } else { "clear" };
+                let raw =
+                    std::fs::read(repo.path().join("data").join(kind).join(&meta.hash)).unwrap();
+                assert_eq!(meta.stored_size, Some(raw.len() as u64));
+                assert_eq!(meta.stored_hash, Some(hash_file_content(&raw).unwrap()));
+                assert_eq!(decode_like_restore(raw, &meta, key.as_ref()), content);
+                // Second run dedups without rewriting.
+                let (status, _) = run(&rt, &storage, &src, key.clone(), &HashMap::new(), level);
+                assert_eq!(status, FileStatus::Skipped);
+            }
+        }
+    }
+
+    #[test]
+    fn multipart_files_stream_and_round_trip() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        let len = MULTIPART_THRESHOLD as usize + 5 * 1024 * 1024 + 3;
+        let content = mixed_content(len, 11);
+        let src = src_dir.path().join("big.bin");
+        std::fs::write(&src, &content).unwrap();
+        for (key, level) in [
+            (None, 3u8),
+            (Some(Arc::new(RepoKey::generate().unwrap())), 0u8),
+        ] {
+            let repo = tempfile::tempdir().unwrap();
+            let storage: Arc<dyn Storage> =
+                Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
+            let (status, meta) = run(&rt, &storage, &src, key.clone(), &HashMap::new(), level);
+            assert_eq!(status, FileStatus::Processed);
+            assert_eq!(meta.hash, hash_file_content(&content).unwrap());
+            assert_eq!(meta.size, Some(len as u64));
+            let chunks = meta.chunks.clone().unwrap();
+            assert_eq!(chunks.len(), len.div_ceil(CHUNK_SIZE));
+            let kind = if key.is_some() { "enc" } else { "clear" };
+            let mut restored = Vec::with_capacity(len);
+            for (i, c) in chunks.iter().enumerate() {
+                let raw = std::fs::read(repo.path().join("data").join(kind).join(&c.hash)).unwrap();
+                assert_eq!(c.stored_size, raw.len() as u64);
+                assert_eq!(c.stored_hash, Some(hash_file_content(&raw).unwrap()));
+                let part = FileMetadata {
+                    hash: c.hash.clone(),
+                    ..meta.clone()
+                };
+                let plain = decode_like_restore(raw, &part, key.as_ref());
+                let start = i * CHUNK_SIZE;
+                assert_eq!(c.hash, hash_file_content(&plain).unwrap());
+                assert_eq!(&plain[..], &content[start..(start + CHUNK_SIZE).min(len)]);
+                restored.extend_from_slice(&plain);
+            }
+            assert_eq!(restored, content);
+            // Unchanged file with the previous entry: skipped, same entry.
+            let mut cache = HashMap::new();
+            cache.insert(meta.hash.clone(), meta.clone());
+            let (status, again) = run(&rt, &storage, &src, key.clone(), &cache, level);
+            assert_eq!(status, FileStatus::Skipped);
+            assert_eq!(again.chunks, meta.chunks);
+        }
+    }
+
+    #[test]
+    fn streamed_source_that_changed_is_never_uploaded() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
+        let expected = hash_file_content(b"what pass 1 hashed").unwrap();
+        let path = format!("data/clear/{}", expected);
+        let mut changed: &[u8] = b"what pass 2 reads";
+        let err = store_object(
+            &storage,
+            rt.handle(),
+            &path,
+            &expected,
+            Source::Reader(&mut changed),
+            3,
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("changed"), "{}", err);
+        assert!(!repo.path().join(&path).exists());
     }
 }
