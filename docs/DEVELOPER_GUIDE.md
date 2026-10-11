@@ -125,7 +125,6 @@ rs-shield/
 │       ├── DESIGN_GUIDE.md
 │       └── Cargo.toml
 │
-├── tests/                           # Workspace-level integration tests
 ├── docs/                            # Documentation
 │   ├── CLI.md
 │   ├── USER_GUIDE.md
@@ -997,9 +996,10 @@ cargo test --release -- --ignored
 - Examples: `backup_integration_tests.rs`, `restore_integration_tests.rs`
 
 **Workspace Tests:**
-- Located in `tests/` directory (root level)
-- Test cross-crate functionality
-- Run with: `cargo test --test integration_tests`
+- There is no root `tests/` directory: the workspace root has no package, so
+  files there are never compiled. Put integration tests in the crate they
+  exercise (mostly `crates/rsb-sdk/tests/`)
+- Run everything with: `cargo test --workspace`
 
 ### Test Coverage
 

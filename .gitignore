@@ -55,3 +55,4 @@ ebedeu.toml
 
 # Claude Code worktrees
 .claude/worktrees/
+teste.toml
