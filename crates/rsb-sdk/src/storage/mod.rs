@@ -8,7 +8,7 @@ use aws_credential_types::Credentials;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::error::{DisplayErrorContext, SdkError};
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use tokio::fs;
@@ -192,22 +192,43 @@ pub fn is_insecure_remote_endpoint(endpoint: &str) -> bool {
 /// Parent directories are created with plain `create_dir_all` (no `~`/`$VAR`
 /// expansion).
 pub async fn atomic_write_file(path: &Path, data: &[u8]) -> io::Result<()> {
-    let mut src: &[u8] = data;
-    atomic_write_from_reader(path, &mut src).await.map(|_| ())
+    // One blocking task for the whole sequence (one copy of `data`), instead
+    // of a blocking round trip per 8 KiB through `tokio::fs`.
+    let path = path.to_path_buf();
+    let data = data.to_vec();
+    blocking(move || atomic_write_blocking(&path, |f| f.write_all(&data)).map(|_| ())).await
 }
 
-/// Like [`atomic_write_file`], streaming the content from `reader` (memory
-/// stays bounded by the copy buffer). Returns the number of bytes written.
-pub async fn atomic_write_from_reader<R>(path: &Path, reader: &mut R) -> io::Result<u64>
-where
-    R: AsyncRead + Unpin + ?Sized,
-{
+/// Like [`atomic_write_file`], copying the content of the local file `src`
+/// (in one blocking task, through a 1 MiB buffer).
+pub async fn atomic_copy_file(path: &Path, src: &Path) -> io::Result<()> {
+    let (path, src) = (path.to_path_buf(), src.to_path_buf());
+    blocking(move || {
+        let src = std::fs::File::open(&src)?;
+        let mut reader = std::io::BufReader::with_capacity(COPY_BUF, src);
+        atomic_write_blocking(&path, |f| std::io::copy(&mut reader, f).map(|_| ())).map(|_| ())
+    })
+    .await
+}
+
+/// Copy buffer of the atomic writes.
+const COPY_BUF: usize = 1024 * 1024;
+
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(io::Error::other)?
+}
+
+/// Temp file name next to `path` and the directory holding both.
+fn atomic_tmp_path(path: &Path) -> io::Result<(PathBuf, PathBuf)> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).await?;
-
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
     let file_name = path
         .file_name()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "Path has no file name"))?
@@ -219,6 +240,47 @@ where
         TMP_MARKER,
         uuid::Uuid::new_v4().simple()
     ));
+    Ok((parent, tmp_path))
+}
+
+/// Blocking core of [`atomic_write_file`] / [`atomic_copy_file`]: `fill`
+/// writes the content into the temp file.
+fn atomic_write_blocking(
+    path: &Path,
+    fill: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<u64> {
+    let (parent, tmp_path) = atomic_tmp_path(path)?;
+    std::fs::create_dir_all(&parent)?;
+    let result = (|| {
+        // create_new => O_CREAT|O_EXCL: never follows a pre-planted symlink.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        fill(&mut file)?;
+        file.flush()?;
+        file.sync_all()?;
+        let n = file.metadata()?.len();
+        drop(file);
+        std::fs::rename(&tmp_path, path)?;
+        sync_dir_blocking(&parent)?;
+        Ok(n)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// Like [`atomic_write_file`], streaming the content from `reader` (memory
+/// stays bounded by the copy buffer). Returns the number of bytes written.
+pub async fn atomic_write_from_reader<R>(path: &Path, reader: &mut R) -> io::Result<u64>
+where
+    R: AsyncRead + Unpin + ?Sized,
+{
+    let (parent, tmp_path) = atomic_tmp_path(path)?;
+    let parent = parent.as_path();
+    fs::create_dir_all(parent).await?;
 
     let result = async {
         // create_new => O_CREAT|O_EXCL: never follows a pre-planted symlink.
@@ -227,7 +289,10 @@ where
             .create_new(true)
             .open(&tmp_path)
             .await?;
-        let n = tokio::io::copy(reader, &mut file).await?;
+        // 1 MiB reads/writes: each `tokio::fs` operation is a blocking-pool
+        // round trip, so the default 8 KiB copy buffer is slow.
+        let mut reader = tokio::io::BufReader::with_capacity(COPY_BUF, reader);
+        let n = tokio::io::copy_buf(&mut reader, &mut file).await?;
         file.flush().await?;
         file.sync_all().await?;
         drop(file);
@@ -260,6 +325,14 @@ pub async fn sync_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Blocking [`sync_dir`].
+fn sync_dir_blocking(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
 #[async_trait]
 impl Storage for LocalStorage {
     async fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
@@ -276,9 +349,7 @@ impl Storage for LocalStorage {
 
     async fn write_file(&self, path: &str, src: &Path) -> io::Result<()> {
         let full_path = self.safe_join(path)?;
-        let mut file = fs::File::open(src).await?;
-        atomic_write_from_reader(&full_path, &mut file).await?;
-        Ok(())
+        atomic_copy_file(&full_path, src).await
     }
 
     async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
