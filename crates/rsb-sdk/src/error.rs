@@ -106,7 +106,7 @@ impl RsbError {
         let kind = match c {
             C::AuthenticationFailed => CryptoErrorKind::AuthenticationFailed,
             C::Malformed => CryptoErrorKind::Corrupt,
-            C::RepoKeyRequired => CryptoErrorKind::Other,
+            C::RepoKeyRequired | C::KdfLimitExceeded => CryptoErrorKind::Other,
         };
         RsbError::crypto(kind, message)
     }

@@ -272,7 +272,9 @@ fn manifest_decrypt_error(
     let kind = match crypto {
         Some(CryptoError::AuthenticationFailed) => CryptoErrorKind::AuthenticationFailed,
         Some(CryptoError::Malformed) => CryptoErrorKind::Corrupt,
-        Some(CryptoError::RepoKeyRequired) => CryptoErrorKind::Other,
+        Some(CryptoError::RepoKeyRequired | CryptoError::KdfLimitExceeded) => {
+            CryptoErrorKind::Other
+        }
         None if e.kind() == std::io::ErrorKind::InvalidData => CryptoErrorKind::Corrupt,
         None => CryptoErrorKind::Other,
     };

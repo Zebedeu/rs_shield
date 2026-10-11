@@ -49,9 +49,11 @@ const V2_HEADER_LEN: usize = 8 + 4;
 pub const PBKDF2_ITERATIONS: u32 = 600_000;
 /// PBKDF2 iterations used by legacy (header-less) blobs.
 pub const LEGACY_PBKDF2_ITERATIONS: u32 = 600_000;
-/// Bounds accepted from a v2 header (protects against DoS via huge counts).
+/// Bounds accepted from a v2 header (protects against CPU DoS via huge
+/// counts). Every version ever released wrote exactly 600k, so the maximum
+/// is that value: a header asking for more is not parsed as v2.
 const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
-const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
+const MAX_PBKDF2_ITERATIONS: u32 = PBKDF2_ITERATIONS;
 
 /// Typed crypto errors. They are wrapped in `io::Error` (kind `InvalidData`)
 /// so existing `io::Result` signatures are unchanged; use
@@ -66,6 +68,10 @@ pub enum CryptoError {
     /// A v3 blob was found but no repository key is available (the
     /// repository has no `keys/repo.key`, or the caller did not load it).
     RepoKeyRequired,
+    /// A [`KeyCache`] reached [`MAX_KEY_DERIVATIONS`] distinct PBKDF2
+    /// derivations (v1/v2 salts): refused to bound the CPU a malicious
+    /// repository can make us spend.
+    KdfLimitExceeded,
 }
 
 impl fmt::Display for CryptoError {
@@ -78,6 +84,11 @@ impl fmt::Display for CryptoError {
                 "Decryption failed: authentication tag mismatch (wrong password or tampered data)"
             ),
             CryptoError::Malformed => write!(f, "Malformed encrypted blob"),
+            CryptoError::KdfLimitExceeded => write!(
+                f,
+                "Too many distinct v1/v2 key derivations (limit {}); refusing to continue",
+                MAX_KEY_DERIVATIONS
+            ),
             CryptoError::RepoKeyRequired => write!(
                 f,
                 "Blob uses format v3 but no repository key ({}) was loaded",
@@ -313,8 +324,13 @@ pub fn decrypt_data(encrypted: &[u8], password: &[u8]) -> io::Result<Vec<u8>> {
     })
 }
 
-/// Maximum number of derived keys kept by a [`KeyCache`].
-const KEY_CACHE_MAX_ENTRIES: usize = 1024;
+/// Maximum number of distinct (salt, iterations) PBKDF2 derivations one
+/// [`KeyCache`] performs (one restore/verify/prune). Each v1/v2 backup
+/// session used its own salt and a snapshot references objects from every
+/// session it dedups against, so legitimate repositories need one per
+/// session (e.g. a year of daily backups = 365); 1024 bounds the worst case
+/// of a malicious repository to about a thousand 600k-iteration runs.
+pub const MAX_KEY_DERIVATIONS: usize = 1024;
 
 /// Decryption context for a restore/verify/prune (and the manifests a
 /// backup reads): the repository key for v3 blobs plus a thread-safe cache
@@ -328,6 +344,8 @@ const KEY_CACHE_MAX_ENTRIES: usize = 1024;
 pub struct KeyCache {
     password: Zeroizing<Vec<u8>>,
     keys: Mutex<DerivedKeyMap>,
+    derivations: std::sync::atomic::AtomicUsize,
+    derivation_limit: usize,
     repo_key: Option<Arc<RepoKey>>,
 }
 
@@ -341,6 +359,8 @@ impl KeyCache {
         KeyCache {
             password: Zeroizing::new(password.to_vec()),
             keys: Mutex::new(HashMap::new()),
+            derivations: Default::default(),
+            derivation_limit: MAX_KEY_DERIVATIONS,
             repo_key: None,
         }
     }
@@ -351,6 +371,8 @@ impl KeyCache {
         KeyCache {
             password: Zeroizing::new(legacy.to_vec()),
             keys: Mutex::new(HashMap::new()),
+            derivations: Default::default(),
+            derivation_limit: MAX_KEY_DERIVATIONS,
             repo_key: Some(repo_key),
         }
     }
@@ -367,6 +389,12 @@ impl KeyCache {
             Some(k) => Self::with_repo_key(password, Arc::new(k)),
             None => Self::new(password),
         })
+    }
+
+    /// Overrides [`MAX_KEY_DERIVATIONS`] for this cache.
+    pub fn with_derivation_limit(mut self, limit: usize) -> Self {
+        self.derivation_limit = limit;
+        self
     }
 
     /// The unlocked repository key, if the repository has one.
@@ -397,12 +425,14 @@ impl KeyCache {
         if let Some(k) = self.keys.lock().ok().and_then(|m| m.get(&id).cloned()) {
             return Ok(k);
         }
+        use std::sync::atomic::Ordering;
+        if self.derivations.fetch_add(1, Ordering::Relaxed) >= self.derivation_limit {
+            error!("Refusing PBKDF2 derivation: per-operation limit reached");
+            return Err(CryptoError::KdfLimitExceeded.into());
+        }
         // Derive outside the lock so parallel restores aren't serialized.
         let key = Arc::new(derive_key(&self.password, salt, iterations)?);
         if let Ok(mut map) = self.keys.lock() {
-            if map.len() >= KEY_CACHE_MAX_ENTRIES {
-                map.clear();
-            }
             map.insert(id, key.clone());
         }
         Ok(key)
@@ -554,6 +584,37 @@ mod tests {
         assert_eq!(decrypt_data_with_cache(&a, &cache).unwrap(), b"a");
         assert_eq!(decrypt_data_with_cache(&b, &cache).unwrap(), b"b");
         assert_eq!(cache.keys.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn v2_header_cannot_request_more_than_600k_iterations() {
+        let key = EncryptionKey::new(b"pw").unwrap();
+        let mut blob = key.encrypt(b"hello").unwrap();
+        assert!(parse_v2(&blob).is_some());
+        blob[8..12].copy_from_slice(&(PBKDF2_ITERATIONS + 1).to_be_bytes());
+        assert!(parse_v2(&blob).is_none());
+        blob[8..12].copy_from_slice(&10_000_000u32.to_be_bytes());
+        assert!(parse_v2(&blob).is_none());
+        // Falls back to the legacy (600k) interpretation and fails cleanly.
+        assert!(decrypt_data(&blob, b"pw").is_err());
+    }
+
+    #[test]
+    fn key_cache_caps_distinct_derivations() {
+        let cache = KeyCache::new(b"pw").with_derivation_limit(2);
+        let blobs: Vec<Vec<u8>> = (0..3)
+            .map(|_| EncryptionKey::new(b"pw").unwrap().encrypt(b"x").unwrap())
+            .collect();
+        assert_eq!(cache.decrypt(&blobs[0]).unwrap(), b"x");
+        assert_eq!(cache.decrypt(&blobs[1]).unwrap(), b"x");
+        // Cached salts keep working; a third distinct salt is refused.
+        assert_eq!(cache.decrypt(&blobs[0]).unwrap(), b"x");
+        let err = cache.decrypt(&blobs[2]).unwrap_err();
+        assert_eq!(crypto_error_of(&err), Some(CryptoError::KdfLimitExceeded));
+        assert!(matches!(
+            crate::error::RsbError::from(err),
+            crate::error::RsbError::Crypto { .. }
+        ));
     }
 
     #[test]
