@@ -565,7 +565,13 @@ impl VerifiedOutput {
 
     async fn commit(mut self, expected_hash: &str, target: &Path) -> io::Result<()> {
         self.file.flush().await?;
-        self.file.sync_all().await?;
+        // Data reaches stable storage before the rename below (ordering
+        // barrier); the restore fsyncs every directory at the end, before
+        // it reports success.
+        let file = self.file.into_std().await;
+        tokio::task::spawn_blocking(move || crate::storage::sync_before_rename(&file))
+            .await
+            .map_err(io::Error::other)??;
         let computed = self.hasher.finalize().to_hex().to_string();
         if computed != expected_hash {
             return Err(io::Error::new(

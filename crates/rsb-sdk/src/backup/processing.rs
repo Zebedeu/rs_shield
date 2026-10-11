@@ -241,6 +241,9 @@ async fn run_backup(
 
     // ====================== FINALIZE ======================
     let snapshot_path = if !dry_run {
+        // Data objects were written with deferred durability: make them
+        // durable before the manifest that references them exists.
+        storage.sync().await?;
         let manifest = snapshot_manifest.lock().unwrap().clone();
         write_manifest_with_key(&*storage, &manifest, repo_key.as_deref(), dry_run).await?
     } else {

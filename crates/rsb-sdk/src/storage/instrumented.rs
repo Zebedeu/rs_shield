@@ -134,6 +134,21 @@ impl Storage for InstrumentedStorage {
         self.inner.write_file(path, src).await
     }
 
+    async fn write_deferred(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.call(&self.counters.put).await;
+        self.inner.write_deferred(path, data).await
+    }
+
+    async fn write_file_deferred(&self, path: &str, src: &Path) -> io::Result<()> {
+        self.call(&self.counters.put).await;
+        self.inner.write_file_deferred(path, src).await
+    }
+
+    async fn sync(&self) -> io::Result<()> {
+        // Not a storage request (a local fsync); no latency either.
+        self.inner.sync().await
+    }
+
     async fn exists(&self, path: &str) -> io::Result<bool> {
         if path.ends_with('/') {
             self.counters.list_pages.fetch_add(1, Ordering::Relaxed);

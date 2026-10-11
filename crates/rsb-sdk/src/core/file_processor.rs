@@ -742,9 +742,13 @@ fn store_object(
         None => compress_into(sink, source, compression_level, object_id)?,
     };
     let (spool, len, hash) = sink.into_parts();
+    // Deferred durability: the backup calls `Storage::sync` before it
+    // writes the manifest that references this object.
     match spool {
-        Spool::Memory { buf, .. } => rt_handle.block_on(storage.write(data_path, &buf))?,
-        Spool::File(tmp) => rt_handle.block_on(storage.write_file(data_path, tmp.path()))?,
+        Spool::Memory { buf, .. } => rt_handle.block_on(storage.write_deferred(data_path, &buf))?,
+        Spool::File(tmp) => {
+            rt_handle.block_on(storage.write_file_deferred(data_path, tmp.path()))?
+        }
     }
     Ok((len, hash))
 }
