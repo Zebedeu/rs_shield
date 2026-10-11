@@ -53,6 +53,11 @@ num_cpus = "1.17.0"
 
 reqwest = { workspace = true }
 hex = {version = "0.4", features = ["serde"]}
+
+# TEMP FILES (spooling encrypted blobs before upload)
+
+tempfile = { workspace = true }
+
 # AWS
 
 aws-credential-types = { workspace = true }
