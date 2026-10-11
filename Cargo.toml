@@ -4,6 +4,7 @@ members = [
     "crates/rsb-sdk",
     "crates/rsb-desktop",
 ]
+exclude = ["fuzz"]
 
 resolver = "2"
 [workspace.package]

@@ -134,6 +134,8 @@ aws-sdk-s3 = { workspace = true }
 
 # CLI feature enables interactive credential prompting
 cli = []
+# Exposes `rsb_sdk::fuzzing` (entry points for the `fuzz/` crate); not a stable API.
+fuzzing = []
 
 [dev-dependencies]
 tempfile = { workspace = true }
