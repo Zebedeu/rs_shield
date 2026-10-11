@@ -6,6 +6,9 @@ pub mod credentials;
 pub mod crypto;
 pub mod error;
 pub mod fido2;
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod fuzzing;
 pub mod integrity;
 pub mod metrics;
 pub mod operation;
