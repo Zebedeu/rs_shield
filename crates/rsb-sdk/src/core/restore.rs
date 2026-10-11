@@ -254,6 +254,10 @@ async fn restore_entry(
         key,
         &metadata.hash,
         metadata.compressed,
+        OutputLimits {
+            file: metadata.max_plain_size(),
+            blob: metadata.max_object_plain_size(),
+        },
     )
     .await
     .map_err(|e| {
@@ -359,6 +363,7 @@ struct VerifiedOutput {
     tmp: PathBuf,
     file: tokio::fs::File,
     hasher: blake3::Hasher,
+    written: u64,
 }
 
 impl VerifiedOutput {
@@ -385,11 +390,13 @@ impl VerifiedOutput {
             tmp,
             file,
             hasher: blake3::Hasher::new(),
+            written: 0,
         })
     }
 
     async fn write(&mut self, data: &[u8]) -> io::Result<()> {
         self.hasher.update(data);
+        self.written += data.len() as u64;
         self.file.write_all(data).await
     }
 
@@ -447,15 +454,41 @@ struct BlobRef<'a> {
     chunk_hash: Option<&'a str>,
 }
 
+/// Largest decoded size accepted for a whole file and for each of its
+/// blobs (from the manifest entry, see `FileMetadata::max_plain_size`).
+#[derive(Debug, Clone, Copy)]
+struct OutputLimits {
+    file: u64,
+    blob: u64,
+}
+
 /// Output side of a blob decode: feeds the optional per-chunk hasher and the
 /// verified temp file (which hashes the full file incrementally).
+///
+/// Enforces the output limits as data arrives, so a malicious repository
+/// (e.g. a zstd bomb) cannot fill the disk before the final hash check:
+/// writing past a limit fails with `io::ErrorKind::FileTooLarge` and the
+/// temp file is removed by the caller.
 struct BlobSink<'a> {
     out: &'a mut VerifiedOutput,
     chunk_hasher: Option<&'a mut blake3::Hasher>,
+    blob_written: u64,
+    limits: OutputLimits,
 }
 
 impl BlobSink<'_> {
     async fn write(&mut self, data: &[u8]) -> io::Result<()> {
+        let len = data.len() as u64;
+        if self.blob_written + len > self.limits.blob {
+            return Err(super::limits::too_large(
+                "Restored object",
+                self.limits.blob,
+            ));
+        }
+        if self.out.written + len > self.limits.file {
+            return Err(super::limits::too_large("Restored file", self.limits.file));
+        }
+        self.blob_written += len;
         if let Some(h) = self.chunk_hasher.as_deref_mut() {
             h.update(data);
         }
@@ -645,6 +678,7 @@ async fn restore_blobs(
     key: Option<&KeyCache>,
     expected_full_hash: &str,
     compressed: bool,
+    limits: OutputLimits,
 ) -> io::Result<()> {
     let mut out = VerifiedOutput::create(target).await?;
     let tmp = out.tmp.clone();
@@ -658,6 +692,8 @@ async fn restore_blobs(
                 let mut sink = BlobSink {
                     out: &mut out,
                     chunk_hasher: chunk_hasher.as_mut(),
+                    blob_written: 0,
+                    limits,
                 };
                 match key {
                     Some(k) => {
@@ -817,6 +853,60 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn zstd_bomb_stops_at_recorded_size_and_leaves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path().to_str().unwrap());
+        let content = b"small file";
+        let hash = hash_file_content(content).unwrap();
+        // 512 MiB of zeros in a few KiB, where a 10-byte file belongs.
+        let bomb = zstd::stream::encode_all(std::io::Read::take(std::io::repeat(0), 512 << 20), 1)
+            .unwrap();
+        storage
+            .write(&format!("data/clear/{}", hash), &bomb)
+            .await
+            .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let target = out.path().join("f.txt");
+        let blobs = [BlobRef {
+            path: format!("data/clear/{}", hash),
+            object_id: &hash,
+            chunk_hash: None,
+        }];
+        let meta = FileMetadata::new(hash.clone(), false, true).with_size(content.len() as u64);
+        let err = restore_blobs(
+            &storage,
+            &blobs,
+            &target,
+            None,
+            &hash,
+            true,
+            OutputLimits {
+                file: meta.max_plain_size(),
+                blob: meta.max_object_plain_size(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::FileTooLarge);
+        assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+
+        // Through the public entry point: reported as a failed file.
+        let mut manifest = HashMap::new();
+        manifest.insert(PathBuf::from("f.txt"), meta);
+        storage
+            .write(
+                "snapshots/2026-01-01T000000Z.toml",
+                toml::to_string(&manifest).unwrap().as_bytes(),
+            )
+            .await
+            .unwrap();
+        let report = run(&storage, out.path(), false).await;
+        assert_eq!(report.files_with_errors, 1);
+        assert!(report.errors[0].contains("exceeds"), "{:?}", report.errors);
+        assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
