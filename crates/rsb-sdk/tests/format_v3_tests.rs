@@ -334,7 +334,36 @@ async fn mixed_repo_cycle(storage: Arc<dyn Storage>) {
     assert_tree(out.path(), &files);
     assert!(verify(&cfg, &storage, PW).await.unwrap().is_empty());
 
-    // Password change: v1/v2 objects stay readable (legacy secret).
+    // Password change: refused while v1/v2 objects remain (their keys
+    // derive from the password); `rsb key migrate` rewrites them as v3,
+    // then the v1/v2 data stays readable after the change.
+    let e = keyfile::change_password(
+        storage.clone(),
+        PW.as_bytes(),
+        b"pw2",
+        Some(KdfParams::MIN_CREATE),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.to_string().contains("rsb key migrate"), "{e}");
+    let rep = rsb_sdk::crypto::lifecycle::migrate_legacy_objects(
+        storage.clone(),
+        PW.as_bytes(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rep.objects_migrated, 2, "{rep:?}");
+    for h in [&ha, &hb] {
+        assert!(
+            storage
+                .read(&format!("data/enc/{}", h))
+                .await
+                .unwrap()
+                .starts_with(BLOB_MAGIC_V3)
+        );
+    }
     keyfile::change_password(
         storage.clone(),
         PW.as_bytes(),
@@ -349,7 +378,7 @@ async fn mixed_repo_cycle(storage: Arc<dyn Storage>) {
     assert_tree(out.path(), &files);
     assert!(verify(&cfg, &storage, "pw2").await.unwrap().is_empty());
 
-    // Prune keeps the mixed snapshot and its v1/v2/v3 objects.
+    // Prune keeps the snapshot and its (migrated) objects.
     perform_prune_with_storage(storage.clone(), Some("pw2"), 1)
         .await
         .unwrap();

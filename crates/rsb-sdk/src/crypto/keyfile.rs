@@ -510,14 +510,7 @@ impl RepoKey {
             },
             wrapped_dek,
             key_id: Some(key_id_hex(&self.primary.id)),
-            legacy_secret: match &self.legacy_password {
-                Some(pw) => Some(seal(
-                    &*legacy_subkey(&self.primary.key)?,
-                    LEGACY_SECRET_AAD,
-                    pw,
-                )?),
-                None => None,
-            },
+            legacy_secret: None,
             rotation,
             created_at: now,
             updated_at: None,
@@ -644,6 +637,14 @@ impl RepoKeyFile {
         f.legacy_secret = None;
         f.updated_at = Some(chrono::Utc::now().to_rfc3339());
         f
+    }
+
+    /// Adds a `legacy_secret` the way earlier versions wrote it (tests of
+    /// key files from those versions).
+    #[cfg(test)]
+    pub(crate) fn add_legacy_secret(&mut self, key: &RepoKey, legacy_password: &[u8]) {
+        let sub = legacy_subkey(&key.primary.key).unwrap();
+        self.legacy_secret = Some(seal(&sub, LEGACY_SECRET_AAD, legacy_password).unwrap());
     }
 
     fn unwrap_dek(
@@ -936,11 +937,10 @@ async fn init_locked(
         )));
     }
     let has_legacy = probe_legacy_snapshots(storage, password).await?;
-    let mut key = RepoKey::generate()?;
-    if has_legacy {
-        key.legacy_password = Some(Zeroizing::new(password.to_vec()));
-    }
-    let key = Arc::new(key);
+    // The v1/v2 objects keep opening with `password` (KeyCache falls back
+    // to it); change-password refuses until `rsb key migrate` rewrote them,
+    // so the legacy password never needs to be stored.
+    let key = Arc::new(RepoKey::generate()?);
     let file = wrap_blocking(key.clone(), password, params).await?;
     storage.write(REPO_KEY_PATH, &file.to_bytes()?).await?;
 
@@ -1052,8 +1052,19 @@ async fn change_locked(
                 .into(),
         ));
     }
-    let mut new_file = wrap_blocking(key.clone(), new_password, params).await?;
-    let expected = key;
+    let cache = super::KeyCache::with_repo_key(old_password, key.clone());
+    let legacy = super::lifecycle::legacy_blockers(storage, &cache).await?;
+    if legacy > 0 {
+        return Err(RsbError::InvalidInput(format!(
+            "The repository still holds {} v1/v2 (pre-v3) object(s) or manifest(s), encrypted \
+             with a key derived from the current password. Run `rsb key migrate` to \
+             re-encrypt them as v3 first, then change the password.",
+            legacy
+        )));
+    }
+    // The new file never holds the legacy password (nothing needs it).
+    let expected = key.without_legacy();
+    let mut new_file = wrap_blocking(Arc::new(key.without_legacy()), new_password, params).await?;
     new_file.created_at = current.created_at.clone();
     new_file.updated_at = Some(chrono::Utc::now().to_rfc3339());
     replace_key_file(storage, &raw, &new_file, new_password, &expected).await?;
@@ -1166,18 +1177,11 @@ mod tests {
     /// Key files written by earlier versions may hold `legacy_secret`: it
     /// is still read, but never written again.
     #[test]
-    fn legacy_secret_survives_rewrap() {
+    fn legacy_secret_is_read_but_not_rewritten() {
         let key = RepoKey::generate().unwrap();
         let mut f1 = key.wrap(b"a", fast()).unwrap();
         assert!(!f1.has_legacy_secret());
-        f1.legacy_secret = Some(
-            seal(
-                &legacy_subkey(&key.primary.key).unwrap(),
-                LEGACY_SECRET_AAD,
-                b"old-pw",
-            )
-            .unwrap(),
-        );
+        f1.add_legacy_secret(&key, b"old-pw");
         // An old file (no key id) with a legacy secret.
         f1.key_id = None;
         let f1 = RepoKeyFile::from_bytes(&f1.to_bytes().unwrap()).unwrap();
@@ -1185,11 +1189,13 @@ mod tests {
         let k1 = f1.unwrap_key(b"a").unwrap();
         assert_eq!(k1.legacy_password(), Some(&b"old-pw"[..]));
         let f2 = k1.wrap(b"b", fast()).unwrap();
-        assert_eq!(
-            f2.unwrap_key(b"b").unwrap().legacy_password(),
-            Some(&b"old-pw"[..])
-        );
-        assert!(!f1.without_legacy_secret().has_legacy_secret());
+        assert!(!f2.has_legacy_secret());
+        let json = String::from_utf8(f2.to_bytes().unwrap()).unwrap();
+        assert!(!json.contains("legacy_secret"));
+        assert_eq!(f2.unwrap_key(b"b").unwrap().legacy_password(), None);
+        let f3 = f1.without_legacy_secret();
+        assert!(!f3.has_legacy_secret());
+        assert!(f3.unwrap_key(b"a").unwrap().same_key(&k1.without_legacy()));
     }
 
     #[test]

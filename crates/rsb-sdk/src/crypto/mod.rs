@@ -22,6 +22,7 @@
 //   first 4 salt bytes (key rotation).
 
 pub mod keyfile;
+pub mod lifecycle;
 
 pub mod stream;
 
