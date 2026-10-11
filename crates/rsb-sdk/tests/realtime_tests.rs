@@ -85,7 +85,7 @@ fn test_realtime_watcher_creation() {
 
 #[test]
 fn test_multiple_file_changes() {
-    let changes = vec![
+    let changes = [
         FileChange {
             path: PathBuf::from("/file1.txt"),
             change_type: ChangeType::Created,
@@ -146,7 +146,7 @@ fn test_large_file_change() {
 
 #[test]
 fn test_nested_path_changes() {
-    let paths = vec![
+    let paths = [
         "/root/subdir/file.txt",
         "/root/subdir/nested/deep/file.txt",
         "/another/path/file.txt",
@@ -293,8 +293,10 @@ async fn test_realtime_sync_creation() {
 
 #[tokio::test]
 async fn test_realtime_sync_process_batch_with_ignore_patterns() {
-    let mut strategy = SyncStrategy::default();
-    strategy.ignore_patterns = vec![".*\\.tmp$".into()];
+    let strategy = SyncStrategy {
+        ignore_patterns: vec![".*\\.tmp$".into()],
+        ..Default::default()
+    };
     let sync = RealtimeSync::new(strategy);
 
     // Adicionar mudança que não deve ser ignorada
@@ -333,7 +335,7 @@ async fn test_sync_strategy_default() {
     assert_eq!(strategy.batch_interval, 5);
     assert_eq!(strategy.immediate_threshold, 10_485_760); // 10 MB
     assert_eq!(strategy.direction, "uni");
-    assert!(strategy.ignore_patterns.len() > 0);
+    assert!(!strategy.ignore_patterns.is_empty());
 }
 
 #[tokio::test]
@@ -514,7 +516,7 @@ async fn test_realtime_sync_start_processing() {
 
 #[tokio::test]
 async fn test_peek_pending_changes() {
-    let queue = ChangeQueue::new(10);
+    let _queue = ChangeQueue::new(10);
     let strategy = SyncStrategy::default();
     let sync = RealtimeSync::new(strategy);
 

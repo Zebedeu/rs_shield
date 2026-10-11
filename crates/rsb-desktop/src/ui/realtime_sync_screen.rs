@@ -587,10 +587,10 @@ pub fn RealtimeSyncScreen() -> Element {
         let mut matched_patterns = Vec::new();
 
         for pattern in &patterns {
-            if let Ok(regex) = regex::Regex::new(pattern) {
-                if regex.is_match(&test_input) {
-                    matched_patterns.push(pattern.clone());
-                }
+            if let Ok(regex) = regex::Regex::new(pattern)
+                && regex.is_match(&test_input)
+            {
+                matched_patterns.push(pattern.clone());
             }
         }
 

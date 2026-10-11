@@ -1,4 +1,4 @@
-use crate::auth::{JwtManager, SessionClaims, SessionStore};
+use crate::auth::SessionStore;
 use crate::server::handlers::AuthHandlerState;
 use axum::{
     Json,
@@ -7,7 +7,6 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use std::sync::Arc;
 use tracing::{error, warn};
 
 /// Custom extractor to validate JWT from the Authorization header
@@ -47,7 +46,7 @@ where
         }
 
         let token = &auth_header[7..];
-        let claims = state.jwt_manager.verify_token(token).map_err(|_| {
+        let _claims = state.jwt_manager.verify_token(token).map_err(|_| {
             (
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse::unauthorized("Invalid token")),

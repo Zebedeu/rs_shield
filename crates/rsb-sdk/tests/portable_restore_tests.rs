@@ -1,7 +1,6 @@
 //! Comprehensive tests for portable restore functionality
 //! Tests direct backup restoration without config files, cross-platform support, and validation
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -496,18 +495,18 @@ fn validate_backup_structure(backup_path: &Path) -> BackupValidation {
     if data_dir.exists() {
         // Count files recursively in data directory
         if let Ok(entries) = fs::read_dir(&data_dir) {
-            for entry in entries {
-                if let Ok(entry) = entry {
+            for entry in entries.flatten() {
+                {
                     if entry.path().is_file() {
                         validation.data_files_count += 1;
                     } else if entry.path().is_dir() {
                         // Count files in subdirectories
                         if let Ok(subentries) = fs::read_dir(entry.path()) {
                             for subentry in subentries {
-                                if let Ok(subentry) = subentry {
-                                    if subentry.path().is_file() {
-                                        validation.data_files_count += 1;
-                                    }
+                                if let Ok(subentry) = subentry
+                                    && subentry.path().is_file()
+                                {
+                                    validation.data_files_count += 1;
                                 }
                             }
                         }
@@ -596,7 +595,6 @@ fn validate_backup_integrity(
         snapshots_invalid: 0,
         data_files_valid: 0,
         data_files_invalid: 0,
-        checksums: HashMap::new(),
     };
 
     let snapshots_dir = backup_path.join("snapshots");
@@ -620,13 +618,11 @@ fn validate_backup_integrity(
                                 // Check in subdirectories (like data/clear/)
                                 let mut found = false;
                                 if let Ok(entries) = fs::read_dir(backup_path.join("data")) {
-                                    for entry in entries {
-                                        if let Ok(entry) = entry {
-                                            let subfile = entry.path().join(file_key);
-                                            if subfile.exists() {
-                                                found = true;
-                                                break;
-                                            }
+                                    for entry in entries.flatten() {
+                                        let subfile = entry.path().join(file_key);
+                                        if subfile.exists() {
+                                            found = true;
+                                            break;
                                         }
                                     }
                                 }
@@ -673,14 +669,13 @@ struct BackupIntegrity {
     pub snapshots_invalid: usize,
     pub data_files_valid: usize,
     pub data_files_invalid: usize,
-    pub checksums: HashMap<String, String>,
 }
 
 /// Simulation helper for restore operation
 fn restore_from_config_or_backup_simulation(
     config_path: Option<&Path>,
     backup_path: Option<&Path>,
-    target_path: &Path,
+    _target_path: &Path,
     _encryption_key: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if config_path.is_none() && backup_path.is_none() {

@@ -11,7 +11,7 @@ fn test_snapshot_path_generation() {
 
     assert!(snapshot_path.starts_with("snapshots/"));
     assert!(snapshot_path.ends_with(".toml"));
-    assert!(timestamp.len() > 0);
+    assert!(!timestamp.is_empty());
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn test_snapshot_list_sorting() {
 
 #[test]
 fn test_snapshot_filtering() {
-    let files = vec![
+    let files = [
         "snapshots/2026-02-07T10:00:00Z.toml",
         "snapshots/data.txt",
         "snapshots/2026-02-07T09:30:00Z.toml",
@@ -158,7 +158,7 @@ fn test_snapshot_path_variations() {
         assert!(var.starts_with("snapshots/"));
         assert!(var.ends_with(".toml"));
         let without_prefix = var.strip_prefix("snapshots/").unwrap();
-        assert!(without_prefix.len() > 0);
+        assert!(!without_prefix.is_empty());
     }
 }
 
@@ -191,7 +191,7 @@ key2 = "value2"
 
 #[test]
 fn test_snapshot_list_with_invalid_files() {
-    let files = vec![
+    let files = [
         "snapshots/2026-02-07T10:00:00Z.toml",
         "other_dir/file.toml",
         "snapshots/backup.zip",

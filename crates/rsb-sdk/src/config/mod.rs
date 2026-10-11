@@ -139,13 +139,13 @@ pub fn write_config_secure(path: &std::path::Path, config: &Config) -> std::io::
             "Refusing to write encryption_key to TOML (use keyring/env/prompt instead)",
         ));
     }
-    if let Some(s3) = config.s3.as_ref() {
-        if s3.access_key.is_some() || s3.secret_key.is_some() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Refusing to write S3 secrets to TOML (use env or s3_credentials.enc)",
-            ));
-        }
+    if let Some(s3) = config.s3.as_ref()
+        && (s3.access_key.is_some() || s3.secret_key.is_some())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Refusing to write S3 secrets to TOML (use env or s3_credentials.enc)",
+        ));
     }
     let toml_str = toml::to_string_pretty(config).map_err(std::io::Error::other)?;
     write_file_secure(path, toml_str.as_bytes())
@@ -227,15 +227,15 @@ pub fn resolve_encryption_key(
     if let Some(k) = explicit.filter(|k| !k.is_empty()) {
         return Some(k);
     }
-    if let Ok(k) = std::env::var(ENCRYPTION_KEY_ENV) {
-        if !k.is_empty() {
-            return Some(k);
-        }
+    if let Ok(k) = std::env::var(ENCRYPTION_KEY_ENV)
+        && !k.is_empty()
+    {
+        return Some(k);
     }
-    if let Some(p) = profile {
-        if let Some(k) = load_encryption_key_from_keyring(p) {
-            return Some(k);
-        }
+    if let Some(p) = profile
+        && let Some(k) = load_encryption_key_from_keyring(p)
+    {
+        return Some(k);
     }
     config
         .and_then(|c| c.encryption_key.clone())
@@ -270,17 +270,17 @@ impl Config {
 
     /// Retorna o número de threads a usar (com fallback inteligente)
     pub fn get_max_threads(&self) -> usize {
-        if let Some(threads) = self.max_threads {
-            if threads > 0 {
-                return threads.min(32);
-            }
+        if let Some(threads) = self.max_threads
+            && threads > 0
+        {
+            return threads.min(32);
         }
         // Lógica automática
         let cores = num_cpus::get();
         if cores <= 4 {
             cores
         } else {
-            (cores * 3 / 4).max(4).min(16)
+            (cores * 3 / 4).clamp(4, 16)
         }
     }
 
@@ -406,13 +406,13 @@ pub fn load_config(path: &Path) -> io::Result<Config> {
             path.display()
         );
     }
-    if let Some(s3) = config.s3.as_ref() {
-        if s3.access_key.is_some() || s3.secret_key.is_some() {
-            eprintln!(
-                "⚠️ '{}' contém segredos S3 em claro (legado). Migre para AWS_* env ou s3_credentials.enc.",
-                path.display()
-            );
-        }
+    if let Some(s3) = config.s3.as_ref()
+        && (s3.access_key.is_some() || s3.secret_key.is_some())
+    {
+        eprintln!(
+            "⚠️ '{}' contém segredos S3 em claro (legado). Migre para AWS_* env ou s3_credentials.enc.",
+            path.display()
+        );
     }
 
     Ok(config)

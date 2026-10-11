@@ -93,36 +93,36 @@ async fn load_s3_credentials_securely(
     if let (Ok(access_key), Ok(secret_key)) = (
         env::var("AWS_ACCESS_KEY_ID"),
         env::var("AWS_SECRET_ACCESS_KEY"),
-    ) {
-        if !access_key.is_empty() && !secret_key.is_empty() {
-            let session_token = env::var("AWS_SESSION_TOKEN").ok();
-            info!("🔑 S3 credentials loaded from environment variables");
-            return Ok(aws_credential_types::Credentials::new(
-                access_key,
-                secret_key,
-                session_token,
-                None,
-                "rsb-env",
-            ));
-        }
+    ) && !access_key.is_empty()
+        && !secret_key.is_empty()
+    {
+        let session_token = env::var("AWS_SESSION_TOKEN").ok();
+        info!("🔑 S3 credentials loaded from environment variables");
+        return Ok(aws_credential_types::Credentials::new(
+            access_key,
+            secret_key,
+            session_token,
+            None,
+            "rsb-env",
+        ));
     }
 
     // 2. Credentials entered in an interactive front-end (memory only)
-    if let Ok(slot) = SESSION_S3_CREDENTIALS.read() {
-        if let Some((ak, sk)) = slot.as_ref() {
-            info!("🔑 S3 credentials loaded from the current session");
-            return Ok(aws_credential_types::Credentials::new(
-                ak.as_str(),
-                sk.as_str(),
-                None,
-                None,
-                "rsb-session",
-            ));
-        }
+    if let Ok(slot) = SESSION_S3_CREDENTIALS.read()
+        && let Some((ak, sk)) = slot.as_ref()
+    {
+        info!("🔑 S3 credentials loaded from the current session");
+        return Ok(aws_credential_types::Credentials::new(
+            ak.as_str(),
+            sk.as_str(),
+            None,
+            None,
+            "rsb-session",
+        ));
     }
 
     // 3. Encrypted file (persistent)
-    if let Some(home) = env::var("HOME").ok() {
+    if let Ok(home) = env::var("HOME") {
         let cred_path = format!("{}/.rs-shield/s3_credentials.enc", home);
         if std::path::Path::new(&cred_path).exists() {
             match CredentialsManager::load_encrypted(&cred_path) {
@@ -163,23 +163,22 @@ async fn load_s3_credentials_securely(
     // 5. Config file REMOVIDO por segurança (era plaintext sem chmod).
     // Para migração legada, o operador pode optar explicitamente com
     // RSB_ALLOW_CONFIG_CREDS=1 — e mesmo assim alertamos.
-    if std::env::var("RSB_ALLOW_CONFIG_CREDS").as_deref() == Ok("1") {
-        if let Some(s3) = config.s3.as_ref() {
-            if let (Some(ak), Some(sk)) = (&s3.access_key, &s3.secret_key) {
-                if !ak.is_empty() && !sk.is_empty() {
-                    warn!(
-                        "⚠️ SECURITY: using S3 secrets from TOML because RSB_ALLOW_CONFIG_CREDS=1. Migrate to env/s3_credentials.enc and unset the flag."
-                    );
-                    return Ok(aws_credential_types::Credentials::new(
-                        ak.clone(),
-                        sk.clone(),
-                        None,
-                        None,
-                        "rsb-config-legacy-optin",
-                    ));
-                }
-            }
-        }
+    if std::env::var("RSB_ALLOW_CONFIG_CREDS").as_deref() == Ok("1")
+        && let Some(s3) = config.s3.as_ref()
+        && let (Some(ak), Some(sk)) = (&s3.access_key, &s3.secret_key)
+        && !ak.is_empty()
+        && !sk.is_empty()
+    {
+        warn!(
+            "⚠️ SECURITY: using S3 secrets from TOML because RSB_ALLOW_CONFIG_CREDS=1. Migrate to env/s3_credentials.enc and unset the flag."
+        );
+        return Ok(aws_credential_types::Credentials::new(
+            ak.clone(),
+            sk.clone(),
+            None,
+            None,
+            "rsb-config-legacy-optin",
+        ));
     }
 
     Err("No S3 credentials found. Provide AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or run `rsb config s3-credentials` (encrypted).".to_string())

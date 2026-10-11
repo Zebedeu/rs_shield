@@ -3,8 +3,8 @@ use rsb_sdk::core::{get_telegram_chat_id, validate_telegram_token};
 
 #[component]
 pub fn TelegramValidator(bot_token: String) -> Element {
-    let mut validation_result = use_signal(|| String::new());
-    let mut chat_ids = use_signal(|| Vec::new());
+    let mut validation_result = use_signal(String::new);
+    let mut chat_ids = use_signal(Vec::new);
     let mut is_validating = use_signal(|| false);
     let mut show_validator = use_signal(|| false);
     let bot_token_clone = bot_token.clone();

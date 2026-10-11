@@ -1,6 +1,6 @@
 // types.rs - Clean, performant, and well-documented version
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 /// Maximum size before using multipart processing (64MB).
 ///

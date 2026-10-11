@@ -114,15 +114,14 @@ pub async fn restore_from_storage(
     let mut errors = Vec::new();
     let mut success = 0;
     let total_files = manifest.len();
-    let mut current_files = 0;
 
-    for (rel_path, metadata) in manifest {
+    for (current_files, (rel_path, metadata)) in manifest.into_iter().enumerate() {
         // Check if the operation was cancelled
-        if let Some(token) = &cancellation_token {
-            if token.is_cancelled() {
-                info!("⏹️ Restore cancelled by user");
-                break;
-            }
+        if let Some(token) = &cancellation_token
+            && token.is_cancelled()
+        {
+            info!("⏹️ Restore cancelled by user");
+            break;
         }
 
         pb.set_message(format!("Restoring: {}", rel_path.display()));
@@ -150,7 +149,6 @@ pub async fn restore_from_storage(
             success += 1;
         }
 
-        current_files += 1;
         pb.inc(1);
     }
 
@@ -608,13 +606,13 @@ async fn restore_blobs(
                 }
             }
 
-            if let (Some(expected), Some(h)) = (chunk_hash, chunk_hasher) {
-                if h.finalize().to_hex().as_str() != *expected {
-                    return Err(io::Error::new(
-                        ErrorKind::InvalidData,
-                        format!("Chunk hash mismatch for {}", data_path),
-                    ));
-                }
+            if let (Some(expected), Some(h)) = (chunk_hash, chunk_hasher)
+                && h.finalize().to_hex().as_str() != *expected
+            {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Chunk hash mismatch for {}", data_path),
+                ));
             }
         }
         out.commit(expected_full_hash, target).await

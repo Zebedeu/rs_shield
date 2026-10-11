@@ -380,10 +380,10 @@ impl RealtimeSync {
     /// Ignore every change under `root` (e.g. a destination inside the source).
     pub fn exclude_root(mut self, root: impl Into<PathBuf>) -> Self {
         let root = root.into();
-        if let Ok(canonical) = std::fs::canonicalize(&root) {
-            if canonical != root {
-                self.excluded_roots.push(canonical);
-            }
+        if let Ok(canonical) = std::fs::canonicalize(&root)
+            && canonical != root
+        {
+            self.excluded_roots.push(canonical);
         }
         self.excluded_roots.push(root);
         self
@@ -409,7 +409,8 @@ impl RealtimeSync {
 
     /// Start the automatic processing loop in the background.
     pub async fn start_processing_loop(self: Arc<Self>) {
-        let _ = self.spawn_processing_loop();
+        // Detach: dropping a JoinHandle does not cancel the spawned task.
+        drop(self.spawn_processing_loop());
     }
 
     /// Start the processing loop and return its handle. After
@@ -734,13 +735,13 @@ pub async fn sync_all_files(src: &Path, dst: &Path) -> Result<usize, String> {
             }
 
             // Never write through a symlink planted at the destination.
-            if let Ok(meta) = fs::symlink_metadata(&dst_file) {
-                if meta.file_type().is_symlink() {
-                    return Err(format!(
-                        "Refusing to overwrite symlink at destination: {}",
-                        dst_file.display()
-                    ));
-                }
+            if let Ok(meta) = fs::symlink_metadata(&dst_file)
+                && meta.file_type().is_symlink()
+            {
+                return Err(format!(
+                    "Refusing to overwrite symlink at destination: {}",
+                    dst_file.display()
+                ));
             }
 
             fs::copy(path, &dst_file).map_err(|e| format!("Error copying: {}", e))?;

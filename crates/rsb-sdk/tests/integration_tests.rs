@@ -226,37 +226,33 @@ fn test_complete_backup_scenario() {
     };
 
     // Walk the source directory
-    let walk = utils::walk_filtered(
-        &config.source_path.as_ref(),
-        &config.exclude_patterns,
-        false,
-    );
+    let walk = utils::walk_filtered(config.source_path.as_ref(), &config.exclude_patterns, false);
     let files: Vec<_> = walk.filter_map(|e| e.ok()).collect();
 
-    assert!(files.len() > 0, "Should find files in backup scenario");
+    assert!(!files.is_empty(), "Should find files in backup scenario");
 
     // Process each file
     let password = b"backup-key";
     for entry in files {
-        if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-            if let Ok(content) = fs::read(entry.path()) {
-                // Hash the file
-                let hash = crypto::hash_file_content(&content).expect("Failed to hash");
-                assert_eq!(hash.len(), 64);
+        if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+            && let Ok(content) = fs::read(entry.path())
+        {
+            // Hash the file
+            let hash = crypto::hash_file_content(&content).expect("Failed to hash");
+            assert_eq!(hash.len(), 64);
 
-                // Encrypt if needed
-                if entry
-                    .path()
-                    .extension()
-                    .map(|ext| ext == "pdf")
-                    .unwrap_or(false)
-                {
-                    let encrypted =
-                        crypto::encrypt_data(&content, password).expect("Failed to encrypt");
-                    let decrypted =
-                        crypto::decrypt_data(&encrypted, password).expect("Failed to decrypt");
-                    assert_eq!(decrypted, content);
-                }
+            // Encrypt if needed
+            if entry
+                .path()
+                .extension()
+                .map(|ext| ext == "pdf")
+                .unwrap_or(false)
+            {
+                let encrypted =
+                    crypto::encrypt_data(&content, password).expect("Failed to encrypt");
+                let decrypted =
+                    crypto::decrypt_data(&encrypted, password).expect("Failed to decrypt");
+                assert_eq!(decrypted, content);
             }
         }
     }

@@ -265,10 +265,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Merge CLI options with config, allowing CLI to override config
             let effective_threads = threads.or(cfg.max_threads);
 
-            if let Some(t) = effective_threads {
-                if t > 4 {
-                    println!("📊 Using {} parallel threads for backup", t);
-                }
+            if let Some(t) = effective_threads
+                && t > 4
+            {
+                println!("📊 Using {} parallel threads for backup", t);
             }
 
             // Debug info
@@ -372,7 +372,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Either config or backup must be provided
             let (cfg, _profile_name) = if let Some(ref config_path) = config {
                 // Traditional mode: use config file
-                let cfg = config::load_config(&config_path)?;
+                let cfg = config::load_config(config_path)?;
                 let name = config_path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -428,7 +428,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             // Clone target for potential later use in verification
-            let target_for_verify = target.clone();
+            let _target_for_verify = target.clone();
 
             let key = key.or_else(|| cfg.encryption_key.clone());
             let mut report_data = core::perform_restore(
@@ -589,7 +589,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             retention,
             dry_run,
             confirm,
-            quiet,
+            quiet: _,
             healthcheck_url,
         } => {
             if !dry_run && !confirm {
@@ -630,11 +630,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("🧹 Keeping last {} backups...", keep_count);
             }
 
-            if !dry_run {
-                if let Err(e) = core::perform_prune(&cfg, keep_count).await {
-                    send_healthcheck(&healthcheck_url, "/fail").await;
-                    return Err(e);
-                }
+            if !dry_run && let Err(e) = core::perform_prune(&cfg, keep_count).await {
+                send_healthcheck(&healthcheck_url, "/fail").await;
+                return Err(e);
             }
             send_healthcheck(&healthcheck_url, "").await;
             info!("Prune completed.");

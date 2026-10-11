@@ -17,11 +17,11 @@ pub fn LoginScreen(on_login: EventHandler<String>) -> Element {
     let texts = get_texts(app_config.language());
     let fido2_manager_arc = use_context::<Arc<Mutex<Fido2Manager>>>();
 
-    let mut user_id = use_signal(|| String::new());
-    let mut error_msg = use_signal(|| String::new());
+    let mut user_id = use_signal(String::new);
+    let mut error_msg = use_signal(String::new);
     let mut is_authenticating = use_signal(|| false);
     let mut show_recovery_input = use_signal(|| false);
-    let mut recovery_code = use_signal(|| String::new());
+    let mut recovery_code = use_signal(String::new);
 
     let fido2_for_login = fido2_manager_arc.clone();
     let handle_login = move |_| {

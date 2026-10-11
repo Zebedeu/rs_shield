@@ -73,7 +73,7 @@ fn test_build_walker_basic() {
     let walker = utils::build_walker(root, &[], false);
     let entries: Vec<_> = walker.build().collect();
 
-    assert!(entries.len() > 0, "Walker should find entries");
+    assert!(!entries.is_empty(), "Walker should find entries");
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn test_walk_filtered_basic() {
     let entries: Vec<_> = walk.filter_map(|e| e.ok()).collect();
 
     // Should have found some entries
-    assert!(entries.len() > 0, "Walker should find entries");
+    assert!(!entries.is_empty(), "Walker should find entries");
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn test_walk_respects_hidden_files() {
     let walker = utils::build_walker(root, &[], false);
     let entries: Vec<_> = walker.build().filter_map(|e| e.ok()).collect();
 
-    assert!(entries.len() > 0, "Walker should find visible files");
+    assert!(!entries.is_empty(), "Walker should find visible files");
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn test_multiple_exclude_patterns() {
     let entries: Vec<_> = walk.filter_map(|e| e.ok()).collect();
 
     assert!(
-        entries.len() > 0,
+        !entries.is_empty(),
         "Walker should still find non-excluded files"
     );
 }
@@ -156,7 +156,7 @@ fn test_walker_with_gitignore() {
     let walker = utils::build_walker(root, &[], true); // respect_gitignore = true
     let entries: Vec<_> = walker.build().filter_map(|e| e.ok()).collect();
 
-    assert!(entries.len() > 0, "Walker should find entries");
+    assert!(!entries.is_empty(), "Walker should find entries");
 }
 
 #[test]
@@ -175,5 +175,8 @@ fn test_walker_depth() {
     let entries: Vec<_> = walker.build().filter_map(|e| e.ok()).collect();
 
     // Should traverse deep directories
-    assert!(entries.len() > 0, "Walker should handle nested directories");
+    assert!(
+        !entries.is_empty(),
+        "Walker should handle nested directories"
+    );
 }

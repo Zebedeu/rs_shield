@@ -44,10 +44,10 @@ impl AppPreferences {
     pub fn load() -> Self {
         let path = Self::get_preferences_path();
 
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(prefs) = serde_json::from_str::<AppPreferences>(&content) {
-                return prefs;
-            }
+        if let Ok(content) = fs::read_to_string(&path)
+            && let Ok(prefs) = serde_json::from_str::<AppPreferences>(&content)
+        {
+            return prefs;
         }
 
         Self::default()
@@ -59,7 +59,7 @@ impl AppPreferences {
         // Criar diretório se não existir usando função centralizada
         if let Some(parent) = path.parent() {
             let parent_str = parent.to_string_lossy().to_string();
-            ensure_directory_exists(&parent_str).map_err(|e| std::io::Error::other(e))?;
+            ensure_directory_exists(&parent_str).map_err(std::io::Error::other)?;
         }
 
         let json_str = serde_json::to_string_pretty(self)?;

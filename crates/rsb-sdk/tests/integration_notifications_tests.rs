@@ -1,8 +1,8 @@
 /// Integration tests for complete notification system
 /// Uses: Email, JSON Logging, History, and Chat Integrations
 use rsb_sdk::core::{
-    ChatIntegration, EmailConfig, EmailNotification, HistorySummary, NotificationHistory,
-    NotificationHistoryEntry, NotificationLogger,
+    ChatIntegration, EmailConfig, EmailNotification, NotificationHistory, NotificationHistoryEntry,
+    NotificationLogger,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -108,7 +108,7 @@ fn test_notification_history_workflow() {
 
     // Filter by status
     let errors = history.filter_by_status("error");
-    assert!(errors.len() > 0);
+    assert!(!errors.is_empty());
 
     // Summary
     let summary = history.get_summary();

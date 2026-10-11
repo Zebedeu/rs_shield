@@ -26,11 +26,12 @@ impl ListProfilesCmd {
                 let entry = entry?;
                 let path = entry.path();
 
-                if path.is_file() && path.extension().is_some_and(|e| e == "toml") {
-                    if let Ok(filename) = entry.file_name().into_string() {
-                        let name = filename.trim_end_matches(".toml").to_string();
-                        profiles.push((name, path));
-                    }
+                if path.is_file()
+                    && path.extension().is_some_and(|e| e == "toml")
+                    && let Ok(filename) = entry.file_name().into_string()
+                {
+                    let name = filename.trim_end_matches(".toml").to_string();
+                    profiles.push((name, path));
                 }
             }
         }

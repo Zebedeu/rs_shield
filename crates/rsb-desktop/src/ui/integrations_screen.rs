@@ -53,12 +53,11 @@ impl IntegrationConfig {
         };
         let config_path = config_dir.join("integrations.json");
 
-        if config_path.exists() {
-            if let Ok(content) = fs::read_to_string(&config_path) {
-                if let Ok(config) = serde_json::from_str(&content) {
-                    return config;
-                }
-            }
+        if config_path.exists()
+            && let Ok(content) = fs::read_to_string(&config_path)
+            && let Ok(config) = serde_json::from_str(&content)
+        {
+            return config;
         }
 
         Self {
@@ -116,30 +115,30 @@ impl IntegrationConfig {
     pub fn to_chat_integrations(&self) -> Vec<ChatIntegration> {
         let mut integrations = Vec::new();
 
-        if let Some(slack) = &self.slack {
-            if slack.enabled {
-                integrations.push(ChatIntegration::Slack {
-                    webhook_url: slack.webhook_url.clone(),
-                    mention_user: slack.mention_user.clone(),
-                });
-            }
+        if let Some(slack) = &self.slack
+            && slack.enabled
+        {
+            integrations.push(ChatIntegration::Slack {
+                webhook_url: slack.webhook_url.clone(),
+                mention_user: slack.mention_user.clone(),
+            });
         }
 
-        if let Some(telegram) = &self.telegram {
-            if telegram.enabled {
-                integrations.push(ChatIntegration::Telegram {
-                    bot_token: telegram.bot_token.clone(),
-                    chat_id: telegram.chat_id.clone(),
-                });
-            }
+        if let Some(telegram) = &self.telegram
+            && telegram.enabled
+        {
+            integrations.push(ChatIntegration::Telegram {
+                bot_token: telegram.bot_token.clone(),
+                chat_id: telegram.chat_id.clone(),
+            });
         }
 
-        if let Some(discord) = &self.discord {
-            if discord.enabled {
-                integrations.push(ChatIntegration::Discord {
-                    webhook_url: discord.webhook_url.clone(),
-                });
-            }
+        if let Some(discord) = &self.discord
+            && discord.enabled
+        {
+            integrations.push(ChatIntegration::Discord {
+                webhook_url: discord.webhook_url.clone(),
+            });
         }
 
         integrations

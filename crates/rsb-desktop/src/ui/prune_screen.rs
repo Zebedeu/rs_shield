@@ -231,7 +231,7 @@ pub fn PruneScreen() -> Element {
                 }
                 button {
                     class: "btn-icon",
-                onclick: move |evt| handle_load_profile(evt),
+                onclick: handle_load_profile,
                     disabled: is_running(),
                     "📂"
                 }

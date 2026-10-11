@@ -249,7 +249,7 @@ impl SnapshotCommand {
                     human_bytes(*from_size),
                     human_bytes(*to_size),
                     sign,
-                    human_bytes(size_change.abs() as u64)
+                    human_bytes(size_change.unsigned_abs())
                 );
             }
         }

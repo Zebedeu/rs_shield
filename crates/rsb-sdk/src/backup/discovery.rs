@@ -17,10 +17,13 @@ pub fn discover_files(
 /// Like [`discover_files`], but also returns every walker error as a
 /// message so the backup does not report a clean success when parts of the
 /// source tree could not be read.
+/// (absolute path, path relative to the source root) pairs.
+pub type DiscoveredFiles = Vec<(PathBuf, PathBuf)>;
+
 pub fn discover_files_with_errors(
     source: &Path,
     exclude_patterns: &[String],
-) -> Result<(Vec<(PathBuf, PathBuf)>, Vec<String>), Box<dyn std::error::Error>> {
+) -> Result<(DiscoveredFiles, Vec<String>), Box<dyn std::error::Error>> {
     if !source.exists() {
         return Err(format!("Source path does not exist: {}", source.display()).into());
     }

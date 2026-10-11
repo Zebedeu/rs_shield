@@ -17,6 +17,7 @@ pub enum Theme {
     Dark,
 }
 
+#[allow(dead_code)] // textos já traduzidos para ecrãs ainda por ligar
 pub struct Translations {
     pub nav_backup: &'static str,
     pub nav_restore: &'static str,

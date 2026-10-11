@@ -54,7 +54,7 @@ fn test_backup_file_sorting() {
 
 #[test]
 fn test_backup_file_filtering() {
-    let exclude_patterns = vec!["*.tmp", "node_modules", ".git"];
+    let exclude_patterns = ["*.tmp", "node_modules", ".git"];
 
     let test_files = vec![
         ("file.txt", true),             // Should include
@@ -123,7 +123,7 @@ fn test_restore_target_validation() {
 #[test]
 fn test_restore_snapshot_selection() {
     // Test snapshot ID selection for restore
-    let available_snapshots = vec![
+    let available_snapshots = [
         "2026-02-01T10:00:00Z",
         "2026-02-02T10:00:00Z",
         "2026-02-03T10:00:00Z",
@@ -140,29 +140,6 @@ fn test_restore_snapshot_selection() {
 }
 
 #[test]
-fn test_restore_without_snapshot_id() {
-    let snapshot_id: Option<&str> = None;
-
-    if snapshot_id.is_none() {
-        // Should use latest snapshot
-        assert!(true, "Should find and use latest snapshot");
-    }
-}
-
-#[test]
-fn test_verify_operation_modes() {
-    let modes = vec!["full", "lite"];
-
-    for mode in modes {
-        match mode {
-            "full" => assert!(true, "Full verify mode"),
-            "lite" => assert!(true, "Lite verify mode"),
-            _ => assert!(false, "Invalid verify mode"),
-        }
-    }
-}
-
-#[test]
 fn test_verify_hash_validation() {
     // Simulate hash validation
     let stored_hash = "abc123def456789";
@@ -173,9 +150,9 @@ fn test_verify_hash_validation() {
 
 #[test]
 fn test_verify_missing_files() {
-    let snapshot_files = vec!["/file1.txt", "/file2.txt", "/file3.txt"];
+    let snapshot_files = ["/file1.txt", "/file2.txt", "/file3.txt"];
 
-    let actual_files = vec!["/file1.txt", "/file3.txt"];
+    let actual_files = ["/file1.txt", "/file3.txt"];
 
     let missing: Vec<_> = snapshot_files
         .iter()
@@ -190,7 +167,7 @@ fn test_verify_missing_files() {
 #[test]
 fn test_verify_corrupted_files() {
     // Simulate corruption detection
-    let files_with_hashes = vec![
+    let files_with_hashes = [
         ("/file1.txt", "hash1", "hash1"),                 // OK
         ("/file2.txt", "hash2", "hash2"),                 // OK
         ("/file3.txt", "hash3_expected", "hash3_actual"), // Corrupted
@@ -223,16 +200,6 @@ fn test_encryption_during_backup() {
 }
 
 #[test]
-fn test_no_encryption_during_backup() {
-    let encryption_key: Option<&str> = None;
-
-    match encryption_key {
-        Some(_) => assert!(false, "Should not encrypt"),
-        None => assert!(true, "No encryption"),
-    }
-}
-
-#[test]
 fn test_progress_callback() {
     // Simulate progress callback
     let total_files = 100;
@@ -243,32 +210,12 @@ fn test_progress_callback() {
         let percentage = (processed as f64 / total_files as f64) * 100.0;
 
         assert!(
-            percentage >= 0.0 && percentage <= 100.0,
+            (0.0..=100.0).contains(&percentage),
             "Percentage should be valid"
         );
     }
 
     assert_eq!(processed, total_files);
-}
-
-#[test]
-fn test_backup_resume_flag() {
-    let resume = true;
-
-    if resume {
-        // Continue from last checkpoint
-        assert!(true, "Should resume from checkpoint");
-    }
-}
-
-#[test]
-fn test_backup_no_resume() {
-    let resume = false;
-
-    if !resume {
-        // Start fresh
-        assert!(true, "Should start fresh backup");
-    }
 }
 
 #[test]
@@ -307,25 +254,5 @@ fn test_backup_status_codes() {
 
     for status in statuses {
         assert!(!status.is_empty(), "Status should not be empty");
-    }
-}
-
-#[test]
-fn test_verify_fast_mode() {
-    let fast = true;
-
-    if fast {
-        // Check only file metadata, not contents
-        assert!(true, "Fast mode: skip content verification");
-    }
-}
-
-#[test]
-fn test_verify_full_mode() {
-    let fast = false;
-
-    if !fast {
-        // Check file contents
-        assert!(true, "Full mode: verify all content");
     }
 }

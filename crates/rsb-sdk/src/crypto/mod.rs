@@ -283,9 +283,12 @@ const KEY_CACHE_MAX_ENTRIES: usize = 1024;
 /// all blobs from one backup session share a salt, so PBKDF2 runs once per
 /// session instead of once per blob. The password is bound at construction
 /// and wiped on drop.
+/// Derived keys indexed by (salt, PBKDF2 iterations).
+type DerivedKeyMap = HashMap<([u8; SALT_LEN], u32), Arc<LessSafeKey>>;
+
 pub struct KeyCache {
     password: Zeroizing<Vec<u8>>,
-    keys: Mutex<HashMap<([u8; SALT_LEN], u32), Arc<LessSafeKey>>>,
+    keys: Mutex<DerivedKeyMap>,
 }
 
 impl KeyCache {

@@ -323,10 +323,10 @@ fn cached_objects_present(
         if expected.is_some_and(|e| e != 0 && e != actual) {
             return Ok(false);
         }
-        if let Some(p) = plain {
-            if !plausible_stored_size(actual, p, cached.encrypted) {
-                return Ok(false);
-            }
+        if let Some(p) = plain
+            && !plausible_stored_size(actual, p, cached.encrypted)
+        {
+            return Ok(false);
         }
     }
     Ok(true)
@@ -387,21 +387,20 @@ fn process_file_multipart_streaming(
 
     // Unchanged since the previous snapshot: its entry already describes
     // the stored objects (no download needed to classify them).
-    if let Some(cached) = previous_metadata_cache.get(&file_hash) {
-        if cached.encrypted == should_encrypt {
-            if let Some(chunks) = &cached.chunks {
-                let same = chunks.len() == scanned.len()
-                    && chunks.iter().zip(&scanned).all(|(c, (h, plain, sz))| {
-                        c.hash == *h
-                            && sz.is_some_and(|sz| {
-                                (c.stored_size == 0 || c.stored_size == sz)
-                                    && plausible_stored_size(sz, *plain, should_encrypt)
-                            })
-                    });
-                if same {
-                    return Ok((FileStatus::Skipped, cached.clone()));
-                }
-            }
+    if let Some(cached) = previous_metadata_cache.get(&file_hash)
+        && cached.encrypted == should_encrypt
+        && let Some(chunks) = &cached.chunks
+    {
+        let same = chunks.len() == scanned.len()
+            && chunks.iter().zip(&scanned).all(|(c, (h, plain, sz))| {
+                c.hash == *h
+                    && sz.is_some_and(|sz| {
+                        (c.stored_size == 0 || c.stored_size == sz)
+                            && plausible_stored_size(sz, *plain, should_encrypt)
+                    })
+            });
+        if same {
+            return Ok((FileStatus::Skipped, cached.clone()));
         }
     }
 

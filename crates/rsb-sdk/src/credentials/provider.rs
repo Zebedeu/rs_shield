@@ -3,7 +3,6 @@
 // Supports multiple credential sources without environment variable side effects
 
 use aws_credential_types::Credentials;
-use aws_credential_types::provider::{self, ProvideCredentials};
 use std::sync::Arc;
 
 /// Represents different credential sources

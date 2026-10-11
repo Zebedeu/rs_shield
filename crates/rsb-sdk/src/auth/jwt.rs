@@ -10,7 +10,7 @@ pub struct JwtManager {
 
 impl JwtManager {
     pub fn new(secret: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        if secret.as_bytes().len() < 32 {
+        if secret.len() < 32 {
             return Err("JWT secret must be at least 32 bytes (256 bits)".into());
         }
         // Fail-closed: refuse the historic hardcoded default that was committed.
@@ -35,10 +35,10 @@ impl JwtManager {
     /// existir) e reutilizado por todos os processos, para que tokens emitidos
     /// pelo servidor sejam verificáveis pela CLI.
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        if let Ok(s) = std::env::var("RSB_JWT_SECRET") {
-            if !s.trim().is_empty() {
-                return Self::new(&s);
-            }
+        if let Ok(s) = std::env::var("RSB_JWT_SECRET")
+            && !s.trim().is_empty()
+        {
+            return Self::new(&s);
         }
         let secret = load_or_create_persistent_secret()?;
         Self::from_secret_bytes(secret.as_bytes())

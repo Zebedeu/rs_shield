@@ -224,10 +224,10 @@ pub fn App() -> Element {
         let mut mgr = rsb_sdk::credentials::Fido2Manager::new(origin, rp_id, "RSB Shield Desktop")
             .expect("Failed to init FIDO2");
 
-        if let Ok(path) = rsb_sdk::credentials::Fido2Manager::default_storage_path() {
-            if path.exists() {
-                let _ = mgr.load_from_file(&path);
-            }
+        if let Ok(path) = rsb_sdk::credentials::Fido2Manager::default_storage_path()
+            && path.exists()
+        {
+            let _ = mgr.load_from_file(&path);
         }
         Arc::new(Mutex::new(mgr))
     });

@@ -102,6 +102,10 @@ impl RateLimiter {
         self.counters.read().await.len()
     }
 
+    pub async fn is_empty(&self) -> bool {
+        self.counters.read().await.is_empty()
+    }
+
     pub async fn get_remaining(&self, user_id: &str) -> u32 {
         let counters = self.counters.read().await;
         let now = Utc::now();

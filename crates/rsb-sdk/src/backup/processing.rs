@@ -46,6 +46,8 @@ pub async fn perform_backup(
 }
 
 /// Performs a backup with cancellation support
+// TODO(fase 2): substituir por uma struct de opções.
+#[allow(clippy::too_many_arguments)]
 pub async fn perform_backup_with_cancellation(
     config: &Config,
     mode: &str,
@@ -90,10 +92,10 @@ pub async fn perform_backup_with_cancellation(
     )
     .await;
 
-    if let Some(lock) = repo_lock {
-        if let Err(e) = lock.release().await {
-            tracing::warn!("Failed to release repository lock after backup: {}", e);
-        }
+    if let Some(lock) = repo_lock
+        && let Err(e) = lock.release().await
+    {
+        tracing::warn!("Failed to release repository lock after backup: {}", e);
     }
     result
 }
@@ -186,10 +188,10 @@ async fn run_backup(
         use rayon::prelude::*;
 
         files.par_iter().for_each(|(full_path, rel_path)| {
-            if let Some(token) = &cancellation_clone {
-                if token.is_cancelled() {
-                    return;
-                }
+            if let Some(token) = &cancellation_clone
+                && token.is_cancelled()
+            {
+                return;
             }
 
             while resource_paused.load(Ordering::Relaxed) {

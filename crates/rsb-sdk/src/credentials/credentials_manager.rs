@@ -8,7 +8,6 @@ use super::encryption::{
 #[cfg(not(unix))]
 use crate::utils::ensure_directory_exists;
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::fmt;
 use zeroize::Zeroizing;
 const KEYRING_SERVICE: &str = "rsb-shield";
@@ -342,7 +341,7 @@ impl CredentialsManager {
                 .to_lowercase();
 
             if response == "y" || response == "yes" {
-                let home = env::var("HOME").ok();
+                let home = std::env::var("HOME").ok();
                 if let Some(home_path) = home {
                     let cred_file = format!("{}/.rs-shield/s3_credentials.enc", home_path);
                     Self::save_encrypted(&cred_file, &credentials, true)?;

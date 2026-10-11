@@ -156,14 +156,14 @@ impl Drop for RepoLock {
         if let Some(h) = self.heartbeat.take() {
             h.abort();
         }
-        if !self.released {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let storage = self.storage.clone();
-                let path = self.path.clone();
-                handle.spawn(async move {
-                    let _ = storage.delete(&path).await;
-                });
-            }
+        if !self.released
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            let storage = self.storage.clone();
+            let path = self.path.clone();
+            handle.spawn(async move {
+                let _ = storage.delete(&path).await;
+            });
         }
     }
 }

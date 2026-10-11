@@ -36,7 +36,11 @@ pub fn LoadingState(
                     }
                 }
                 LoadingStyle::ProgressBar => {
-                    let width_percent = (progress * 100.0).min(100.0).max(0.0);
+                    let width_percent = if progress.is_nan() {
+        0.0
+    } else {
+        (progress * 100.0).clamp(0.0, 100.0)
+    };
                     rsx! {
                         div { class: "w-full max-w-xs h-1 bg-indigo-200 dark:bg-indigo-900/30 rounded-full overflow-hidden",
                             div {

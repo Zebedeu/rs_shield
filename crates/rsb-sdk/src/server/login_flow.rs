@@ -212,12 +212,11 @@ impl LoginFlow {
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
-                    if let Ok(data) = resp.json::<serde_json::Value>().await {
-                        if let Some(token) = data.get("access_token").and_then(|v| v.as_str()) {
-                            if !token.is_empty() {
-                                return Ok(token.to_string());
-                            }
-                        }
+                    if let Ok(data) = resp.json::<serde_json::Value>().await
+                        && let Some(token) = data.get("access_token").and_then(|v| v.as_str())
+                        && !token.is_empty()
+                    {
+                        return Ok(token.to_string());
                     }
                 }
                 Ok(_) => {

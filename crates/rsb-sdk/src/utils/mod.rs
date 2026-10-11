@@ -136,10 +136,10 @@ pub fn matches_exclude_pattern(path: &Path, pattern: &str) -> bool {
         // Check path components that match this pattern
         // Example: .git, .DS_Store
         for component in path.iter() {
-            if let Some(comp_str) = component.to_str() {
-                if comp_str == pattern_normalized || comp_str.starts_with(pattern_normalized) {
-                    return true;
-                }
+            if let Some(comp_str) = component.to_str()
+                && (comp_str == pattern_normalized || comp_str.starts_with(pattern_normalized))
+            {
+                return true;
             }
         }
     }
@@ -150,22 +150,21 @@ pub fn matches_exclude_pattern(path: &Path, pattern: &str) -> bool {
     // 3a: Check if last path component matches exactly
     // Example: pattern="index.js" → /path/to/index.js → EXCLUDE
     //          pattern="app.ts" → /path/to/app.ts → EXCLUDE
-    if let Some(file_name) = path.file_name() {
-        if let Some(file_name_str) = file_name.to_str() {
-            if file_name_str == pattern_normalized {
-                return true;
-            }
-        }
+    if let Some(file_name) = path.file_name()
+        && let Some(file_name_str) = file_name.to_str()
+        && file_name_str == pattern_normalized
+    {
+        return true;
     }
 
     // 3b: Check if it's a complete directory (middle path component)
     // Example: pattern="node_modules" → /src/node_modules/lib.js → EXCLUDE
     //          pattern="build" → /src/build/out.js → EXCLUDE
     for component in path.iter() {
-        if let Some(comp_str) = component.to_str() {
-            if comp_str == pattern_normalized {
-                return true;
-            }
+        if let Some(comp_str) = component.to_str()
+            && comp_str == pattern_normalized
+        {
+            return true;
         }
     }
 
@@ -335,25 +334,25 @@ pub fn calculate_retention_backups(policy: &str) -> usize {
 
         _ => {
             // Parse custom daily retention
-            if let Some(days_str) = policy.strip_suffix('d') {
-                if let Ok(days) = days_str.parse::<usize>() {
-                    return days;
-                }
+            if let Some(days_str) = policy.strip_suffix('d')
+                && let Ok(days) = days_str.parse::<usize>()
+            {
+                return days;
             }
 
             // Parse custom monthly retention
-            if let Some(months_str) = policy.strip_suffix('m') {
-                if let Ok(months) = months_str.parse::<usize>() {
-                    let weeks = (months * 30) / 7;
-                    return weeks.max(1);
-                }
+            if let Some(months_str) = policy.strip_suffix('m')
+                && let Ok(months) = months_str.parse::<usize>()
+            {
+                let weeks = (months * 30) / 7;
+                return weeks.max(1);
             }
 
             // Parse custom yearly retention
-            if let Some(years_str) = policy.strip_suffix('y') {
-                if let Ok(years) = years_str.parse::<usize>() {
-                    return years * 52;
-                }
+            if let Some(years_str) = policy.strip_suffix('y')
+                && let Ok(years) = years_str.parse::<usize>()
+            {
+                return years * 52;
             }
 
             warn!(

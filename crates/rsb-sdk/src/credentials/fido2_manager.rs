@@ -460,10 +460,7 @@ impl Fido2Manager {
             counter: 0,
         };
 
-        let user_entry = self
-            .users
-            .entry(pending.user_id.clone())
-            .or_insert_with(UserCredentials::default);
+        let user_entry = self.users.entry(pending.user_id.clone()).or_default();
         user_entry.credentials.push(credential.clone());
 
         Ok(credential)

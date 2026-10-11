@@ -1,5 +1,4 @@
 use rsb_sdk::crypto;
-use std::io;
 
 #[test]
 fn test_hash_file_content() {

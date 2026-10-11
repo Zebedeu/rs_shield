@@ -104,6 +104,7 @@ pub fn format_user_error(error: impl std::fmt::Display, context: &str) -> String
 }
 
 /// Format error message with specific operation context
+#[allow(dead_code)] // usado só em testes, por agora
 pub fn format_operation_error(error: impl std::fmt::Display, operation: &str) -> String {
     let friendly_msg = format_user_error(&error, operation);
 
@@ -152,6 +153,7 @@ pub fn format_operation_error(error: impl std::fmt::Display, operation: &str) ->
 }
 
 /// Extract just the user-friendly message without the emoji prefix
+#[allow(dead_code)] // usado só em testes, por agora
 pub fn get_error_message_only(error: impl std::fmt::Display, context: &str) -> String {
     format_user_error(error, context)
         .replace("❌ ", "")

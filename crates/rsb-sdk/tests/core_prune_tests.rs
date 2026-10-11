@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[test]
 fn test_snapshot_filtering_for_prune() {
-    let files = vec![
+    let files = [
         "snapshots/2026-02-01T10:00:00Z.toml",
         "snapshots/data.bin",
         "snapshots/2026-02-02T10:00:00Z.toml",
@@ -53,17 +53,6 @@ fn test_keep_last_snapshots() {
 }
 
 #[test]
-fn test_no_prune_when_under_threshold() {
-    let snapshots = vec!["2026-02-01T10:00:00Z.toml", "2026-02-02T10:00:00Z.toml"];
-
-    let keep_last = 5;
-
-    if snapshots.len() <= keep_last {
-        assert!(true, "Should not prune when under threshold");
-    }
-}
-
-#[test]
 fn test_hash_extraction_from_metadata() {
     // Simulate FileMetadata with hashes
     let mut keep_hashes = HashSet::new();
@@ -80,7 +69,7 @@ fn test_hash_extraction_from_metadata() {
 
 #[test]
 fn test_orphaned_data_detection() {
-    let keep_hashes: HashSet<String> = vec!["hash_1", "hash_2", "hash_3"]
+    let keep_hashes: HashSet<String> = ["hash_1", "hash_2", "hash_3"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -161,19 +150,6 @@ fn test_chunk_hash_collection() {
 }
 
 #[test]
-fn test_prune_with_single_snapshot() {
-    let snapshots = vec!["snap_1"];
-    let keep_last = 3;
-
-    if snapshots.len() <= keep_last {
-        assert!(
-            true,
-            "Single snapshot should not be pruned when keep_last is high"
-        );
-    }
-}
-
-#[test]
 fn test_prune_keep_latest_only() {
     // Snapshots are typically sorted by timestamp/ID, latest should be last
     let mut snapshots = vec![
@@ -225,7 +201,7 @@ fn test_all_data_orphaned() {
 
 #[test]
 fn test_snapshot_sorting_chronological() {
-    let mut snapshots = vec![
+    let mut snapshots = [
         "2026-02-05T10:00:00Z.toml",
         "2026-02-02T10:00:00Z.toml",
         "2026-02-04T10:00:00Z.toml",

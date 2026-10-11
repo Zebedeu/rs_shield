@@ -89,15 +89,15 @@ pub async fn run_backup_diagnostics(
     for entry in WalkDir::new(&data_dir).into_iter().filter_map(Result::ok) {
         let path = entry.path();
 
-        if let Ok(metadata) = entry.metadata() {
-            if metadata.is_file() {
-                total_size += metadata.len();
+        if let Ok(metadata) = entry.metadata()
+            && metadata.is_file()
+        {
+            total_size += metadata.len();
 
-                if path.components().any(|c| c.as_os_str() == "enc") {
-                    encrypted_files_count += 1;
-                } else {
-                    data_files_count += 1;
-                }
+            if path.components().any(|c| c.as_os_str() == "enc") {
+                encrypted_files_count += 1;
+            } else {
+                data_files_count += 1;
             }
         }
     }

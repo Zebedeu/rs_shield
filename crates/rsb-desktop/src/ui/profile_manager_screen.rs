@@ -33,34 +33,33 @@ impl ProfileManager {
 
         if let Ok(entries) = fs::read_dir(&profiles_dir) {
             for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file()
-                        && entry.path().extension().is_some_and(|ext| ext == "toml")
-                    {
-                        let file_name = entry.file_name();
-                        let name = file_name
-                            .to_string_lossy()
-                            .trim_end_matches(".toml")
-                            .to_string();
-                        let path = entry.path();
+                if let Ok(metadata) = entry.metadata()
+                    && metadata.is_file()
+                    && entry.path().extension().is_some_and(|ext| ext == "toml")
+                {
+                    let file_name = entry.file_name();
+                    let name = file_name
+                        .to_string_lossy()
+                        .trim_end_matches(".toml")
+                        .to_string();
+                    let path = entry.path();
 
-                        // Get modification date
-                        let created = if let Ok(modified) = metadata.modified() {
-                            if let Ok(duration) = modified.elapsed() {
-                                format!("{} days ago", duration.as_secs() / 86400)
-                            } else {
-                                "Recently".to_string()
-                            }
+                    // Get modification date
+                    let created = if let Ok(modified) = metadata.modified() {
+                        if let Ok(duration) = modified.elapsed() {
+                            format!("{} days ago", duration.as_secs() / 86400)
                         } else {
-                            "Unknown".to_string()
-                        };
+                            "Recently".to_string()
+                        }
+                    } else {
+                        "Unknown".to_string()
+                    };
 
-                        profiles.push(ProfileEntry {
-                            name,
-                            path,
-                            created,
-                        });
-                    }
+                    profiles.push(ProfileEntry {
+                        name,
+                        path,
+                        created,
+                    });
                 }
             }
         }

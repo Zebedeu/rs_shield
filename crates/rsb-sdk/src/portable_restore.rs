@@ -123,6 +123,8 @@ pub fn config_for_s3_restore(
 /// - Config file cannot be loaded
 /// - Backup structure is invalid
 /// - Restore operation fails
+// TODO(fase 2): substituir por uma struct de opções.
+#[allow(clippy::too_many_arguments)]
 pub async fn restore_from_config_or_backup(
     config_path: Option<&Path>,
     backup_path: Option<&Path>,
@@ -282,6 +284,8 @@ pub struct BackupValidation {
 ///
 /// # Returns
 /// ReportData with restore operation details
+// TODO(fase 2): substituir por uma struct de opções.
+#[allow(clippy::too_many_arguments)]
 pub async fn restore_from_config_or_backup_with_cancellation(
     config_path: Option<&Path>,
     backup_path: Option<&Path>,
