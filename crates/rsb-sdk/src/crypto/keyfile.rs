@@ -591,6 +591,11 @@ impl RepoKeyFile {
             .map_err(|e| RsbError::Other(format!("serialize key file: {e}")))
     }
 
+    /// Single-line JSON (used for the paper form, where size matters).
+    pub fn to_compact_bytes(&self) -> Result<Vec<u8>, RsbError> {
+        serde_json::to_vec(self).map_err(|e| RsbError::Other(format!("serialize key file: {e}")))
+    }
+
     pub fn from_bytes(raw: &[u8]) -> Result<Self, RsbError> {
         let f: RepoKeyFile = serde_json::from_slice(raw)
             .map_err(|e| corrupt(format!("Repository key file is unreadable: {e}")))?;

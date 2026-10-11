@@ -23,6 +23,7 @@
 
 pub mod keyfile;
 pub mod lifecycle;
+pub mod paper;
 
 pub mod stream;
 

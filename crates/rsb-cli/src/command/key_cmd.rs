@@ -11,7 +11,7 @@ use rsb_sdk::crypto::keyfile::{self, KdfParams, REPO_KEY_PATH};
 use rsb_sdk::crypto::lifecycle;
 use rsb_sdk::storage::{LocalStorage, Storage};
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -73,6 +73,38 @@ pub enum KeyCommand {
     Migrate {
         #[command(flatten)]
         target: RepoTarget,
+    },
+
+    /// Export keys/repo.key. The data key stays wrapped by the password, but
+    /// together with the password the export decrypts every backup: protect
+    /// it like the password
+    Export {
+        #[command(flatten)]
+        target: RepoTarget,
+        /// Write the key file here (created with mode 0600; must not exist)
+        #[arg(
+            short,
+            long,
+            conflicts_with = "paper",
+            required_unless_present = "paper"
+        )]
+        output: Option<PathBuf>,
+        /// Print a printable form (base32 in groups, a checksum per line)
+        #[arg(long)]
+        paper: bool,
+    },
+
+    /// Install a key file written by `rsb key export` (file or paper form)
+    /// after checking that it opens with the password and decrypts this
+    /// repository
+    Import {
+        /// Exported key file (JSON or paper form)
+        file: PathBuf,
+        #[command(flatten)]
+        target: RepoTarget,
+        /// Replace an existing, different keys/repo.key (it is backed up first)
+        #[arg(long)]
+        force: bool,
     },
 
     /// Change the repository password (rewraps the key; no data is rewritten)
@@ -191,6 +223,27 @@ fn print_legacy_summary(s: &lifecycle::LegacySummary) {
     );
 }
 
+/// Creates `path` (must not exist) readable only by the owner and writes
+/// `data` to it.
+fn write_private_file(path: &Path, data: &[u8]) -> Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(path)
+        .map_err(|e| anyhow!("Cannot create {}: {}", path.display(), e))?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// Largest key file accepted by `rsb key import`.
+const MAX_IMPORT_SIZE: u64 = 64 * 1024;
+
 async fn open_storage(target: &RepoTarget) -> Result<Arc<dyn Storage>> {
     if let Some(repo) = &target.repo {
         if target.config.is_some() {
@@ -253,6 +306,62 @@ impl KeyCommand {
                     }
                 }
             }
+            KeyCommand::Export {
+                target,
+                output,
+                paper,
+            } => {
+                let storage = open_storage(target).await?;
+                let pw = prompt("Repository password: ")?;
+                // Checks that the password opens it; the DEK is never shown.
+                let raw = lifecycle::export_key_file(&*storage, pw.as_bytes()).await?;
+                if *paper {
+                    let file = keyfile::RepoKeyFile::from_bytes(&raw)?;
+                    let text = rsb_sdk::crypto::paper::encode(&file.to_compact_bytes()?);
+                    println!("{}", text);
+                    println!(
+                        "Keep this page with the same care as the password. Restore it with \
+                         `rsb key import <file with this text>`."
+                    );
+                } else if let Some(out) = output {
+                    write_private_file(out, &raw)?;
+                    println!("✅ Key file exported to {} (mode 0600).", out.display());
+                    println!(
+                        "⚠️  Together with the password it decrypts every backup: store it safely."
+                    );
+                }
+            }
+            KeyCommand::Import {
+                file,
+                target,
+                force,
+            } => {
+                let storage = open_storage(target).await?;
+                let len = std::fs::metadata(file)?.len();
+                if len > MAX_IMPORT_SIZE {
+                    return Err(anyhow!("{} is too large for a key file", file.display()));
+                }
+                let content = Zeroizing::new(std::fs::read(file)?);
+                let raw = if rsb_sdk::crypto::paper::is_paper(&content) {
+                    let text = std::str::from_utf8(&content)?;
+                    rsb_sdk::crypto::paper::decode(text).map_err(|e| anyhow!("Paper key: {}", e))?
+                } else {
+                    content.to_vec()
+                };
+                let pw = prompt("Password of the exported key: ")?;
+                let out = lifecycle::import_key_file(storage, &raw, pw.as_bytes(), *force).await?;
+                if out.unchanged {
+                    println!(
+                        "ℹ️  {} already holds this key file; nothing changed.",
+                        REPO_KEY_PATH
+                    );
+                } else {
+                    println!("✅ Imported {} ({}).", REPO_KEY_PATH, out.matched_by);
+                    if let Some(b) = out.replaced_backup {
+                        println!("ℹ️  The previous key file was kept at {}.", b);
+                    }
+                }
+            }
             KeyCommand::Migrate { target } => {
                 let storage = open_storage(target).await?;
                 let pw = prompt("Repository password: ")?;
@@ -292,6 +401,21 @@ impl KeyCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_file_is_private_and_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("repo.key");
+        write_private_file(&p, b"{}").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(write_private_file(&p, b"x").is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), b"{}");
+    }
 
     #[test]
     fn kdf_overrides() {

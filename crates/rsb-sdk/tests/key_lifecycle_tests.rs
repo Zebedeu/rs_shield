@@ -497,3 +497,153 @@ async fn migration_cancellation_leaves_a_readable_repo() {
     assert!(matches!(e, RsbError::Cancelled), "{e:?}");
     all_operations_work(&repo.cfg, &storage, PW, &repo.files()).await;
 }
+
+// ---------------------------------------------------------------------------
+// Export / import
+
+async fn fresh_repo(storage: &Arc<dyn Storage>) -> MixedRepo {
+    let src = tempfile::tempdir().unwrap();
+    let cfg = config(src.path());
+    let files = vec![
+        ("one.txt", b"first file, first file".to_vec()),
+        ("big.bin", noise(2 * 1024 * 1024 + 3, 11)),
+        ("empty", Vec::new()),
+    ];
+    let r = MixedRepo {
+        cfg,
+        _src: src,
+        files,
+    };
+    write_src(r._src.path(), &r.files());
+    backup(&r.cfg, storage, PW).await;
+    r
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_import_roundtrip_file_and_paper() {
+    let mem = Arc::new(MemoryStorage::new());
+    let storage: Arc<dyn Storage> = mem.clone();
+    let repo = fresh_repo(&storage).await;
+
+    // Export needs the right password and returns the stored file as is.
+    assert!(
+        lifecycle::export_key_file(&*storage, b"wrong")
+            .await
+            .unwrap_err()
+            .is_authentication_failure()
+    );
+    let exported = lifecycle::export_key_file(&*storage, PW.as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(exported, storage.read(REPO_KEY_PATH).await.unwrap());
+
+    // Lose the key file: the repository is unreadable...
+    storage.delete(REPO_KEY_PATH).await.unwrap();
+    let out = tempfile::tempdir().unwrap();
+    assert!(
+        perform_restore(
+            &repo.cfg,
+            RestoreOptions {
+                force: true,
+                storage: Some(storage.clone()),
+                ..RestoreOptions::new(out.path())
+            }
+            .with_encryption_key(Some(PW)),
+        )
+        .await
+        .is_err()
+    );
+    // ...until the export is imported (wrong password refused first).
+    assert!(
+        lifecycle::import_key_file(storage.clone(), &exported, b"wrong", false)
+            .await
+            .unwrap_err()
+            .is_authentication_failure()
+    );
+    assert!(!storage.exists(REPO_KEY_PATH).await.unwrap());
+    let o = lifecycle::import_key_file(storage.clone(), &exported, PW.as_bytes(), false)
+        .await
+        .unwrap();
+    assert!(!o.unchanged && o.replaced_backup.is_none(), "{:?}", o);
+    assert!(o.matched_by.contains("snapshots/"), "{:?}", o);
+    all_operations_work(&repo.cfg, &storage, PW, &repo.files()).await;
+    // Importing the same file again is a no-op.
+    let o = lifecycle::import_key_file(storage.clone(), &exported, PW.as_bytes(), false)
+        .await
+        .unwrap();
+    assert!(o.unchanged);
+
+    // Paper form: round trip, and a typo is caught with its line number.
+    let file = keyfile::RepoKeyFile::from_bytes(&exported).unwrap();
+    let paper = rsb_sdk::crypto::paper::encode(&file.to_compact_bytes().unwrap());
+    assert!(rsb_sdk::crypto::paper::is_paper(paper.as_bytes()));
+    let decoded = rsb_sdk::crypto::paper::decode(&paper).unwrap();
+    let mut lines: Vec<String> = paper.lines().map(String::from).collect();
+    let target = &mut lines[2];
+    let pos = target.find("  ").unwrap() + 2;
+    let ch = target.as_bytes()[pos];
+    target.replace_range(pos..pos + 1, if ch == b'Q' { "R" } else { "Q" });
+    let err = rsb_sdk::crypto::paper::decode(&lines.join("\n")).unwrap_err();
+    assert!(err.to_string().contains("line 2"), "{err}");
+
+    // An older export (before a password change) differs: refused without
+    // --force; with --force the current file is backed up and kept.
+    keyfile::change_password(
+        storage.clone(),
+        PW.as_bytes(),
+        b"pw2",
+        Some(KdfParams::MIN_CREATE),
+    )
+    .await
+    .unwrap();
+    let e = lifecycle::import_key_file(storage.clone(), &decoded, PW.as_bytes(), false)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("--force"), "{e}");
+    restore_ok(&repo.cfg, &storage, "pw2", &repo.files()).await;
+    let current = storage.read(REPO_KEY_PATH).await.unwrap();
+    let o = lifecycle::import_key_file(storage.clone(), &decoded, PW.as_bytes(), true)
+        .await
+        .unwrap();
+    let bak = o.replaced_backup.expect("backup copy");
+    assert_eq!(storage.read(&bak).await.unwrap(), current);
+    restore_ok(&repo.cfg, &storage, PW, &repo.files()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_into_another_repository_is_refused() {
+    let a: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    let b: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+    fresh_repo(&a).await;
+    let repo_b = fresh_repo(&b).await;
+    let key_a = lifecycle::export_key_file(&*a, PW.as_bytes())
+        .await
+        .unwrap();
+    let key_b = b.read(REPO_KEY_PATH).await.unwrap();
+    for force in [false, true] {
+        let e = lifecycle::import_key_file(b.clone(), &key_a, PW.as_bytes(), force)
+            .await
+            .unwrap_err();
+        assert!(e.is_authentication_failure(), "{e:?}");
+        assert!(e.to_string().contains("does not belong"), "{e}");
+    }
+    assert_eq!(b.read(REPO_KEY_PATH).await.unwrap(), key_b);
+    // Also refused when B lost its key file.
+    b.delete(REPO_KEY_PATH).await.unwrap();
+    assert!(
+        lifecycle::import_key_file(b.clone(), &key_a, PW.as_bytes(), false)
+            .await
+            .is_err()
+    );
+    assert!(!b.exists(REPO_KEY_PATH).await.unwrap());
+    lifecycle::import_key_file(b.clone(), &key_b, PW.as_bytes(), false)
+        .await
+        .unwrap();
+    restore_ok(&repo_b.cfg, &b, PW, &repo_b.files()).await;
+    // Garbage is refused before anything is written.
+    assert!(
+        lifecycle::import_key_file(b.clone(), b"{not a key}", PW.as_bytes(), true)
+            .await
+            .is_err()
+    );
+}

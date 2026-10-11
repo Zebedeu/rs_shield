@@ -1,5 +1,6 @@
 //! Repository key lifecycle: re-encryption of legacy (v1/v2) objects as v3
-//! (`rsb key migrate`).
+//! (`rsb key migrate`) and export/import of the key file (`rsb key
+//! export` / `rsb key import`).
 //!
 //! # Crash safety
 //!
@@ -762,6 +763,153 @@ async fn migrate_locked(
         rep.objects_migrated, rep.manifests_rewritten
     );
     Ok(rep)
+}
+
+// ---------------------------------------------------------------------------
+// Export / import of the key file.
+
+/// Returns the bytes of `keys/repo.key` after checking that `password`
+/// unlocks it. The DEK stays wrapped by the password-derived KEK: the export
+/// is useless without the password, but must be protected like it (with it,
+/// it decrypts the whole repository). The unwrapped DEK is never returned.
+pub async fn export_key_file(storage: &dyn Storage, password: &[u8]) -> Result<Vec<u8>, RsbError> {
+    let raw = read_key_file_raw(storage).await?;
+    let file = RepoKeyFile::from_bytes(&raw)?;
+    unwrap_blocking(file, password).await?;
+    Ok(raw)
+}
+
+/// Result of [`import_key_file`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportOutcome {
+    /// The repository already had exactly this key file: nothing written.
+    pub unchanged: bool,
+    /// Where the replaced key file was copied (only with `force`); the copy
+    /// is kept.
+    pub replaced_backup: Option<String>,
+    /// How the key was matched against the repository.
+    pub matched_by: String,
+}
+
+/// Checks that `key` opens this repository: the newest v3 manifest, else a
+/// v3 data object. A repository without any v3 blob only proves that
+/// `password` opens its newest v1/v2 manifest (if any).
+async fn check_key_matches_repository(
+    storage: &dyn Storage,
+    key: &RepoKey,
+    password: &[u8],
+) -> Result<String, RsbError> {
+    let mismatch = |what: &str| {
+        RsbError::crypto(
+            CryptoErrorKind::AuthenticationFailed,
+            format!(
+                "The imported key file does not belong to this repository: it cannot decrypt \
+                 {}. Nothing was written.",
+                what
+            ),
+        )
+    };
+    for snap in snapshot_paths(storage).await? {
+        let raw = storage.read(&snap).await?;
+        if !is_v3(&raw) {
+            continue;
+        }
+        return match key.decrypt_object(&snap, &raw) {
+            Ok(_) => Ok(format!("decrypts {}", snap)),
+            Err(_) => Err(mismatch(&snap)),
+        };
+    }
+    for o in object_entries(storage).await? {
+        if let BlobKind::V3(_) = blob_kind(storage, &o.path).await? {
+            return match authenticate_v3(storage, &o.path, &o.id, key).await {
+                Ok(_) => Ok(format!("decrypts {}", o.path)),
+                Err(_) => Err(mismatch(&o.path)),
+            };
+        }
+    }
+    if keyfile::probe_legacy_snapshots(storage, password).await? {
+        Ok("password opens the newest v1/v2 snapshot".into())
+    } else {
+        Ok("repository has no encrypted data yet".into())
+    }
+}
+
+/// Installs `raw` (a key file, e.g. from `rsb key export`) as
+/// `keys/repo.key`: the file must parse, `password` must unlock it and the
+/// key must decrypt the repository's newest v3 manifest (or object). If a
+/// different key file exists, refuses unless `force`; then the existing file
+/// is first copied to `keys/repo.key.bak-<ts>` (kept). The new file is read
+/// back and checked. Holds the exclusive repository lock.
+pub async fn import_key_file(
+    storage: Arc<dyn Storage>,
+    raw: &[u8],
+    password: &[u8],
+    force: bool,
+) -> Result<ImportOutcome, RsbError> {
+    let file = RepoKeyFile::from_bytes(raw)?;
+    let key = unwrap_blocking(file.clone(), password).await?;
+    let lock = keyfile::lock_exclusive(&storage, "key-import").await?;
+    let result = import_locked(&*storage, &file, &key, password, force).await;
+    release(lock).await;
+    result
+}
+
+async fn import_locked(
+    storage: &dyn Storage,
+    file: &RepoKeyFile,
+    key: &RepoKey,
+    password: &[u8],
+    force: bool,
+) -> Result<ImportOutcome, RsbError> {
+    let matched_by = check_key_matches_repository(storage, key, password).await?;
+    let existing = match storage.read(keyfile::REPO_KEY_PATH).await {
+        Ok(r) => Some(r),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = ImportOutcome {
+        matched_by,
+        ..Default::default()
+    };
+    if let Some(old) = &existing {
+        if RepoKeyFile::from_bytes(old).is_ok_and(|f| f == *file) {
+            out.unchanged = true;
+            return Ok(out);
+        }
+        if !force {
+            return Err(RsbError::InvalidInput(format!(
+                "{} already exists and differs from the imported file; use --force to replace \
+                 it (the current file is backed up first)",
+                keyfile::REPO_KEY_PATH
+            )));
+        }
+        let backup = keyfile::backup_copy_path();
+        storage.write(&backup, old).await?;
+        out.replaced_backup = Some(backup);
+    }
+    storage
+        .write(keyfile::REPO_KEY_PATH, &file.to_bytes()?)
+        .await?;
+    let ok = matches!(
+        keyfile::load_repo_key(storage, password).await,
+        Ok(Some(k)) if k.same_key(key)
+    );
+    if !ok {
+        match &existing {
+            Some(old) => storage.write(keyfile::REPO_KEY_PATH, old).await?,
+            None => storage.delete(keyfile::REPO_KEY_PATH).await?,
+        }
+        return Err(RsbError::Storage(format!(
+            "The imported {} could not be read back; the previous state was restored",
+            keyfile::REPO_KEY_PATH
+        )));
+    }
+    info!(
+        "🔑 Imported {} ({})",
+        keyfile::REPO_KEY_PATH,
+        out.matched_by
+    );
+    Ok(out)
 }
 
 #[cfg(test)]
