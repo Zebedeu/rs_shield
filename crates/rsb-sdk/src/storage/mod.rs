@@ -6,6 +6,7 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Region;
+use aws_sdk_s3::error::{DisplayErrorContext, SdkError};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -297,6 +298,111 @@ impl Storage for LocalStorage {
     }
 }
 
+/// Região usada com um endpoint S3-compatível quando nenhuma é indicada
+/// (MinIO, Ceph, Garage... aceitam-na; R2 aceita também "auto").
+pub const DEFAULT_S3_COMPAT_REGION: &str = "us-east-1";
+
+/// Região efetiva: qualquer string não vazia é aceite tal como está (R2 usa
+/// "auto"); com endpoint personalizado e sem região usa
+/// [`DEFAULT_S3_COMPAT_REGION`] em vez de falhar. Sem endpoint (AWS) e sem
+/// região devolve `None` e a cadeia de defaults do SDK decide (env/perfil).
+pub fn effective_s3_region(region: Option<&str>, endpoint: Option<&str>) -> Option<String> {
+    let region = region.map(str::trim).filter(|r| !r.is_empty());
+    let has_endpoint = endpoint.is_some_and(|e| !e.trim().is_empty());
+    match region {
+        Some(r) => Some(r.to_string()),
+        None if has_endpoint => Some(DEFAULT_S3_COMPAT_REGION.to_string()),
+        None => None,
+    }
+}
+
+/// Ajustes de compatibilidade com fornecedores S3 que não são a AWS
+/// (MinIO, R2, B2, Wasabi, Spaces, Ceph RGW, Garage, Scaleway, Hetzner,
+/// IDrive e2...):
+/// - endpoint personalizado ⇒ path-style (`host/bucket/key`), nunca
+///   virtual-hosted;
+/// - checksums CRC32/CRC64 só quando a operação os exige: as versões
+///   recentes do SDK enviam-nos por omissão e vários fornecedores rejeitam
+///   esses headers (a integridade é garantida pelos nossos hashes BLAKE3).
+pub fn apply_s3_compat(
+    builder: aws_sdk_s3::config::Builder,
+    custom_endpoint: bool,
+) -> aws_sdk_s3::config::Builder {
+    use aws_sdk_s3::config::{RequestChecksumCalculation, ResponseChecksumValidation};
+    builder
+        .force_path_style(custom_endpoint)
+        .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+        .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
+}
+
+/// Constrói o cliente S3 (SigV4, session token opcional nas credenciais)
+/// com os ajustes de [`apply_s3_compat`] e [`effective_s3_region`].
+pub async fn build_s3_client(
+    region: Option<String>,
+    endpoint: Option<String>,
+    credentials: Credentials,
+) -> Client {
+    let endpoint = endpoint
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty());
+    let region = effective_s3_region(region.as_deref(), endpoint.as_deref());
+
+    let mut config_loader = aws_config::defaults(BehaviorVersion::latest());
+    if let Some(r) = region {
+        config_loader = config_loader.region(Region::new(r));
+    }
+
+    let custom_endpoint = endpoint.is_some();
+    if let Some(e) = endpoint {
+        // Mesma política do s3_check: http só em loopback, senão warn alto.
+        if is_insecure_remote_endpoint(&e) {
+            tracing::warn!(
+                "Insecure S3 endpoint '{}': credentials would go in cleartext. Use https://.",
+                e
+            );
+        }
+        config_loader = config_loader.endpoint_url(e);
+    }
+
+    let sdk_config = config_loader.credentials_provider(credentials).load().await;
+    let s3_config = apply_s3_compat(
+        aws_sdk_s3::config::Builder::from(&sdk_config),
+        custom_endpoint,
+    )
+    .build();
+    Client::from_conf(s3_config)
+}
+
+/// Classifica um erro do SDK S3 num `io::ErrorKind`, sem depender do corpo
+/// da resposta: HEAD não tem corpo e vários fornecedores devolvem 404 sem
+/// código (ou com códigos próprios), por isso o status HTTP também conta.
+fn s3_error_kind<E>(err: &SdkError<E>, typed_not_found: impl Fn(&E) -> bool) -> ErrorKind {
+    if err.as_service_error().is_some_and(typed_not_found) {
+        return ErrorKind::NotFound;
+    }
+    match err.raw_response().map(|r| r.status().as_u16()) {
+        Some(404) => ErrorKind::NotFound,
+        Some(401) | Some(403) => ErrorKind::PermissionDenied,
+        _ => ErrorKind::Other,
+    }
+}
+
+fn s3_io_error<E>(
+    op: &str,
+    path: &str,
+    err: SdkError<E>,
+    typed_not_found: impl Fn(&E) -> bool,
+) -> io::Error
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let kind = s3_error_kind(&err, typed_not_found);
+    io::Error::new(
+        kind,
+        format!("S3 {} Error ({}): {}", op, path, DisplayErrorContext(&err)),
+    )
+}
+
 pub struct S3Storage {
     client: Client,
     bucket: String,
@@ -311,45 +417,43 @@ impl S3Storage {
         endpoint: Option<String>,
         credentials: Credentials,
     ) -> Self {
-        let mut config_loader = aws_config::defaults(BehaviorVersion::latest());
-
-        if let Some(r) = region {
-            config_loader = config_loader.region(Region::new(r));
-        }
-
-        let force_path_style = endpoint.is_some();
-        if let Some(e) = endpoint {
-            // Mesma política do s3_check: http só em loopback, senão warn alto.
-            if is_insecure_remote_endpoint(&e) {
-                tracing::warn!(
-                    "Insecure S3 endpoint '{}': credentials would go in cleartext. Use https://.",
-                    e
-                );
-            }
-            config_loader = config_loader.endpoint_url(e);
-        }
-
-        let sdk_config = config_loader.credentials_provider(credentials).load().await;
-
-        // S3-specific configuration
-        let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
-            // Force Path Style (e.g., domain.com/bucket) if a custom endpoint is used.
-            // Essential for MinIO, Localstack, and some S3-compatible providers.
-            .force_path_style(force_path_style)
-            .build();
-
-        let client = Client::from_conf(s3_config);
-
         Self {
-            client,
+            client: build_s3_client(region, endpoint, credentials).await,
             bucket: bucket.to_string(),
         }
+    }
+
+    /// Prefixo de listagem com a mesma semântica de diretório do
+    /// `LocalStorage`: `"data/clear"` não pode apanhar `"data/clearX/..."`.
+    fn dir_prefix(prefix: &str) -> String {
+        let p = prefix.trim_end_matches('/');
+        if p.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", p)
+        }
+    }
+
+    /// Há pelo menos um objeto sob `prefix/`? (S3 não tem diretórios.)
+    async fn prefix_exists(&self, prefix: &str) -> io::Result<bool> {
+        let resp = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(Self::dir_prefix(prefix))
+            .max_keys(1)
+            .send()
+            .await
+            .map_err(|e| s3_io_error("List", prefix, e, |_| false))?;
+        Ok(!resp.contents().is_empty())
     }
 }
 
 #[async_trait]
 impl Storage for S3Storage {
     async fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        // PutObject simples (sem ACL, tagging, storage class, SSE-KMS nem
+        // escrita condicional): suportado por todos os fornecedores.
         self.client
             .put_object()
             .bucket(&self.bucket)
@@ -357,7 +461,7 @@ impl Storage for S3Storage {
             .body(data.to_vec().into())
             .send()
             .await
-            .map_err(|e| io::Error::other(format!("S3 Upload Error: {}", e)))?;
+            .map_err(|e| s3_io_error("Upload", path, e, |_| false))?;
         Ok(())
     }
 
@@ -369,7 +473,7 @@ impl Storage for S3Storage {
             .key(path)
             .send()
             .await
-            .map_err(|e| io::Error::new(ErrorKind::NotFound, format!("S3 Read Error: {}", e)))?;
+            .map_err(|e| s3_io_error("Read", path, e, |se| se.is_no_such_key()))?;
 
         let data = resp
             .body
@@ -388,33 +492,18 @@ impl Storage for S3Storage {
             .key(path)
             .send()
             .await
-            .map_err(|e| io::Error::new(ErrorKind::NotFound, format!("S3 Read Error: {}", e)))?;
+            .map_err(|e| s3_io_error("Read", path, e, |se| se.is_no_such_key()))?;
         // Streams the HTTP body chunk by chunk; nothing is collected.
         Ok(Box::pin(resp.body.into_async_read()))
     }
 
     async fn exists(&self, path: &str) -> io::Result<bool> {
-        match self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(path)
-            .send()
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(e) => {
-                let service_error = e.into_service_error();
-                if service_error.is_not_found() {
-                    Ok(false)
-                } else {
-                    Err(io::Error::other(format!(
-                        "S3 Head Error: {}",
-                        service_error
-                    )))
-                }
-            }
+        // "dir/" refere-se a um diretório (ex.: validação de estrutura no
+        // restore usa `exists("data/")`): em S3 é "há objetos com o prefixo".
+        if path.ends_with('/') {
+            return self.prefix_exists(path).await;
         }
+        Ok(self.size(path).await?.is_some())
     }
 
     async fn list(&self, prefix: &str) -> io::Result<Vec<String>> {
@@ -422,6 +511,7 @@ impl Storage for S3Storage {
         // continuation token until the listing is complete. A partial
         // listing made prune delete live data and made
         // find_latest_snapshot pick a stale snapshot.
+        let dir_prefix = Self::dir_prefix(prefix);
         let mut files = Vec::new();
         let mut continuation: Option<String> = None;
         loop {
@@ -429,11 +519,11 @@ impl Storage for S3Storage {
                 .client
                 .list_objects_v2()
                 .bucket(&self.bucket)
-                .prefix(prefix)
+                .prefix(&dir_prefix)
                 .set_continuation_token(continuation.take())
                 .send()
                 .await
-                .map_err(|e| io::Error::other(format!("S3 List Error: {}", e)))?;
+                .map_err(|e| s3_io_error("List", prefix, e, |_| false))?;
 
             files.extend(
                 resp.contents
@@ -459,13 +549,15 @@ impl Storage for S3Storage {
     }
 
     async fn delete(&self, path: &str) -> io::Result<()> {
+        // DeleteObject individual (DeleteObjects em lote exige Content-MD5
+        // e não é suportado/limitado em vários fornecedores).
         self.client
             .delete_object()
             .bucket(&self.bucket)
             .key(path)
             .send()
             .await
-            .map_err(|e| io::Error::other(format!("S3 Delete Error: {}", e)))?;
+            .map_err(|e| s3_io_error("Delete", path, e, |_| false))?;
         Ok(())
     }
 
@@ -480,14 +572,12 @@ impl Storage for S3Storage {
         {
             Ok(out) => Ok(Some(out.content_length.unwrap_or(0).max(0) as u64)),
             Err(e) => {
-                let service_error = e.into_service_error();
-                if service_error.is_not_found() {
+                // 404 sem corpo (HEAD) ou com código próprio do fornecedor.
+                let err = s3_io_error("Head", path, e, |se| se.is_not_found());
+                if err.kind() == ErrorKind::NotFound {
                     Ok(None)
                 } else {
-                    Err(io::Error::other(format!(
-                        "S3 Head Error: {}",
-                        service_error
-                    )))
+                    Err(err)
                 }
             }
         }
@@ -497,6 +587,62 @@ impl Storage for S3Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn s3_region_defaults_only_for_custom_endpoints() {
+        // Qualquer string é aceite (R2 usa "auto").
+        assert_eq!(
+            effective_s3_region(Some("auto"), Some("https://x.r2.cloudflarestorage.com")),
+            Some("auto".to_string())
+        );
+        assert_eq!(
+            effective_s3_region(Some(" eu-central-003 "), None),
+            Some("eu-central-003".to_string())
+        );
+        // Endpoint personalizado sem região: us-east-1 em vez de falhar.
+        assert_eq!(
+            effective_s3_region(None, Some("http://localhost:9000")),
+            Some(DEFAULT_S3_COMPAT_REGION.to_string())
+        );
+        assert_eq!(
+            effective_s3_region(Some("  "), Some("https://s3.wasabisys.com")),
+            Some(DEFAULT_S3_COMPAT_REGION.to_string())
+        );
+        // AWS sem região: deixa a cadeia de defaults do SDK decidir.
+        assert_eq!(effective_s3_region(None, None), None);
+        assert_eq!(effective_s3_region(None, Some("  ")), None);
+    }
+
+    #[test]
+    fn s3_client_config_is_provider_compatible() {
+        use aws_sdk_s3::config::{
+            BehaviorVersion, RequestChecksumCalculation, ResponseChecksumValidation,
+        };
+        let base = || {
+            aws_sdk_s3::config::Builder::new()
+                .behavior_version(BehaviorVersion::latest())
+                .region(Region::new("auto"))
+        };
+        for custom in [true, false] {
+            let cfg = apply_s3_compat(base(), custom).build();
+            assert_eq!(
+                cfg.request_checksum_calculation(),
+                Some(&RequestChecksumCalculation::WhenRequired)
+            );
+            assert_eq!(
+                cfg.response_checksum_validation(),
+                Some(&ResponseChecksumValidation::WhenRequired)
+            );
+            assert_eq!(cfg.region().map(|r| r.as_ref()), Some("auto"));
+        }
+    }
+
+    #[test]
+    fn s3_list_prefix_has_directory_semantics() {
+        assert_eq!(S3Storage::dir_prefix("snapshots"), "snapshots/");
+        assert_eq!(S3Storage::dir_prefix("data/clear/"), "data/clear/");
+        assert_eq!(S3Storage::dir_prefix(""), "");
+    }
 
     #[test]
     fn loopback_detection_is_exact() {
