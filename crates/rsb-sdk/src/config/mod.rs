@@ -103,6 +103,34 @@ fn default_channel_buffer() -> usize {
     8192
 }
 
+/// Valores por omissão alinhados com os `#[serde(default)]` acima: um
+/// `Config::default()` equivale a um TOML só com os campos obrigatórios
+/// vazios (`exclude_patterns` = `DEFAULT_EXCLUDE_PATTERNS`, `backup_mode`
+/// = "incremental", `channel_buffer_size` = 8192, opcionais a `None`).
+/// Use `..Default::default()` para preencher só o que interessa.
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            source_path: String::new(),
+            destination_path: String::new(),
+            exclude_patterns: default_exclude_patterns(),
+            encryption_key: None,
+            backup_mode: default_backup_mode(),
+            s3_bucket: None,
+            s3_region: None,
+            s3_endpoint: None,
+            s3: None,
+            s3_buckets: None,
+            encrypt_patterns: None,
+            pause_on_low_battery: None,
+            pause_on_high_cpu: None,
+            compression_level: None,
+            max_threads: None,
+            channel_buffer_size: default_channel_buffer(),
+        }
+    }
+}
+
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
@@ -260,6 +288,15 @@ pub fn validate_compression_level(level: u8) -> io::Result<()> {
 }
 
 impl Config {
+    /// Config com origem/destino definidos e os restantes campos por omissão.
+    pub fn new(source_path: impl Into<String>, destination_path: impl Into<String>) -> Self {
+        Self {
+            source_path: source_path.into(),
+            destination_path: destination_path.into(),
+            ..Self::default()
+        }
+    }
+
     /// O perfil exige cifra (encrypt_patterns definido e não vazio)?
     pub fn encryption_required(&self) -> bool {
         self.encrypt_patterns
@@ -347,7 +384,6 @@ pub fn create_profile_with_options(
         source_path: source.to_string_lossy().into_owned(),
         destination_path: dest.to_string_lossy().into_owned(),
         exclude_patterns,
-        encryption_key: None,
         backup_mode: mode.unwrap_or("full").to_string(),
 
         s3_bucket: s3_bucket.map(|s| s.to_string()),
@@ -362,7 +398,6 @@ pub fn create_profile_with_options(
             secret_key: None,
         }),
 
-        s3_buckets: None,
         encrypt_patterns: if encrypt {
             Some(vec!["*".to_string()])
         } else {
@@ -372,8 +407,8 @@ pub fn create_profile_with_options(
         pause_on_low_battery: Some(20),
         pause_on_high_cpu: Some(65), // valor mais realista
         compression_level: compression.or(Some(3)),
-        max_threads: None, // usar automático
-        channel_buffer_size: 8192,
+        // encryption_key nunca é persistida; max_threads automático.
+        ..Config::default()
     };
 
     let filename = format!("{}.toml", name);

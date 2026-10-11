@@ -21,19 +21,10 @@ fn test_config_and_paths_integration() {
         source_path: source.to_string_lossy().into_owned(),
         destination_path: dest.to_string_lossy().into_owned(),
         exclude_patterns: vec!["*.tmp".to_string()],
-        encryption_key: None,
-        backup_mode: "incremental".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
-        encrypt_patterns: None,
         pause_on_low_battery: Some(20),
         pause_on_high_cpu: Some(80),
         compression_level: Some(3),
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     assert_eq!(config.source_path, source.to_string_lossy().to_string());
@@ -131,17 +122,11 @@ fn test_config_with_exclusions_and_encryption() {
         exclude_patterns: vec!["*.tmp".to_string(), "node_modules".to_string()],
         encryption_key: Some("secure-key".to_string()),
         backup_mode: "full".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
         encrypt_patterns: Some(vec!["*.pdf".to_string()]),
         pause_on_low_battery: Some(15),
         pause_on_high_cpu: Some(75),
         compression_level: Some(6),
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     assert!(config.encryption_key.is_some());
@@ -212,17 +197,11 @@ fn test_complete_backup_scenario() {
         exclude_patterns: vec!["*.tmp".to_string()],
         encryption_key: Some("backup-key".to_string()),
         backup_mode: "full".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
         encrypt_patterns: Some(vec!["*.pdf".to_string()]),
         pause_on_low_battery: Some(20),
         pause_on_high_cpu: Some(80),
         compression_level: Some(5),
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     // Walk the source directory

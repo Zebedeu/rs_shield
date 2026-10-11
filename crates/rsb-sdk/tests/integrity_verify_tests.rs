@@ -12,18 +12,9 @@ fn config(src: &Path, dst: &Path, key: Option<&str>) -> Config {
         destination_path: dst.to_string_lossy().into_owned(),
         exclude_patterns: vec![],
         encryption_key: key.map(str::to_string),
-        backup_mode: "incremental".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
         compression_level: Some(3),
-        channel_buffer_size: 8192,
         max_threads: Some(2),
+        ..Default::default()
     }
 }
 

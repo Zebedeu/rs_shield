@@ -8,19 +8,8 @@ fn test_local_storage_selection() {
         source_path: "/source".to_string(),
         destination_path: "/destination".to_string(),
         exclude_patterns: vec![],
-        encryption_key: None,
-        backup_mode: "incremental".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
         compression_level: Some(3),
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     // Should use local storage
@@ -34,19 +23,10 @@ fn test_s3_storage_selection_with_bucket() {
         source_path: "/source".to_string(),
         destination_path: "/destination".to_string(),
         exclude_patterns: vec![],
-        encryption_key: None,
         backup_mode: "full".to_string(),
         s3_bucket: Some("my-bucket".to_string()),
         s3_region: Some("us-east-1".to_string()),
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
-        compression_level: None,
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     // Should use S3 storage
@@ -68,19 +48,9 @@ fn test_s3_config_nested_structure() {
         source_path: "/source".to_string(),
         destination_path: "/destination".to_string(),
         exclude_patterns: vec![],
-        encryption_key: None,
-        backup_mode: "incremental".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
         s3: Some(s3_config),
-        s3_buckets: None,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
         compression_level: Some(5),
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     assert!(config.s3.is_some());
@@ -109,19 +79,9 @@ fn test_s3_bucket_extraction_flat() {
         source_path: "/source".to_string(),
         destination_path: "/destination".to_string(),
         exclude_patterns: vec![],
-        encryption_key: None,
-        backup_mode: "incremental".to_string(),
         s3_bucket: Some("flat-bucket".to_string()),
         s3_region: Some("us-west-2".to_string()),
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
-        compression_level: None,
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     let bucket = config.s3_bucket.clone();
@@ -134,19 +94,8 @@ fn test_empty_bucket_uses_local() {
         source_path: "/source".to_string(),
         destination_path: "/destination".to_string(),
         exclude_patterns: vec![],
-        encryption_key: None,
-        backup_mode: "incremental".to_string(),
         s3_bucket: Some("   ".to_string()), // Whitespace only
-        s3_region: None,
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
-        compression_level: None,
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     let bucket = config.s3_bucket.as_ref().map(|b| b.trim());
@@ -203,19 +152,7 @@ fn test_local_storage_path_preservation() {
         source_path: "/data".to_string(),
         destination_path: dest_path.to_string(),
         exclude_patterns: vec![],
-        encryption_key: None,
-        backup_mode: "incremental".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
-        compression_level: None,
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     assert_eq!(config.destination_path, dest_path);
@@ -236,19 +173,9 @@ fn test_s3_region_fallback() {
         source_path: "/source".to_string(),
         destination_path: "/dest".to_string(),
         exclude_patterns: vec![],
-        encryption_key: None,
-        backup_mode: "incremental".to_string(),
-        s3_bucket: None,
         s3_region: Some("flat-region".to_string()),
-        s3_endpoint: None,
-        s3_buckets: None,
         s3: Some(s3_config),
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
-        compression_level: None,
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     let region = config
@@ -267,19 +194,9 @@ fn test_s3_endpoint_fallback() {
         source_path: "/source".to_string(),
         destination_path: "/dest".to_string(),
         exclude_patterns: vec![],
-        encryption_key: None,
-        backup_mode: "incremental".to_string(),
         s3_bucket: Some("bucket".to_string()),
-        s3_region: None,
         s3_endpoint: Some("https://s3.amazonaws.com".to_string()),
-        s3: None,
-        s3_buckets: None,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
-        compression_level: None,
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     let endpoint = config
@@ -305,19 +222,12 @@ fn test_complete_s3_config() {
         source_path: "/source".to_string(),
         destination_path: "/dest".to_string(),
         exclude_patterns: vec![],
-        encryption_key: None,
         backup_mode: "full".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_buckets: None,
-        s3_endpoint: None,
         s3: Some(s3_config),
-        encrypt_patterns: None,
         pause_on_low_battery: Some(15),
         pause_on_high_cpu: Some(80),
         compression_level: Some(6),
-        channel_buffer_size: 8192,
-        max_threads: None,
+        ..Default::default()
     };
 
     let s3 = config.s3.unwrap();

@@ -171,18 +171,12 @@ pub fn VerifyScreen() -> Element {
                     destination_path: bkp.to_string_lossy().into_owned(),
                     exclude_patterns: vec![],
                     encryption_key: key_opt,
-                    pause_on_low_battery: None,
-                    encrypt_patterns: None,
-                    backup_mode: "incremental".to_string(),
                     s3_bucket: s3_bucket_opt,
                     s3_region: s3_region_opt,
                     s3_endpoint: s3_endpoint_opt,
                     s3: s3_config,
-                    s3_buckets: None,
-                    pause_on_high_cpu: None,
                     compression_level: Some(3),
-                    max_threads: None,
-                    channel_buffer_size: 8192,
+                    ..Default::default()
                 };
 
                 let token = cancellation_token();

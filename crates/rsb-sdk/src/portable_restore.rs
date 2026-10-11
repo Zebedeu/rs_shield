@@ -50,18 +50,7 @@ pub fn config_from_backup_path(
         destination_path: backup_path.to_string_lossy().to_string(),
         exclude_patterns: Vec::new(),
         encryption_key,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
-        compression_level: None,
-        backup_mode: "incremental".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
-        max_threads: None,
-        channel_buffer_size: 8192,
+        ..Default::default()
     })
 }
 
@@ -80,19 +69,10 @@ pub fn config_for_s3_restore(
         source_path: "direct-restore".to_string(),
         destination_path: String::new(),
         exclude_patterns: Vec::new(),
-        encryption_key: None,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
-        compression_level: None,
-        backup_mode: "incremental".to_string(),
         s3_bucket: Some(bucket.trim().to_string()),
         s3_region: region.filter(|r| !r.trim().is_empty()),
         s3_endpoint: endpoint.filter(|e| !e.trim().is_empty()),
-        s3: None,
-        s3_buckets: None,
-        max_threads: None,
-        channel_buffer_size: 8192,
+        ..Default::default()
     })
 }
 

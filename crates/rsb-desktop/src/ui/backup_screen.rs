@@ -210,7 +210,6 @@ pub fn BackupScreen() -> Element {
                     source_path: src.to_string_lossy().into_owned(),
                     destination_path: dst.to_string_lossy().into_owned(),
                     exclude_patterns: excludes,
-                    encryption_key: None,
                     pause_on_low_battery,
                     encrypt_patterns: Some(encrypt_patterns),
                     backup_mode: mode.clone(),
@@ -218,11 +217,9 @@ pub fn BackupScreen() -> Element {
                     s3_region: s3_region_opt,
                     s3_endpoint: s3_endpoint_opt,
                     s3: s3_config,
-                    s3_buckets: None,
                     pause_on_high_cpu,
                     compression_level,
-                    channel_buffer_size: 8192,
-                    max_threads: None,
+                    ..Default::default()
                 };
 
                 let token = cancellation_token();
