@@ -157,6 +157,9 @@ async fn prune_locked(
 ) -> Result<(), RsbError> {
     let mut deleted_count = 0;
 
+    // Local dedup indexes must not trust what this prune may delete.
+    crate::core::dedup_index::bump_repo_epoch(storage).await?;
+
     // 1) Delete the snapshot manifests first. If we crash afterwards the
     //    worst case is unreferenced data (reclaimed by the next prune), never
     //    a manifest pointing at deleted data.

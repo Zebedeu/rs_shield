@@ -15,6 +15,12 @@ keys. All integers are big-endian.
 | `data/clear/<hash>` | Unencrypted object: raw or zstd-compressed content. |
 | `data/enc/<hash>` | Encrypted object (legacy v1, v2 or v3 blob). |
 | `locks/<uuid>.lock` | Repository locks (JSON). |
+| `meta/repo-id` | Random repository id (UUID, text). Created by the first backup of this version; keys the local dedup index. Optional. |
+| `meta/epoch` | Random value rewritten by prune, `verify --repair`, `key migrate` and `key rotate` before they delete or rewrite data objects; a local dedup index written under another epoch is discarded. Optional. |
+
+Neither `meta/` object is needed to read a repository; older versions
+ignore them. The local dedup index itself lives outside the repository
+(`<user cache dir>/rs-shield/dedup-index/`), see `docs/PERFORMANCE.md`.
 
 `<hash>` is the BLAKE3 hash (64 lowercase hex characters) of the object's
 **plaintext**: the whole file, or one chunk of a file larger than 64 MiB

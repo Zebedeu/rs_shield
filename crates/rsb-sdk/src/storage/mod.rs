@@ -84,6 +84,13 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    /// Stable identity of the storage location (directory, bucket...),
+    /// used to key local caches such as the dedup index. `None` (the
+    /// default) disables those caches for this storage.
+    fn cache_identity(&self) -> Option<String> {
+        None
+    }
+
     async fn exists(&self, path: &str) -> io::Result<bool>;
     async fn list(&self, prefix: &str) -> io::Result<Vec<String>>;
     async fn delete(&self, path: &str) -> io::Result<()>;
@@ -437,6 +444,13 @@ impl Storage for LocalStorage {
         Ok(())
     }
 
+    fn cache_identity(&self) -> Option<String> {
+        let path = std::fs::canonicalize(&self.base_path)
+            .or_else(|_| std::path::absolute(&self.base_path))
+            .ok()?;
+        Some(format!("local:{}", path.display()))
+    }
+
     async fn sync(&self) -> io::Result<()> {
         let dirs: Vec<PathBuf> = {
             let mut pending = self.pending_dirs.lock().unwrap_or_else(|e| e.into_inner());
@@ -628,6 +642,8 @@ where
 pub struct S3Storage {
     client: Client,
     bucket: String,
+    /// `s3:<endpoint or "aws">:<region>:<bucket>` (see `cache_identity`).
+    identity: String,
 }
 
 impl S3Storage {
@@ -639,9 +655,20 @@ impl S3Storage {
         endpoint: Option<String>,
         credentials: Credentials,
     ) -> Self {
+        let identity = format!(
+            "s3:{}:{}:{}",
+            endpoint
+                .as_deref()
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+                .unwrap_or("aws"),
+            effective_s3_region(region.as_deref(), endpoint.as_deref()).unwrap_or_default(),
+            bucket
+        );
         Self {
             client: build_s3_client(region, endpoint, credentials).await,
             bucket: bucket.to_string(),
+            identity,
         }
     }
 
@@ -673,6 +700,10 @@ impl S3Storage {
 
 #[async_trait]
 impl Storage for S3Storage {
+    fn cache_identity(&self) -> Option<String> {
+        Some(self.identity.clone())
+    }
+
     async fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
         // PutObject simples (sem ACL, tagging, storage class, SSE-KMS nem
         // escrita condicional): suportado por todos os fornecedores.

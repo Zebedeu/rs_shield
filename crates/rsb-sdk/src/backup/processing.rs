@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::core::dedup_index::{DedupIndex, entry_objects};
 use crate::core::file_processor;
 use crate::core::manifest::write_manifest_with_key;
 use crate::core::resource_monitor::spawn_resource_monitor;
@@ -132,6 +133,13 @@ async fn run_backup(
         "✅ Deduplication cache ready: {} files indexed by hash",
         previous_metadata_cache.len()
     );
+    // Local index of objects known to be in the repository (no HEAD per
+    // known object). `None` (disabled, or any problem opening it) means
+    // every lookup asks storage, as without an index.
+    let dedup_index = Arc::new(DedupIndex::open(&*storage, &options.dedup_index, dry_run).await);
+    if let Some(idx) = dedup_index.as_ref() {
+        debug!("🗂️ Dedup index: {} known objects", idx.len());
+    }
 
     // ====================== SHARED STATE ======================
     let snapshot_manifest: Arc<Mutex<HashMap<PathBuf, FileMetadata>>> =
@@ -171,6 +179,8 @@ async fn run_backup(
     let errors_clone = errors_list.clone();
     let cancellation_clone = cancellation_token.clone();
     let rt_handle = tokio::runtime::Handle::current();
+    let index_clone = dedup_index.clone();
+    let previous_for_recheck = previous_cache.clone();
 
     // ====================== PROCESSING ======================
     let processing_handle = tokio::task::spawn_blocking(move || {
@@ -198,6 +208,7 @@ async fn run_backup(
                 &rt_handle,
                 &encrypt_patterns,
                 compression_level,
+                index_clone.as_ref().as_ref(),
             );
 
             match result {
@@ -239,13 +250,82 @@ async fn run_backup(
     monitor_handle.thread().unpark();
     let _ = monitor_handle.join();
 
+    // ====================== DEDUP INDEX RECHECK ======================
+    // If storage contradicted the index during this backup, every object
+    // the index answered for is checked again; files whose object is
+    // missing are processed again without the index.
+    if let Some(idx) = dedup_index.as_ref()
+        && idx.is_distrusted()
+    {
+        let bad = idx.recheck_trusted(&*storage).await?;
+        if !bad.is_empty() {
+            let affected: Vec<PathBuf> = snapshot_manifest
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, meta)| entry_objects(meta).iter().any(|o| bad.contains(o)))
+                .map(|(rel, _)| rel.clone())
+                .collect();
+            tracing::warn!(
+                "{} objects trusted from the dedup index are missing; re-processing {} files",
+                bad.len(),
+                affected.len()
+            );
+            let storage_c = storage.clone();
+            let previous_c = previous_for_recheck;
+            let manifest_c = snapshot_manifest.clone();
+            let errors_c = errors_list.clone();
+            let stats_c = stats.clone();
+            let key_c = repo_key.clone();
+            let patterns_c = config.encrypt_patterns.clone();
+            let source_c = source.to_path_buf();
+            let rt = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || {
+                for rel in affected {
+                    let full = source_c.join(&rel);
+                    match file_processor::process_file(
+                        &full,
+                        &storage_c,
+                        &rel,
+                        key_c.clone(),
+                        &previous_c,
+                        dry_run,
+                        &rt,
+                        &patterns_c,
+                        compression_level,
+                        None,
+                    ) {
+                        Ok((_, meta)) => {
+                            manifest_c.lock().unwrap().insert(rel, meta);
+                        }
+                        Err(e) => {
+                            manifest_c.lock().unwrap().remove(&rel);
+                            stats_c.inc_error();
+                            let msg = format!("Failed {}: {}", full.display(), e);
+                            error!("{}", msg);
+                            errors_c.lock().unwrap().push(msg);
+                        }
+                    }
+                }
+            })
+            .await?;
+        }
+    }
+
     // ====================== FINALIZE ======================
     let snapshot_path = if !dry_run {
         // Data objects were written with deferred durability: make them
         // durable before the manifest that references them exists.
         storage.sync().await?;
         let manifest = snapshot_manifest.lock().unwrap().clone();
-        write_manifest_with_key(&*storage, &manifest, repo_key.as_deref(), dry_run).await?
+        let path =
+            write_manifest_with_key(&*storage, &manifest, repo_key.as_deref(), dry_run).await?;
+        if let Some(idx) = dedup_index.as_ref()
+            && let Err(e) = idx.save(&manifest, &path)
+        {
+            tracing::warn!("Could not save the dedup index: {}", e);
+        }
+        path
     } else {
         "[Dry-run] No snapshot written".to_string()
     };

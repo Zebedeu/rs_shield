@@ -8,6 +8,7 @@
 
 use rsb_sdk::backup::perform_backup;
 use rsb_sdk::config::Config;
+use rsb_sdk::core::dedup_index::DedupIndexOptions;
 use rsb_sdk::core::restore::restore_from_storage;
 use rsb_sdk::report::ReportData;
 use rsb_sdk::storage::Storage;
@@ -240,6 +241,7 @@ pub async fn backup(src: &Path, storage: Arc<dyn Storage>, key: Option<&str>) ->
         BackupOptions {
             storage: Some(storage),
             max_threads: env_usize("RSB_BENCH_THREADS"),
+            dedup_index: dedup_index_options(),
             ..Default::default()
         }
         .with_encryption_key(key),
@@ -248,6 +250,18 @@ pub async fn backup(src: &Path, storage: Arc<dyn Storage>, key: Option<&str>) ->
     .expect("backup");
     assert_eq!(report.files_with_errors, 0, "{:?}", report.errors);
     report
+}
+
+/// Dedup index settings: `RSB_BENCH_NO_INDEX=1` disables it,
+/// `RSB_BENCH_INDEX_DIR` puts its files there (default: the user cache dir).
+fn dedup_index_options() -> DedupIndexOptions {
+    if std::env::var("RSB_BENCH_NO_INDEX").is_ok_and(|v| v == "1") {
+        return DedupIndexOptions::disabled();
+    }
+    DedupIndexOptions {
+        dir: std::env::var_os("RSB_BENCH_INDEX_DIR").map(PathBuf::from),
+        ..DedupIndexOptions::default()
+    }
 }
 
 /// Restores the latest snapshot of `storage` into `out` (overwriting).

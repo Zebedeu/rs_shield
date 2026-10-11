@@ -144,6 +144,10 @@ impl Storage for InstrumentedStorage {
         self.inner.write_file_deferred(path, src).await
     }
 
+    fn cache_identity(&self) -> Option<String> {
+        self.inner.cache_identity()
+    }
+
     async fn sync(&self) -> io::Result<()> {
         // Not a storage request (a local fsync); no latency either.
         self.inner.sync().await

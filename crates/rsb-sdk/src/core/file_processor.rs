@@ -1,4 +1,5 @@
 // file_processor.rs - dedup, compression and (v3 streaming) encryption of files
+use super::dedup_index::DedupIndex;
 use super::types::{CHUNK_SIZE, ChunkMetadata, FileMetadata, FileStatus, MULTIPART_THRESHOLD};
 use crate::crypto::stream::{V3_HEADER_LEN, V3Header};
 use crate::crypto::{
@@ -78,6 +79,7 @@ pub fn process_file(
     rt_handle: &Handle,
     encrypt_patterns: &Option<Vec<String>>,
     compression_level: u8,
+    index: Option<&DedupIndex>, // local dedup index (None = ask storage)
 ) -> io::Result<(FileStatus, FileMetadata)> {
     let before = std::fs::metadata(src)?;
     let should_encrypt = should_encrypt_file(rel_path, encryption_key.as_deref(), encrypt_patterns);
@@ -93,6 +95,7 @@ pub fn process_file(
             dry_run,
             rt_handle,
             compression_level,
+            index,
         )?;
         ensure_unchanged(src, &before, None)?;
         return Ok(result);
@@ -123,7 +126,7 @@ pub fn process_file(
     // object it points to is still there (`verify` with repair deletes
     // corrupt objects so that the next backup re-uploads them).
     if let Some(cached) = previous_metadata_cache.get(&current_hash) {
-        if cached_objects_present(storage, rt_handle, cached, plain_len)? {
+        if cached_objects_present(storage, rt_handle, index, cached, plain_len)? {
             if inline.is_none() {
                 ensure_unchanged(src, &before, Some(plain_len))?;
             }
@@ -148,7 +151,7 @@ pub fn process_file(
     // profile settings: an object written with compression disabled must
     // keep `compressed = false` even if compression is now enabled (and
     // vice versa), otherwise restore decodes it wrongly.
-    if let Some(existing) = rt_handle.block_on(storage.size(&data_path))? {
+    if let Some(existing) = object_size(storage, rt_handle, index, &data_path, None)? {
         if let Some(mode) = classify_existing_object(
             storage,
             rt_handle,
@@ -208,6 +211,9 @@ pub fn process_file(
         should_encrypt,
         encryption_key.as_deref(),
     )?;
+    if let Some(i) = index {
+        i.record_upload(&data_path, stored_size);
+    }
     if inline.is_none() {
         ensure_unchanged(src, &before, Some(plain_len))?;
     }
@@ -456,6 +462,7 @@ fn read_stored_prefix(
 fn cached_objects_present(
     storage: &Arc<dyn Storage>,
     rt_handle: &Handle,
+    index: Option<&DedupIndex>,
     cached: &FileMetadata,
     plain_len: u64,
 ) -> io::Result<bool> {
@@ -478,7 +485,7 @@ fn cached_objects_present(
         )],
     };
     for (path, expected, plain) in objects {
-        let Some(actual) = rt_handle.block_on(storage.size(&path))? else {
+        let Some(actual) = object_size(storage, rt_handle, index, &path, expected)? else {
             return Ok(false);
         };
         if expected.is_some_and(|e| e != 0 && e != actual) {
@@ -491,6 +498,22 @@ fn cached_objects_present(
         }
     }
     Ok(true)
+}
+
+/// Size of a stored object (`None` if missing): from the dedup index when
+/// it may be trusted (see [`DedupIndex::size`]), else from storage.
+/// `expected` is the stored size the caller already knows, if any.
+fn object_size(
+    storage: &Arc<dyn Storage>,
+    rt_handle: &Handle,
+    index: Option<&DedupIndex>,
+    path: &str,
+    expected: Option<u64>,
+) -> io::Result<Option<u64>> {
+    match index {
+        Some(i) => i.size(storage, rt_handle, path, expected),
+        None => rt_handle.block_on(storage.size(path)),
+    }
 }
 
 // ====================== STREAMING MULTIPART ======================
@@ -524,6 +547,7 @@ fn process_file_multipart_streaming(
     dry_run: bool,
     rt_handle: &Handle,
     compression_level: u8,
+    index: Option<&DedupIndex>,
 ) -> io::Result<(FileStatus, FileMetadata)> {
     let kind = if should_encrypt { "enc" } else { "clear" };
     // Both passes stream through one small buffer: memory does not grow
@@ -543,7 +567,7 @@ fn process_file_multipart_streaming(
         }
         file_size += n;
         let data_path = format!("data/{}/{}", kind, chunk_hash);
-        let size = rt_handle.block_on(storage.size(&data_path))?;
+        let size = object_size(storage, rt_handle, index, &data_path, None)?;
         scanned.push((chunk_hash, n, size));
     }
     let file_hash = full_hasher.finalize().to_hex().to_string();
@@ -642,6 +666,9 @@ fn process_file_multipart_streaming(
                 should_encrypt,
                 encryption_key,
             )?;
+            if let Some(i) = index {
+                i.record_upload(&data_path, stored_size);
+            }
             written.insert(plan.hash.clone(), (stored_size, stored_hash));
         }
     }
@@ -944,6 +971,7 @@ mod tests {
             rt.handle(),
             &None,
             level,
+            None,
         )
         .unwrap()
     }
@@ -1155,6 +1183,7 @@ mod tests {
             rt.handle(),
             &None,
             0,
+            None,
         )
         .unwrap();
         assert_eq!(status, FileStatus::Processed);

@@ -194,6 +194,12 @@ fn parent(args: Args) {
             tmp.path().to_path_buf()
         }
     };
+    // Children keep their dedup index files in the work dir, not in the
+    // user's cache dir.
+    if std::env::var_os("RSB_BENCH_INDEX_DIR").is_none() {
+        // SAFETY: single-threaded here (no child process or runtime yet).
+        unsafe { std::env::set_var("RSB_BENCH_INDEX_DIR", work.join("index-cache")) };
+    }
     let want = |n: &str| args.only.is_empty() || args.only.iter().any(|o| o == n);
     let encs: Vec<bool> = match args.enc {
         Some(e) => vec![e],
