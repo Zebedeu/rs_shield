@@ -7,5 +7,5 @@ pub mod progress;
 pub mod stats;
 pub mod threading;
 
+pub use crate::options::BackupOptions;
 pub use processing::perform_backup;
-pub use processing::perform_backup_with_cancellation;

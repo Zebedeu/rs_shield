@@ -6,8 +6,10 @@
 
 use crate::config::Config;
 use crate::core;
+use crate::error::RsbError;
+use crate::options::RestoreOptions;
 use crate::report::ReportData;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Creates a minimal config from a backup path
 ///
@@ -24,14 +26,18 @@ use std::path::{Path, PathBuf};
 /// # Example
 /// ```ignore
 /// let config = config_from_backup_path("/path/to/backup", Some("password".to_string()))?;
-/// let report = perform_restore(&config, None, target_path, Some("password"), false, false, None).await?;
+/// let opts = RestoreOptions::new(target_path).with_encryption_key(Some("password"));
+/// let report = perform_restore(&config, opts).await?;
 /// ```
 pub fn config_from_backup_path(
     backup_path: &Path,
     encryption_key: Option<String>,
-) -> Result<Config, Box<dyn std::error::Error>> {
+) -> crate::error::Result<Config> {
     if !backup_path.exists() {
-        return Err(format!("Backup path not found: {}", backup_path.display()).into());
+        return Err(RsbError::NotFound(format!(
+            "Backup path not found: {}",
+            backup_path.display()
+        )));
     }
 
     // Validate backup structure
@@ -39,9 +45,9 @@ pub fn config_from_backup_path(
     let data_dir = backup_path.join("data");
 
     if !snapshots_dir.exists() || !data_dir.exists() {
-        return Err(
-            "Invalid backup structure: missing 'snapshots' and/or 'data' directories".into(),
-        );
+        return Err(RsbError::InvalidInput(
+            "Invalid backup structure: missing 'snapshots' and/or 'data' directories".to_string(),
+        ));
     }
 
     // Create minimal config for restore
@@ -50,18 +56,7 @@ pub fn config_from_backup_path(
         destination_path: backup_path.to_string_lossy().to_string(),
         exclude_patterns: Vec::new(),
         encryption_key,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
-        compression_level: None,
-        backup_mode: "incremental".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
-        max_threads: None,
-        channel_buffer_size: 8192,
+        ..Default::default()
     })
 }
 
@@ -72,27 +67,20 @@ pub fn config_for_s3_restore(
     bucket: &str,
     region: Option<String>,
     endpoint: Option<String>,
-) -> Result<Config, Box<dyn std::error::Error>> {
+) -> crate::error::Result<Config> {
     if bucket.trim().is_empty() {
-        return Err("S3 bucket is required for an S3 restore".into());
+        return Err(RsbError::InvalidInput(
+            "S3 bucket is required for an S3 restore".to_string(),
+        ));
     }
     Ok(Config {
         source_path: "direct-restore".to_string(),
         destination_path: String::new(),
         exclude_patterns: Vec::new(),
-        encryption_key: None,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
-        compression_level: None,
-        backup_mode: "incremental".to_string(),
         s3_bucket: Some(bucket.trim().to_string()),
         s3_region: region.filter(|r| !r.trim().is_empty()),
         s3_endpoint: endpoint.filter(|e| !e.trim().is_empty()),
-        s3: None,
-        s3_buckets: None,
-        max_threads: None,
-        channel_buffer_size: 8192,
+        ..Default::default()
     })
 }
 
@@ -106,12 +94,8 @@ pub fn config_for_s3_restore(
 /// # Arguments
 /// * `config_path` - Optional path to config.toml file
 /// * `backup_path` - Optional path to backup folder
-/// * `snapshot_id` - Optional snapshot ID to restore
-/// * `target_path` - Target directory for restore
-/// * `encryption_key` - Optional encryption key
-/// * `force` - Force overwrite existing files
-/// * `versioned` - Create timestamped folder
-/// * `on_progress` - Optional progress callback
+/// * `options` - Snapshot, target, key, force/versioned, progress callback
+///   and cancellation token (see [`RestoreOptions`])
 ///
 /// # Returns
 /// ReportData with restore operation details
@@ -123,21 +107,16 @@ pub fn config_for_s3_restore(
 /// - Config file cannot be loaded
 /// - Backup structure is invalid
 /// - Restore operation fails
-// TODO(fase 2): substituir por uma struct de opções.
-#[allow(clippy::too_many_arguments)]
 pub async fn restore_from_config_or_backup(
     config_path: Option<&Path>,
     backup_path: Option<&Path>,
-    snapshot_id: Option<&str>,
-    target_path: PathBuf,
-    encryption_key: Option<&str>,
-    force: bool,
-    versioned: bool,
-    on_progress: Option<crate::core::types::ProgressCallback>,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
+    options: RestoreOptions,
+) -> crate::error::Result<ReportData> {
     // Validate that at least one source is provided
     if config_path.is_none() && backup_path.is_none() {
-        return Err("Either config file or backup path must be provided".into());
+        return Err(RsbError::InvalidInput(
+            "Either config file or backup path must be provided".to_string(),
+        ));
     }
 
     // Create config from appropriate source
@@ -146,22 +125,15 @@ pub async fn restore_from_config_or_backup(
         crate::config::load_config(cfg_path)?
     } else if let Some(backup) = backup_path {
         // Portable mode: create config from backup path
-        config_from_backup_path(backup, encryption_key.map(String::from))?
+        config_from_backup_path(backup, options.key().map(String::from))?
     } else {
-        return Err("No valid restore source provided".into());
+        return Err(RsbError::InvalidInput(
+            "No valid restore source provided".to_string(),
+        ));
     };
 
     // Perform restore using core function
-    core::perform_restore(
-        &config,
-        snapshot_id,
-        target_path,
-        encryption_key,
-        force,
-        versioned,
-        on_progress,
-    )
-    .await
+    core::perform_restore(&config, options).await
 }
 
 /// Validates a backup structure without performing full restore
@@ -264,65 +236,4 @@ pub struct BackupValidation {
     pub suggestions: Vec<String>,
     pub snapshots_count: usize,
     pub data_files_count: usize,
-}
-
-/// Unified restore function with cancellation support
-///
-/// Extended version of `restore_from_config_or_backup` with cancellation token support.
-/// Useful for UI applications that need to allow user cancellation.
-///
-/// # Arguments
-/// * `config_path` - Optional path to config.toml file
-/// * `backup_path` - Optional path to backup folder
-/// * `snapshot_id` - Optional snapshot ID to restore
-/// * `target_path` - Target directory for restore
-/// * `encryption_key` - Optional encryption key
-/// * `force` - Force overwrite existing files
-/// * `versioned` - Create timestamped folder
-/// * `on_progress` - Optional progress callback
-/// * `cancellation_token` - Optional cancellation token for user interruption
-///
-/// # Returns
-/// ReportData with restore operation details
-// TODO(fase 2): substituir por uma struct de opções.
-#[allow(clippy::too_many_arguments)]
-pub async fn restore_from_config_or_backup_with_cancellation(
-    config_path: Option<&Path>,
-    backup_path: Option<&Path>,
-    snapshot_id: Option<&str>,
-    target_path: PathBuf,
-    encryption_key: Option<&str>,
-    force: bool,
-    versioned: bool,
-    on_progress: Option<crate::core::types::ProgressCallback>,
-    cancellation_token: Option<crate::CancellationToken>,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
-    // Validate that at least one source is provided
-    if config_path.is_none() && backup_path.is_none() {
-        return Err("Either config file or backup path must be provided".into());
-    }
-
-    // Create config from appropriate source
-    let config = if let Some(cfg_path) = config_path {
-        // Traditional mode: load from config file
-        crate::config::load_config(cfg_path)?
-    } else if let Some(backup) = backup_path {
-        // Portable mode: create config from backup path
-        config_from_backup_path(backup, encryption_key.map(String::from))?
-    } else {
-        return Err("No valid restore source provided".into());
-    };
-
-    // Perform restore using core function with cancellation support
-    core::restore::perform_restore_with_cancellation(
-        &config,
-        snapshot_id,
-        target_path,
-        encryption_key,
-        force,
-        versioned,
-        on_progress,
-        cancellation_token,
-    )
-    .await
 }

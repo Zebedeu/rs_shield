@@ -3,7 +3,8 @@
 
 use rsb_sdk::backup::perform_backup;
 use rsb_sdk::config::Config;
-use rsb_sdk::integrity::{perform_verify, perform_verify_with_repair};
+use rsb_sdk::integrity::perform_verify;
+use rsb_sdk::{BackupOptions, VerifyOptions};
 use std::path::{Path, PathBuf};
 
 fn config(src: &Path, dst: &Path, key: Option<&str>) -> Config {
@@ -12,18 +13,32 @@ fn config(src: &Path, dst: &Path, key: Option<&str>) -> Config {
         destination_path: dst.to_string_lossy().into_owned(),
         exclude_patterns: vec![],
         encryption_key: key.map(str::to_string),
-        backup_mode: "incremental".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
-        s3: None,
-        s3_buckets: None,
-        encrypt_patterns: None,
-        pause_on_low_battery: None,
-        pause_on_high_cpu: None,
         compression_level: Some(3),
-        channel_buffer_size: 8192,
         max_threads: Some(2),
+        ..Default::default()
+    }
+}
+
+fn backup_opts(key: Option<&str>) -> BackupOptions {
+    BackupOptions {
+        mode: Some("incremental".to_string()),
+        max_threads: Some(2),
+        ..Default::default()
+    }
+    .with_encryption_key(key)
+}
+
+fn quiet() -> VerifyOptions {
+    VerifyOptions {
+        quiet: true,
+        ..Default::default()
+    }
+}
+
+fn repair() -> VerifyOptions {
+    VerifyOptions {
+        repair: true,
+        ..quiet()
     }
 }
 
@@ -52,12 +67,8 @@ async fn roundtrip(key: Option<&str>) {
     let cfg = config(src.path(), dst.path(), key);
     let kind = if key.is_some() { "enc" } else { "clear" };
 
-    perform_backup(&cfg, "incremental", key, false, false, Some(2), None)
-        .await
-        .unwrap();
-    let report = perform_verify(&cfg, None, true, false, None, None)
-        .await
-        .unwrap();
+    perform_backup(&cfg, backup_opts(key)).await.unwrap();
+    let report = perform_verify(&cfg, quiet()).await.unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
 
     let objects = data_objects(dst.path(), kind);
@@ -66,9 +77,7 @@ async fn roundtrip(key: Option<&str>) {
     truncate_half(victim);
 
     // Plain verify detects it, names the object and does not modify anything.
-    let report = perform_verify(&cfg, None, true, false, None, None)
-        .await
-        .unwrap();
+    let report = perform_verify(&cfg, quiet()).await.unwrap();
     assert_eq!(report.files_with_errors, 1, "{:?}", report.errors);
     assert_eq!(report.files_processed, 1);
     assert!(
@@ -80,9 +89,7 @@ async fn roundtrip(key: Option<&str>) {
     assert!(victim.exists());
 
     // Repair deletes the corrupt object.
-    let report = perform_verify_with_repair(&cfg, None, true, false, true, None, None)
-        .await
-        .unwrap();
+    let report = perform_verify(&cfg, repair()).await.unwrap();
     assert!(
         report
             .errors
@@ -93,13 +100,9 @@ async fn roundtrip(key: Option<&str>) {
 
     // The next backup re-uploads it even though the source is unchanged
     // (dedup no longer trusts the previous snapshot blindly).
-    perform_backup(&cfg, "incremental", key, false, false, Some(2), None)
-        .await
-        .unwrap();
+    perform_backup(&cfg, backup_opts(key)).await.unwrap();
     assert!(victim.exists());
-    let report = perform_verify(&cfg, None, true, false, None, None)
-        .await
-        .unwrap();
+    let report = perform_verify(&cfg, quiet()).await.unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert_eq!(report.files_processed, 2);
 }
@@ -121,22 +124,10 @@ async fn repair_does_not_delete_with_wrong_key_objects() {
     let dst = tempfile::tempdir().unwrap();
     std::fs::write(src.path().join("a.txt"), b"alpha").unwrap();
     let cfg = config(src.path(), dst.path(), Some("right"));
-    perform_backup(
-        &cfg,
-        "incremental",
-        Some("right"),
-        false,
-        false,
-        Some(2),
-        None,
-    )
-    .await
-    .unwrap();
+    perform_backup(&cfg, backup_opts(Some("right")))
+        .await
+        .unwrap();
     let wrong = config(src.path(), dst.path(), Some("wrong"));
-    assert!(
-        perform_verify_with_repair(&wrong, None, true, false, true, None, None)
-            .await
-            .is_err()
-    );
+    assert!(perform_verify(&wrong, repair()).await.is_err());
     assert_eq!(data_objects(dst.path(), "enc").len(), 1);
 }

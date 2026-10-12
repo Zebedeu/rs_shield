@@ -66,21 +66,24 @@ fn test_atomic_bool_swap_operation() {
 fn test_shared_pause_flag_between_threads() {
     let should_pause = Arc::new(AtomicBool::new(false));
     let should_pause_clone = should_pause.clone();
+    // Two rendezvous: after the thread's first read, and after the store.
+    let sync = Arc::new(std::sync::Barrier::new(2));
+    let sync_clone = sync.clone();
 
     let thread_handle = thread::spawn(move || {
         // Thread sees initial state
         assert!(!should_pause_clone.load(Ordering::Relaxed));
-
-        // Wait a bit
-        thread::sleep(Duration::from_millis(50));
+        sync_clone.wait();
+        sync_clone.wait();
 
         // Check if pause was set from main thread
         should_pause_clone.load(Ordering::Relaxed)
     });
 
     // Set pause from main thread
-    thread::sleep(Duration::from_millis(25));
+    sync.wait();
     should_pause.store(true, Ordering::Relaxed);
+    sync.wait();
 
     let thread_saw_pause = thread_handle.join().unwrap();
     assert!(thread_saw_pause);
@@ -90,65 +93,89 @@ fn test_shared_pause_flag_between_threads() {
 fn test_shared_running_flag_between_threads() {
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
 
+    // Loops until told to stop: the test only finishes if the store is seen.
     let thread_handle = thread::spawn(move || {
-        let mut iterations = 0;
-        while running_clone.load(Ordering::Relaxed) && iterations < 10 {
-            thread::sleep(Duration::from_millis(10));
+        let mut iterations = 0u64;
+        while running_clone.load(Ordering::Relaxed) {
             iterations += 1;
+            if iterations == 1 {
+                started_tx.send(()).unwrap();
+            }
+            thread::sleep(Duration::from_millis(1));
         }
         iterations
     });
 
-    // Let thread run for a bit
-    thread::sleep(Duration::from_millis(50));
+    // Let thread run at least once
+    started_rx.recv().unwrap();
 
     // Stop the thread
     running.store(false, Ordering::Relaxed);
 
     let iterations = thread_handle.join().unwrap();
     assert!(iterations > 0);
-    assert!(iterations < 10); // Should have stopped early
 }
 
 #[test]
 fn test_pause_and_resume_cycle() {
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
     let should_pause = Arc::new(AtomicBool::new(false));
     let running = Arc::new(AtomicBool::new(true));
+    let paused_count = Arc::new(AtomicUsize::new(0));
+    let resumed_count = Arc::new(AtomicUsize::new(0));
 
-    let should_pause_clone = should_pause.clone();
-    let running_clone = running.clone();
-
-    let thread_handle = thread::spawn(move || {
-        let mut paused_count = 0;
-        let mut resumed_count = 0;
-
-        while running_clone.load(Ordering::Relaxed) {
-            if should_pause_clone.load(Ordering::Relaxed) {
-                paused_count += 1;
-            } else {
-                resumed_count += 1;
+    let thread_handle = {
+        let should_pause = should_pause.clone();
+        let running = running.clone();
+        let paused_count = paused_count.clone();
+        let resumed_count = resumed_count.clone();
+        thread::spawn(move || {
+            while running.load(Ordering::Relaxed) {
+                if should_pause.load(Ordering::Relaxed) {
+                    paused_count.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    resumed_count.fetch_add(1, Ordering::Relaxed);
+                }
+                thread::sleep(Duration::from_millis(1));
             }
-            thread::sleep(Duration::from_millis(5));
-        }
+        })
+    };
 
-        (paused_count, resumed_count)
-    });
+    // Waits for the worker to observe a state instead of sleeping a fixed
+    // time (fixed sleeps raced on loaded CI runners).
+    let wait_until = |counter: &AtomicUsize, above: usize| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while counter.load(Ordering::Relaxed) <= above {
+            assert!(Instant::now() < deadline, "worker did not observe state");
+            thread::sleep(Duration::from_millis(1));
+        }
+    };
 
     // Pause
     should_pause.store(true, Ordering::Relaxed);
-    thread::sleep(Duration::from_millis(30));
+    wait_until(&paused_count, 0);
 
     // Resume
+    let resumed_before = resumed_count.load(Ordering::Relaxed);
     should_pause.store(false, Ordering::Relaxed);
-    thread::sleep(Duration::from_millis(30));
+    wait_until(&resumed_count, resumed_before);
 
     // Stop
     running.store(false, Ordering::Relaxed);
+    thread_handle.join().unwrap();
 
-    let (paused_count, resumed_count) = thread_handle.join().unwrap();
-    assert!(paused_count > 0, "Thread should have seen paused state");
-    assert!(resumed_count > 0, "Thread should have seen resumed state");
+    assert!(
+        paused_count.load(Ordering::Relaxed) > 0,
+        "Thread should have seen paused state"
+    );
+    assert!(
+        resumed_count.load(Ordering::Relaxed) > resumed_before,
+        "Thread should have seen resumed state"
+    );
 }
 
 #[test]
@@ -232,7 +259,9 @@ fn test_long_running_monitoring_simulation() {
 
     let thread_handle = thread::spawn(move || {
         let mut iterations = 0;
-        while running_clone.load(Ordering::Relaxed) {
+        // At least one cycle runs even if the stop lands before the thread
+        // is scheduled.
+        loop {
             if should_pause_clone.load(Ordering::Relaxed) {
                 // Simulating paused state
                 thread::sleep(Duration::from_millis(2));
@@ -241,6 +270,9 @@ fn test_long_running_monitoring_simulation() {
                 thread::sleep(Duration::from_millis(1));
             }
             iterations += 1;
+            if !running_clone.load(Ordering::Relaxed) {
+                break;
+            }
         }
         iterations
     });

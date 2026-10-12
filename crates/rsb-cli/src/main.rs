@@ -13,6 +13,7 @@ use rsb_sdk::server;
 use rsb_sdk::server::LoginFlow;
 use rsb_sdk::server::routes::check_fido2_auth;
 use rsb_sdk::utils::{calculate_retention_backups, ensure_directory_exists, send_healthcheck};
+use rsb_sdk::{BackupOptions, RestoreOptions, VerifyOptions};
 use rsb_sdk::{config, core, credentials::Fido2Manager};
 use std::fs;
 use std::io::IsTerminal;
@@ -281,26 +282,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut report_data = match perform_backup(
                 &cfg,
-                backup_mode,
-                key.as_deref(),
-                dry_run,
-                resume,
-                effective_threads, // ⚡ Use merged option
-                None,
+                BackupOptions {
+                    mode: Some(backup_mode.to_string()),
+                    dry_run,
+                    resume,
+                    max_threads: effective_threads, // ⚡ Use merged option
+                    ..Default::default()
+                }
+                .with_encryption_key(key.as_deref()),
             )
             .await
             {
                 Ok(data) => data,
                 Err(e) => {
                     send_healthcheck(&healthcheck_url, "/fail").await;
-                    return Err(e);
+                    return Err(e.into());
                 }
             };
 
             // Verify backup if requested
             if verify && !dry_run {
                 println!("🔍 Verifying backup integrity...");
-                match perform_verify(&cfg, None, false, false, None, None).await {
+                match perform_verify(&cfg, VerifyOptions::default()).await {
                     Ok(verify_report) => {
                         println!(
                             "✅ Verification passed: {} files verified",
@@ -433,12 +436,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let key = key.or_else(|| cfg.encryption_key.clone());
             let mut report_data = core::perform_restore(
                 &cfg,
-                snapshot.as_deref(),
-                target,
-                key.as_deref(),
-                force,
-                versioned,
-                None,
+                RestoreOptions {
+                    snapshot_id: snapshot.clone(),
+                    force,
+                    versioned,
+                    ..RestoreOptions::new(target)
+                }
+                .with_encryption_key(key.as_deref()),
             )
             .await?;
 
@@ -447,7 +451,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("🔍 Verifying restored files integrity...");
 
                 // Run verification on the backup data to ensure integrity
-                match perform_verify(&cfg, snapshot.as_deref(), false, false, None, None).await {
+                match perform_verify(
+                    &cfg,
+                    VerifyOptions {
+                        snapshot_id: snapshot.clone(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                {
                     Ok(verify_report) => {
                         println!("✅ Verification passed!");
                         println!("   📊 Snapshots verified: {}", verify_report.total_files);
@@ -546,14 +558,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if repair && use_fast {
                 println!("--repair performs a full check; ignoring --quick/--fast");
             }
-            let mut report_data = rsb_sdk::integrity::perform_verify_with_repair(
+            let mut report_data = perform_verify(
                 &cfg,
-                snapshot.as_deref(),
-                quiet,
-                use_fast,
-                repair,
-                None,
-                None,
+                VerifyOptions {
+                    snapshot_id: snapshot.clone(),
+                    quiet,
+                    fast: use_fast,
+                    repair,
+                    ..Default::default()
+                },
             )
             .await?;
             let failed = report_data.files_with_errors > 0 || !report_data.errors.is_empty();
@@ -632,7 +645,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if !dry_run && let Err(e) = core::perform_prune(&cfg, keep_count).await {
                 send_healthcheck(&healthcheck_url, "/fail").await;
-                return Err(e);
+                return Err(e.into());
             }
             send_healthcheck(&healthcheck_url, "").await;
             info!("Prune completed.");

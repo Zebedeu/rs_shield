@@ -1,10 +1,11 @@
 use crate::config::Config;
-use crate::core::cancellation::CancellationToken;
 use crate::core::file_processor;
 use crate::core::manifest::write_manifest;
 use crate::core::resource_monitor::spawn_resource_monitor;
+use crate::core::types::FileMetadata;
 use crate::core::types::FileStatus;
-use crate::core::types::{FileMetadata, ProgressCallback};
+use crate::error::RsbError;
+use crate::options::BackupOptions;
 use crate::report::ReportData;
 use crate::storage::{LockKind, RepoLock, Storage};
 use crate::utils::expand_path;
@@ -22,75 +23,43 @@ use super::progress;
 use super::stats::{Stats, StatsSummary};
 use super::threading;
 
-/// Performs a full file system backup
+/// Performs a file system backup of `config.source_path`.
+///
+/// Mode, key, dry-run, threads, progress callback and cancellation are
+/// given through [`BackupOptions`].
 pub async fn perform_backup(
     config: &Config,
-    mode: &str,
-    encryption_key: Option<&str>,
-    dry_run: bool,
-    resume: bool,
-    max_threads: Option<usize>,
-    on_progress: Option<ProgressCallback>,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
-    perform_backup_with_cancellation(
-        config,
-        mode,
-        encryption_key,
-        dry_run,
-        resume,
-        max_threads,
-        on_progress,
-        None,
-    )
-    .await
-}
-
-/// Performs a backup with cancellation support
-// TODO(fase 2): substituir por uma struct de opções.
-#[allow(clippy::too_many_arguments)]
-pub async fn perform_backup_with_cancellation(
-    config: &Config,
-    mode: &str,
-    encryption_key: Option<&str>,
-    dry_run: bool,
-    _resume: bool,
-    max_threads: Option<usize>,
-    on_progress: Option<ProgressCallback>,
-    cancellation_token: Option<CancellationToken>,
-) -> Result<ReportData, Box<dyn std::error::Error>> {
+    options: BackupOptions,
+) -> crate::error::Result<ReportData> {
     let start_time = Instant::now();
     let source_expanded = expand_path(&config.source_path);
     let source = source_expanded.as_path();
 
     if !source.is_dir() {
-        return Err(format!("Source path is not a directory: {}", source.display()).into());
+        return Err(RsbError::InvalidInput(format!(
+            "Source path is not a directory: {}",
+            source.display()
+        )));
     }
 
-    let storage = crate::core::storage_backend::get_storage(config).await?;
+    let storage =
+        crate::core::storage_backend::storage_or_from_config(options.storage.clone(), config)
+            .await?;
 
     // ====================== REPOSITORY LOCK ======================
     // Shared lock: concurrent backups are fine, but prune (exclusive) must
     // not garbage-collect data objects this backup writes before its
     // manifest exists. Dry-runs write nothing and take no lock.
+    let dry_run = options.dry_run;
     let repo_lock = if dry_run {
         None
     } else {
         Some(RepoLock::acquire(storage.clone(), LockKind::Shared, "backup").await?)
     };
 
-    let result = run_backup(
-        config,
-        source,
-        storage,
-        mode,
-        encryption_key,
-        dry_run,
-        max_threads,
-        on_progress,
-        cancellation_token,
-        start_time,
-    )
-    .await;
+    let result = run_backup(config, source, storage, &options, start_time)
+        .await
+        .map_err(RsbError::from);
 
     if let Some(lock) = repo_lock
         && let Err(e) = lock.release().await
@@ -100,19 +69,19 @@ pub async fn perform_backup_with_cancellation(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_backup(
     config: &Config,
     source: &Path,
     storage: Arc<dyn Storage>,
-    mode: &str,
-    encryption_key: Option<&str>,
-    dry_run: bool,
-    max_threads: Option<usize>,
-    on_progress: Option<ProgressCallback>,
-    cancellation_token: Option<CancellationToken>,
+    options: &BackupOptions,
     start_time: Instant,
 ) -> Result<ReportData, Box<dyn std::error::Error>> {
+    let mode = options.mode.as_deref().unwrap_or(&config.backup_mode);
+    let encryption_key = options.key();
+    let dry_run = options.dry_run;
+    let max_threads = options.max_threads;
+    let on_progress = options.on_progress.clone();
+    let cancellation_token = options.cancellation_token.clone();
     debug!(
         "🚀 Starting backup{}: {} -> {} (mode: {})",
         if dry_run { " (DRY-RUN)" } else { "" },
@@ -218,7 +187,8 @@ async fn run_backup(
                     } else {
                         stats_clone.inc_skipped();
                     }
-                    let _ = tx_clone.blocking_send((rel_path.clone(), metadata));
+                    let key = crate::core::manifest::manifest_key(rel_path);
+                    let _ = tx_clone.blocking_send((key, metadata));
                 }
                 Err(e) => {
                     stats_clone.inc_error();

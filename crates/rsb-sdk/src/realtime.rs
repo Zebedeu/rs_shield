@@ -1,4 +1,4 @@
-use crate::backup::perform_backup;
+use crate::backup::{BackupOptions, perform_backup};
 use crate::config::Config;
 use crate::utils::ensure_directory_exists;
 use chrono::{DateTime, Utc};
@@ -247,12 +247,12 @@ pub fn profile_backup_runner(mut config: Config, encryption_key: Option<String>)
                 handle
                     .block_on(perform_backup(
                         &config,
-                        "incremental",
-                        key_ref,
-                        false,
-                        false,
-                        config.max_threads,
-                        None,
+                        BackupOptions {
+                            mode: Some("incremental".to_string()),
+                            max_threads: config.max_threads,
+                            ..Default::default()
+                        }
+                        .with_encryption_key(key_ref),
                     ))
                     .map_err(|e| format!("backup failed: {}", e))
             })
@@ -808,34 +808,20 @@ pub async fn create_backup(
     let config = Config {
         source_path: src.to_string_lossy().to_string(),
         destination_path: backup_dst.to_string_lossy().to_string(),
-        exclude_patterns: crate::config::DEFAULT_EXCLUDE_PATTERNS
-            .iter()
-            .map(|&s| s.to_string())
-            .collect(),
         encryption_key: password.clone(),
-        backup_mode: "incremental".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
         encrypt_patterns: Some(vec!["*".to_string()]), // Encrypt all files
-        pause_on_low_battery: None,
-        s3: None,
-        s3_buckets: None,
-        pause_on_high_cpu: None,
         compression_level: Some(3),
-        max_threads: None,
-        channel_buffer_size: 8192,
+        ..Default::default()
     };
 
     // Use perform_backup to create backup with encryption and chunking
     match perform_backup(
         &config,
-        "incremental",
-        password.as_deref(),
-        false,
-        false,
-        None,
-        None,
+        BackupOptions {
+            mode: Some("incremental".to_string()),
+            ..Default::default()
+        }
+        .with_encryption_key(password.as_deref()),
     )
     .await
     {

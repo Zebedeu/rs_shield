@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 use crate::ui::{
     app::AppConfig,
     i18n::{Language, Theme, get_texts},
+    s3_settings,
     s3_tester::S3ConnectionTester,
 };
 
@@ -10,6 +11,34 @@ use crate::ui::{
 pub fn ConfigScreen() -> Element {
     let mut app_config = use_context::<AppConfig>();
     let texts = get_texts(app_config.language());
+    let mut remember_status = use_signal(|| None::<(bool, String)>);
+    let mut remember_busy = use_signal(|| false);
+
+    // Opt-in: grava as chaves no ficheiro cifrado em vez de só na sessão.
+    let on_remember = move |_| {
+        let access_key = app_config.s3_access_key();
+        let secret_key = app_config.s3_secret_key();
+        if access_key.trim().is_empty() || secret_key.trim().is_empty() {
+            remember_status.set(Some((false, texts.s3_remember_missing.to_string())));
+            return;
+        }
+        remember_busy.set(true);
+        remember_status.set(Some((true, texts.s3_remember_saving.to_string())));
+        spawn(async move {
+            // keyring + PBKDF2 são bloqueantes: fora da thread da UI.
+            let result = tokio::task::spawn_blocking(move || {
+                s3_settings::remember_credentials(&access_key, &secret_key)
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+            remember_busy.set(false);
+            match result {
+                Ok(_) => remember_status.set(Some((true, texts.s3_remember_ok.to_string()))),
+                Err(e) => remember_status.set(Some((false, format!("❌ {}", e)))),
+            }
+        });
+    };
 
     rsx! {
         div { class: "card",
@@ -175,6 +204,20 @@ pub fn ConfigScreen() -> Element {
                     placeholder: "AWS Secret Access Key",
                     value: "{app_config.s3_secret_key}",
                     oninput: move |evt| app_config.s3_secret_key.set(evt.value())
+                }
+            }
+
+            div { class: "form-group",
+                button {
+                    class: "btn-secondary",
+                    r#type: "button",
+                    disabled: remember_busy(),
+                    onclick: on_remember,
+                    "{texts.s3_remember_button}"
+                }
+                p { class: "hint", "{texts.s3_remember_hint}" }
+                if let Some((ok, msg)) = remember_status() {
+                    div { class: if ok { "info-box" } else { "error-box" }, "{msg}" }
                 }
             }
 

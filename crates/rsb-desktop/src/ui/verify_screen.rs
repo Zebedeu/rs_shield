@@ -7,8 +7,9 @@ use std::sync::Arc;
 use crate::ui::integrations_screen::IntegrationConfig;
 use rsb_sdk::core::{NotificationEvent, NotificationManager, NotificationPayload};
 use rsb_sdk::operation::operations_helpers::record_verify_operation;
-use rsb_sdk::{CancellationToken, config, perform_verify};
+use rsb_sdk::{CancellationToken, VerifyOptions, config, perform_verify};
 
+use crate::ui::s3_settings::S3Settings;
 use crate::ui::{
     app::AppConfig,
     error_handler::format_user_error,
@@ -91,56 +92,9 @@ pub fn VerifyScreen() -> Element {
             Some(key_val)
         };
 
-        let s3_bucket = app_config.s3_bucket();
-        let s3_region = app_config.s3_region();
-        let s3_endpoint = app_config.s3_endpoint();
-        let s3_access_key = app_config.s3_access_key();
-        let s3_secret_key = app_config.s3_secret_key();
-        // Credenciais do formulário: só em memória (o SDK ignora segredos no Config).
-        if !s3_access_key.is_empty() && !s3_secret_key.is_empty() {
-            rsb_sdk::core::storage_backend::set_session_s3_credentials(
-                &s3_access_key,
-                &s3_secret_key,
-            );
-        }
-
-        let s3_bucket_opt = if s3_bucket.is_empty() {
-            None
-        } else {
-            Some(s3_bucket)
-        };
-        let s3_region_opt = if s3_region.is_empty() {
-            None
-        } else {
-            Some(s3_region)
-        };
-        let s3_endpoint_opt = if s3_endpoint.is_empty() {
-            None
-        } else {
-            Some(s3_endpoint)
-        };
-        let s3_access_key_opt = if s3_access_key.is_empty() {
-            None
-        } else {
-            Some(s3_access_key)
-        };
-        let s3_secret_key_opt = if s3_secret_key.is_empty() {
-            None
-        } else {
-            Some(s3_secret_key)
-        };
-
-        let s3_config = if s3_bucket_opt.is_some() {
-            Some(config::S3Config {
-                bucket: s3_bucket_opt.clone(),
-                region: s3_region_opt.clone(),
-                endpoint: s3_endpoint_opt.clone(),
-                access_key: s3_access_key_opt,
-                secret_key: s3_secret_key_opt,
-            })
-        } else {
-            None
-        };
+        // Bucket/região/endpoint do ecrã; as chaves digitadas ficam só em
+        // memória (credenciais de sessão), nunca no Config.
+        let s3 = S3Settings::from_app(&app_config);
 
         spawn(async move {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(f64, String)>();
@@ -162,33 +116,32 @@ pub fn VerifyScreen() -> Element {
             });
 
             let res = async {
-                if bkp.as_os_str().is_empty() && s3_bucket_opt.is_none() {
+                if bkp.as_os_str().is_empty() && !s3.is_enabled() {
                     return Err(texts.define_backup_or_s3.to_string());
                 }
 
-                let cfg = config::Config {
+                let mut cfg = config::Config {
                     source_path: "dummy".to_string(),
                     destination_path: bkp.to_string_lossy().into_owned(),
                     exclude_patterns: vec![],
                     encryption_key: key_opt,
-                    pause_on_low_battery: None,
-                    encrypt_patterns: None,
-                    backup_mode: "incremental".to_string(),
-                    s3_bucket: s3_bucket_opt,
-                    s3_region: s3_region_opt,
-                    s3_endpoint: s3_endpoint_opt,
-                    s3: s3_config,
-                    s3_buckets: None,
-                    pause_on_high_cpu: None,
                     compression_level: Some(3),
-                    max_threads: None,
-                    channel_buffer_size: 8192,
+                    ..Default::default()
                 };
+                s3.apply_to(&mut cfg);
 
                 let token = cancellation_token();
-                perform_verify(&cfg, None, false, is_fast, Some(progress_cb), Some(token))
-                    .await
-                    .map_err(|e| e.to_string())
+                perform_verify(
+                    &cfg,
+                    VerifyOptions {
+                        fast: is_fast,
+                        on_progress: Some(progress_cb),
+                        cancellation_token: Some(token),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())
             }
             .await;
 

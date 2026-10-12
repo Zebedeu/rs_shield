@@ -1,6 +1,7 @@
 // storage_backend.rs - Performance + robustness version
 use crate::config::Config;
 use crate::credentials::CredentialsManager;
+use crate::error::RsbError;
 use crate::storage::{LocalStorage, S3Storage, Storage};
 use std::io::IsTerminal;
 use std::sync::{Arc, RwLock};
@@ -40,7 +41,7 @@ pub fn clear_session_s3_credentials() {
 /// Fails (instead of panicking) when S3 is configured but no credentials are
 /// available: release builds use `panic = "abort"`, so a panic here used to
 /// kill the whole desktop app.
-pub async fn get_storage(config: &Config) -> Result<Arc<dyn Storage>, String> {
+pub async fn get_storage(config: &Config) -> crate::error::Result<Arc<dyn Storage>> {
     // Priority: nested or flat S3 configuration (backward compatibility)
     let s3_config = config.s3.as_ref();
 
@@ -69,10 +70,10 @@ pub async fn get_storage(config: &Config) -> Result<Arc<dyn Storage>, String> {
                 }
                 Err(e) => {
                     error!("❌ Failed to load S3 credentials: {}", e);
-                    Err(format!(
+                    Err(RsbError::Auth(format!(
                         "S3 bucket '{}' is configured but credentials are unavailable: {}",
                         bucket, e
-                    ))
+                    )))
                 }
             }
         }
@@ -80,6 +81,19 @@ pub async fn get_storage(config: &Config) -> Result<Arc<dyn Storage>, String> {
             info!("📁 Using Local storage → path: {}", config.destination_path);
             Ok(Arc::new(LocalStorage::new(&config.destination_path)))
         }
+    }
+}
+
+/// Uses `injected` when given, otherwise builds the backend from `config`
+/// with [`get_storage`]. Lets callers reuse one `Arc<dyn Storage>` across
+/// operations (or inject e.g. [`crate::storage::MemoryStorage`]).
+pub async fn storage_or_from_config(
+    injected: Option<Arc<dyn Storage>>,
+    config: &Config,
+) -> crate::error::Result<Arc<dyn Storage>> {
+    match injected {
+        Some(storage) => Ok(storage),
+        None => get_storage(config).await,
     }
 }
 
@@ -122,22 +136,22 @@ async fn load_s3_credentials_securely(
     }
 
     // 3. Encrypted file (persistent)
-    if let Ok(home) = env::var("HOME") {
-        let cred_path = format!("{}/.rs-shield/s3_credentials.enc", home);
-        if std::path::Path::new(&cred_path).exists() {
-            match CredentialsManager::load_encrypted(&cred_path) {
-                Ok(creds) => {
-                    info!("🔑 S3 credentials loaded from encrypted file");
-                    return Ok(aws_credential_types::Credentials::new(
-                        creds.access_key.as_str(),
-                        creds.secret_key.as_str(),
-                        creds.session_token.as_ref().map(|s| s.to_string()),
-                        None,
-                        "rsb-encrypted",
-                    ));
-                }
-                Err(e) => warn!("Failed to load encrypted credentials: {}", e),
+    if let Some(cred_path) =
+        CredentialsManager::default_credentials_path().and_then(|p| p.to_str().map(str::to_string))
+        && std::path::Path::new(&cred_path).exists()
+    {
+        match CredentialsManager::load_encrypted(&cred_path) {
+            Ok(creds) => {
+                info!("🔑 S3 credentials loaded from encrypted file");
+                return Ok(aws_credential_types::Credentials::new(
+                    creds.access_key.as_str(),
+                    creds.secret_key.as_str(),
+                    creds.session_token.as_ref().map(|s| s.to_string()),
+                    None,
+                    "rsb-encrypted",
+                ));
             }
+            Err(e) => warn!("Failed to load encrypted credentials: {}", e),
         }
     }
 

@@ -646,19 +646,10 @@ fn test_config(src: &std::path::Path, dst: &std::path::Path) -> Config {
         source_path: src.to_string_lossy().to_string(),
         destination_path: dst.to_string_lossy().to_string(),
         exclude_patterns: vec![],
-        encryption_key: None,
-        backup_mode: "incremental".to_string(),
-        s3_bucket: None,
-        s3_region: None,
-        s3_endpoint: None,
         encrypt_patterns: Some(vec!["*".to_string()]),
-        pause_on_low_battery: None,
-        s3: None,
-        s3_buckets: None,
-        pause_on_high_cpu: None,
         compression_level: Some(3),
         max_threads: Some(2),
-        channel_buffer_size: 8192,
+        ..Default::default()
     }
 }
 

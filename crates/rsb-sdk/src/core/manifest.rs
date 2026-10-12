@@ -2,6 +2,7 @@
 use super::types::{ChunkMetadata, FileMetadata};
 use crate::crypto::KeyCache;
 use crate::crypto::encrypt_data_with_key;
+use crate::error::{CryptoErrorKind, RsbError};
 use crate::storage::Storage;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,17 @@ pub struct ChunkReport {
     pub file_path: PathBuf,
     pub chunks: Vec<ChunkMetadata>,
     pub total_chunks: usize,
+}
+
+/// Manifest key of a source-relative path: components joined with `/`
+/// whatever the platform, so a manifest written on Windows restores
+/// everywhere (restore refuses `\` in entries).
+pub fn manifest_key(rel: &std::path::Path) -> PathBuf {
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    PathBuf::from(parts.join("/"))
 }
 
 /// Parses the timestamp encoded in a snapshot name or path.
@@ -183,10 +195,18 @@ pub async fn read_manifest_cached(
         match cache.decrypt(&raw) {
             Ok(data) => data,
             Err(e) => {
-                // 🐛 Fix: Provide more helpful error message
-                let error_msg = e.to_string().to_lowercase();
-                let user_message =
-                    if error_msg.contains("authentication") || error_msg.contains("tag") {
+                // 🐛 Fix: Provide more helpful error message.
+                // Classificação tipada (não por texto da mensagem): tag AEAD
+                // inválida ⇒ chave errada; dados mal formados ⇒ corrupção.
+                let kind = if crate::crypto::is_authentication_error(&e) {
+                    CryptoErrorKind::AuthenticationFailed
+                } else if e.kind() == std::io::ErrorKind::InvalidData {
+                    CryptoErrorKind::Corrupt
+                } else {
+                    CryptoErrorKind::Other
+                };
+                let user_message = match kind {
+                    CryptoErrorKind::AuthenticationFailed => {
                         format!(
                             "❌ Decryption failed (wrong key)\n\n\
                         The backup is encrypted but the key provided is incorrect.\n\
@@ -194,7 +214,8 @@ pub async fn read_manifest_cached(
                         Technical: {}",
                             e
                         )
-                    } else if error_msg.contains("invalid") || error_msg.contains("corrupt") {
+                    }
+                    CryptoErrorKind::Corrupt => {
                         format!(
                             "⚠️  Backup metadata may be corrupted\n\n\
                         The backup data cannot be read, even with the provided key.\n\
@@ -206,7 +227,8 @@ pub async fn read_manifest_cached(
                         Technical: {}",
                             e
                         )
-                    } else {
+                    }
+                    CryptoErrorKind::Other => {
                         format!(
                             "❌ Decryption error\n\n\
                         Could not decrypt backup metadata.\n\
@@ -217,9 +239,10 @@ pub async fn read_manifest_cached(
                         Technical: {}",
                             e
                         )
-                    };
+                    }
+                };
                 error!("Decryption error for {}: {}", path, e);
-                return Err(user_message.into());
+                return Err(Box::new(RsbError::crypto(kind, user_message)));
             }
         }
     } else {
@@ -354,5 +377,15 @@ mod tests {
         assert_eq!(storage.list("snapshots").await.unwrap().len(), 2);
         let (latest, _) = find_latest_snapshot(&storage, None, None).await.unwrap();
         assert_eq!(latest, b, "the most recently written manifest must win");
+    }
+
+    #[test]
+    fn manifest_key_uses_forward_slashes() {
+        let rel: PathBuf = ["sub", "dir", "b.txt"].iter().collect();
+        assert_eq!(manifest_key(&rel), PathBuf::from("sub/dir/b.txt"));
+        assert_eq!(
+            manifest_key(std::path::Path::new("a.txt")),
+            PathBuf::from("a.txt")
+        );
     }
 }

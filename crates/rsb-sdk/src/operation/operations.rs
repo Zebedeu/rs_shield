@@ -144,19 +144,33 @@ pub fn ensure_history_directory() -> Result<(), String> {
     Ok(())
 }
 
-// TODO(fase 2): substituir por uma struct de opções.
-#[allow(clippy::too_many_arguments)]
-pub fn create_operation(
-    operation_type: String,
-    status: String,
-    files_processed: usize,
-    files_skipped: usize,
-    files_with_errors: usize,
-    duration_secs: u64,
-    backup_size: String,
-    source_path: Option<String>,
-    destination_path: Option<String>,
-) -> Operation {
+/// Dados de uma operação a registar (o `id` e o `timestamp` são gerados
+/// por [`create_operation`]).
+#[derive(Debug, Clone, Default)]
+pub struct NewOperation {
+    pub operation_type: String,
+    pub status: String,
+    pub files_processed: usize,
+    pub files_skipped: usize,
+    pub files_with_errors: usize,
+    pub duration_secs: u64,
+    pub backup_size: String,
+    pub source_path: Option<String>,
+    pub destination_path: Option<String>,
+}
+
+pub fn create_operation(op: NewOperation) -> Operation {
+    let NewOperation {
+        operation_type,
+        status,
+        files_processed,
+        files_skipped,
+        files_with_errors,
+        duration_secs,
+        backup_size,
+        source_path,
+        destination_path,
+    } = op;
     Operation {
         id: format!("{}", chrono::Utc::now().timestamp_millis()),
         operation_type,

@@ -19,6 +19,7 @@ pub mod profile_manager_screen;
 pub mod prune_screen;
 mod realtime_sync_screen;
 mod restore_screen;
+pub mod s3_settings;
 pub mod s3_tester;
 mod schedule_screen;
 mod shared;
