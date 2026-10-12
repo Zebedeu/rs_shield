@@ -23,11 +23,7 @@ use tokio::sync::Mutex;
 use tracing::{Level, info, warn};
 
 #[derive(Parser)]
-#[command(
-    name = "rsb-cli",
-    version = "0.1.0-alpha.4",
-    about = "Rust Shield Backup"
-)]
+#[command(name = "rsb-cli", version, about = "Rust Shield Backup")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
