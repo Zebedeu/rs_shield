@@ -94,7 +94,7 @@ pub fn check_decryptor(d: &dyn BlobDecryptor, blob: &[u8]) -> io::Result<Vec<u8>
 /// Fuzz target: arbitrary bytes into the blob decrypt paths.
 ///
 /// The first byte selects how the input is framed. Fully arbitrary blobs of
-/// at least [`MIN_BLOB_LEN`] bytes would carry a random salt (and, for v2,
+/// at least `MIN_BLOB_LEN` bytes would carry a random salt (and, for v2,
 /// an arbitrary PBKDF2 iteration count up to 10M) and force a fresh PBKDF2
 /// per input, which is a throughput problem rather than a bug, so those
 /// cases splice in a fixed salt/iteration count instead.
