@@ -136,8 +136,14 @@ pub async fn prune_with_storage(
     encryption_key: Option<&str>,
     delete_snapshots: &[String],
 ) -> Result<(), RsbError> {
+    // Unlock the repository key before deleting anything: a wrong password
+    // must fail before any snapshot is removed.
+    let cache = match encryption_key {
+        Some(k) => Some(KeyCache::open(&*storage, k.as_bytes()).await?),
+        None => None,
+    };
     let lock = RepoLock::acquire(storage.clone(), LockKind::Exclusive, "prune").await?;
-    let result = prune_locked(&*storage, encryption_key, delete_snapshots).await;
+    let result = prune_locked(&*storage, cache.as_ref(), delete_snapshots).await;
     if let Err(e) = lock.release().await {
         warn!("Failed to release repository lock after prune: {}", e);
     }
@@ -146,7 +152,7 @@ pub async fn prune_with_storage(
 
 async fn prune_locked(
     storage: &dyn Storage,
-    encryption_key: Option<&str>,
+    cache: Option<&KeyCache>,
     delete_snapshots: &[String],
 ) -> Result<(), RsbError> {
     let mut deleted_count = 0;
@@ -175,12 +181,11 @@ async fn prune_locked(
         return Ok(());
     }
 
-    let cache = encryption_key.map(|k| KeyCache::new(k.as_bytes()));
     let mut keep_hashes = HashSet::new();
     for snap in keep_snapshots {
         // Any unreadable manifest aborts GC (fail-closed: we cannot know
         // what it references).
-        let content = read_manifest_cached(storage, &snap, cache.as_ref())
+        let content = read_manifest_cached(storage, &snap, cache)
             .await
             .map_err(RsbError::from)?;
         let manifest: HashMap<PathBuf, FileMetadata> = toml::from_str(&content)?;

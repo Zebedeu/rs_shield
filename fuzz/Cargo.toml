@@ -1,0 +1,47 @@
+[package]
+name = "rsb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rsb-sdk = { path = "../crates/rsb-sdk", features = ["fuzzing"] }
+
+# Standalone crate: excluded from the main workspace (see root Cargo.toml).
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "blob_decrypt"
+path = "fuzz_targets/blob_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest_parse"
+path = "fuzz_targets/manifest_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zstd_stream_decode"
+path = "fuzz_targets/zstd_stream_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lock_parse"
+path = "fuzz_targets/lock_parse.rs"
+test = false
+doc = false
+bench = false

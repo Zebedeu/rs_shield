@@ -27,8 +27,11 @@ pub enum CryptoErrorKind {
 #[derive(Debug, thiserror::Error)]
 pub enum RsbError {
     /// Erro de I/O (disco, rede do storage, lock do repositório, ...).
+    ///
+    /// An `io::Error` carrying a typed [`crate::crypto::CryptoError`] is
+    /// converted to [`RsbError::Crypto`] instead (see `From<io::Error>`).
     #[error(transparent)]
-    Io(#[from] io::Error),
+    Io(io::Error),
     /// Perfil/configuração inválido ou ilegível.
     #[error("{0}")]
     Config(String),
@@ -93,13 +96,28 @@ impl RsbError {
     /// (`RsbError`, `io::Error`, `CryptoError`); senão guarda a mensagem.
     fn from_dyn(e: &(dyn std::error::Error + 'static)) -> Option<Self> {
         if let Some(c) = e.downcast_ref::<crate::crypto::CryptoError>() {
-            return Some(match c {
-                crate::crypto::CryptoError::AuthenticationFailed => {
-                    RsbError::crypto(CryptoErrorKind::AuthenticationFailed, c.to_string())
-                }
-            });
+            return Some(Self::from_crypto(*c, c.to_string()));
         }
         None
+    }
+
+    fn from_crypto(c: crate::crypto::CryptoError, message: String) -> Self {
+        use crate::crypto::CryptoError as C;
+        let kind = match c {
+            C::AuthenticationFailed => CryptoErrorKind::AuthenticationFailed,
+            C::Malformed => CryptoErrorKind::Corrupt,
+            C::RepoKeyRequired | C::KdfLimitExceeded => CryptoErrorKind::Other,
+        };
+        RsbError::crypto(kind, message)
+    }
+}
+
+impl From<io::Error> for RsbError {
+    fn from(e: io::Error) -> Self {
+        match crate::crypto::crypto_error_of(&e) {
+            Some(c) => RsbError::from_crypto(c, e.to_string()),
+            None => RsbError::Io(e),
+        }
     }
 }
 
@@ -141,7 +159,7 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for RsbError {
             Err(e) => e,
         };
         let e = match e.downcast::<io::Error>() {
-            Ok(io) => return RsbError::Io(*io),
+            Ok(io) => return RsbError::from(*io),
             Err(e) => e,
         };
         RsbError::from_dyn(&*e).unwrap_or_else(|| RsbError::Other(e.to_string()))
@@ -155,7 +173,7 @@ impl From<Box<dyn std::error::Error>> for RsbError {
             Err(e) => e,
         };
         let e = match e.downcast::<io::Error>() {
-            Ok(io) => return RsbError::Io(*io),
+            Ok(io) => return RsbError::from(*io),
             Err(e) => e,
         };
         RsbError::from_dyn(&*e).unwrap_or_else(|| RsbError::Other(e.to_string()))
@@ -202,6 +220,22 @@ mod tests {
 
         let auth: io::Error = crate::crypto::CryptoError::AuthenticationFailed.into();
         assert!(RsbError::from(auth).is_authentication_failure());
+        let auth: io::Error = crate::crypto::CryptoError::AuthenticationFailed.into();
+        assert!(matches!(
+            RsbError::from(auth),
+            RsbError::Crypto {
+                kind: CryptoErrorKind::AuthenticationFailed,
+                ..
+            }
+        ));
+        let bad: io::Error = crate::crypto::CryptoError::Malformed.into();
+        assert!(matches!(
+            RsbError::from(bad),
+            RsbError::Crypto {
+                kind: CryptoErrorKind::Corrupt,
+                ..
+            }
+        ));
 
         let boxed: Box<dyn std::error::Error> =
             Box::new(crate::crypto::CryptoError::AuthenticationFailed);

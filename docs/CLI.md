@@ -232,6 +232,77 @@ rsb verify --config mybackup.toml --snapshot 2026-05-25T10:30:00
 rsb verify --config mybackup.toml --report
 ```
 
+### Repository Key (format v3)
+
+Encrypted repositories keep a random data key (DEK) in `keys/repo.key`,
+wrapped with your password (Argon2id). The first encrypted backup creates it
+automatically. See [FORMAT.md](FORMAT.md) for details. Every `rsb key`
+command requires an authenticated session (`rsb login`) and only reads
+passwords from an interactive prompt (never from arguments or the
+environment).
+
+```bash
+# Create keys/repo.key explicitly (upgrades an existing v1/v2 repository;
+# enter the password of the existing backups). If v1/v2 data exists, it
+# shows the object count/size and offers to re-encrypt it as v3 right away
+# (`--yes` skips the question, e.g. in scripts).
+rsb key init mybackup.toml
+rsb key init --repo /path/to/backup --yes
+
+# Re-encrypt every v1/v2 (pre-v3) object and manifest as v3, verify the
+# whole repository, then drop the old password from the key file.
+# Resumable: after an interruption (crash, Ctrl-C) just run it again.
+rsb key migrate mybackup.toml
+
+# Change the password (rewraps the key; no backup data is rewritten).
+# Refused while v1/v2 data remains: run `rsb key migrate` first.
+rsb key change-password mybackup.toml
+
+# Optional Argon2 tuning (minimums: --m-cost-kib 19456, --t-cost 2)
+rsb key change-password mybackup.toml --m-cost-kib 131072 --t-cost 3
+
+# Back up the key file: to a file created with mode 0600 ...
+rsb key export mybackup.toml --output ~/safe/repo.key
+# ... or as a printable page (base32 groups, a checksum per line)
+rsb key export mybackup.toml --paper
+
+# Restore a lost or damaged key file (JSON or the retyped paper form).
+# Checks the password and that the key decrypts this repository; refuses to
+# replace a different existing key file unless --force (which backs it up
+# to keys/repo.key.bak-<timestamp> first).
+rsb key import ~/safe/repo.key mybackup.toml
+rsb key import paper-key.txt --repo /path/to/backup --force
+
+# Generate a new DEK and re-encrypt every object and manifest under it
+# (requires a completed `rsb key migrate`). Resumable: run it again after
+# an interruption. Old exports of the key file stop working afterwards.
+rsb key rotate mybackup.toml
+```
+
+| Command | Rewrites data | Needs exclusive lock | Resumable |
+|---------|---------------|----------------------|-----------|
+| `init` | no (unless it runs the migration) | yes | — |
+| `migrate` | v1/v2 objects and manifests | yes | yes |
+| `change-password` | no | yes | — |
+| `export` | no | no | — |
+| `import` | no (writes `keys/repo.key`) | yes | — |
+| `rotate` | every encrypted object and manifest | yes | yes |
+
+Notes:
+
+* An export holds the DEK wrapped by the password: it is useless without the
+  password, but together with it decrypts every backup. Store it like the
+  password. The unwrapped DEK is never printed.
+* While `migrate` or `rotate` is interrupted, backups, restores, verify and
+  prune keep working (every object is either fully old or fully new).
+  `verify --fast` may report stored-hash mismatches until the command is
+  run again, because manifests are updated last; a full `verify` passes.
+* After a rotation, keep the new key file (`rsb key export`) and discard old
+  exports and copies: they no longer open the data.
+
+> ⚠️ Keep a copy of `keys/repo.key` (`rsb key export`): without it, v3
+> backups cannot be decrypted, even with the password.
+
 ### Snapshot Management
 
 Manage backup snapshots and versions.

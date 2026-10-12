@@ -44,6 +44,7 @@ fn test_file_metadata_basic() {
         stored_size: None,
         chunks: None,
         compressed: true,
+        size: None,
     };
 
     assert_eq!(metadata.hash, "file_hash_123");
@@ -61,6 +62,7 @@ fn test_file_metadata_encrypted() {
         stored_size: Some(2048),
         chunks: None,
         compressed: true,
+        size: None,
     };
 
     assert!(metadata.encrypted);
@@ -91,6 +93,7 @@ fn test_file_metadata_with_chunks() {
         stored_size: Some(2 * CHUNK_SIZE as u64),
         chunks: Some(chunks.clone()),
         compressed: true,
+        size: None,
     };
 
     assert!(metadata.chunks.is_some());
@@ -106,6 +109,7 @@ fn test_file_metadata_no_compression() {
         stored_size: None,
         chunks: None,
         compressed: false,
+        size: None,
     };
 
     assert!(!metadata.compressed);
@@ -120,6 +124,7 @@ fn test_file_metadata_serialization() {
         stored_size: Some(5000),
         chunks: None,
         compressed: true,
+        size: None,
     };
 
     let json = serde_json::to_string(&metadata).expect("Failed to serialize");
@@ -163,6 +168,7 @@ fn test_file_metadata_large_file() {
         stored_size: Some(total_size),
         chunks: Some(chunks),
         compressed: true,
+        size: None,
     };
 
     assert_eq!(metadata.stored_size.unwrap(), total_size);
@@ -179,6 +185,7 @@ fn test_file_metadata_clone() {
         stored_size: Some(1000),
         chunks: None,
         compressed: true,
+        size: None,
     };
 
     let cloned = original.clone();

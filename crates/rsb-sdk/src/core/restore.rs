@@ -1,7 +1,7 @@
 use super::manifest::find_latest_snapshot_cached;
 use super::types::FileMetadata;
 use crate::config::Config;
-use crate::crypto::KeyCache;
+use crate::crypto::{BLOB_MAGIC_V3, CryptoError, KeyCache};
 use crate::options::RestoreOptions;
 use crate::report::ReportData;
 use crate::storage::{Storage, sync_dir};
@@ -51,8 +51,13 @@ pub async fn restore_from_storage(
     // 🐛 Fix: Validate backup structure before attempting restore
     validate_backup_structure(storage).await?;
 
-    // One PBKDF2 per salt for the whole restore instead of one per blob.
-    let key_cache = encryption_key.map(|k| KeyCache::new(k.as_bytes()));
+    // Unlocks keys/repo.key first (a wrong password fails here, before any
+    // blob is read); v1/v2 blobs use one PBKDF2 per salt for the whole
+    // restore instead of one per blob.
+    let key_cache = match encryption_key {
+        Some(k) => Some(KeyCache::open(storage, k.as_bytes()).await?),
+        None => None,
+    };
 
     let (manifest_path, manifest_content) =
         find_latest_snapshot_cached(storage, snapshot_id, key_cache.as_ref()).await?;
@@ -216,10 +221,14 @@ async fn restore_entry(
         }
     })?;
 
-    let blobs: Vec<(String, Option<&str>)> = match &metadata.chunks {
+    let blobs: Vec<BlobRef<'_>> = match &metadata.chunks {
         Some(chunks) => chunks
             .iter()
-            .map(|c| (format!("data/{}/{}", kind, c.hash), Some(c.hash.as_str())))
+            .map(|c| BlobRef {
+                path: format!("data/{}/{}", kind, c.hash),
+                object_id: c.hash.as_str(),
+                chunk_hash: Some(c.hash.as_str()),
+            })
             .collect(),
         None => {
             let data_path = format!("data/{}/{}", kind, metadata.hash);
@@ -234,7 +243,11 @@ async fn restore_entry(
                 }
                 Err(e) => return Err(format!("Failed to restore {}: {}", rel_path.display(), e)),
             }
-            vec![(data_path, None)]
+            vec![BlobRef {
+                path: data_path,
+                object_id: metadata.hash.as_str(),
+                chunk_hash: None,
+            }]
         }
     };
 
@@ -245,6 +258,10 @@ async fn restore_entry(
         key,
         &metadata.hash,
         metadata.compressed,
+        OutputLimits {
+            file: metadata.max_plain_size(),
+            blob: metadata.max_object_plain_size(),
+        },
     )
     .await
     .map_err(|e| {
@@ -350,6 +367,7 @@ struct VerifiedOutput {
     tmp: PathBuf,
     file: tokio::fs::File,
     hasher: blake3::Hasher,
+    written: u64,
 }
 
 impl VerifiedOutput {
@@ -376,11 +394,13 @@ impl VerifiedOutput {
             tmp,
             file,
             hasher: blake3::Hasher::new(),
+            written: 0,
         })
     }
 
     async fn write(&mut self, data: &[u8]) -> io::Result<()> {
         self.hasher.update(data);
+        self.written += data.len() as u64;
         self.file.write_all(data).await
     }
 
@@ -407,9 +427,11 @@ const STREAM_BUF: usize = 1024 * 1024;
 
 /// Process-wide memory budget (MiB) for blobs being restored concurrently.
 ///
-/// Unencrypted blobs stream with constant memory (two `STREAM_BUF` buffers).
-/// Encrypted blobs must be held whole once (AES-GCM is authenticated as a
-/// single unit), so each reserves its size from this budget; concurrent
+/// Unencrypted blobs stream with constant memory (two `STREAM_BUF` buffers),
+/// and so do v3 encrypted blobs (plus one ciphertext chunk, at most
+/// 16 MiB + 16 bytes). v1/v2 encrypted blobs must be held whole once
+/// (one-shot AES-GCM is authenticated as a single unit), so each reserves
+/// its size from this budget; concurrent
 /// restores (CLI + desktop, parallel callers) wait instead of stacking many
 /// large blobs in memory. A blob larger than the budget takes all of it and
 /// runs alone, so peak blob memory is max(budget, largest blob).
@@ -417,27 +439,60 @@ pub const RESTORE_MEM_BUDGET_MIB: u32 = 512;
 static RESTORE_MEM_BUDGET: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(RESTORE_MEM_BUDGET_MIB as usize);
 
-/// Budget permits (MiB) needed to restore one blob of `blob_size` bytes.
-fn budget_permits(blob_size: Option<u64>, encrypted: bool) -> u32 {
+/// Budget permits (MiB) needed to restore one blob while holding `held`
+/// extra bytes (a whole v1/v2 blob, or one v3 ciphertext chunk).
+fn budget_permits(held: Option<u64>) -> u32 {
     const MIB: u64 = 1024 * 1024;
     let buffers = (2 * STREAM_BUF as u64).div_ceil(MIB);
-    let held = if encrypted {
-        blob_size.unwrap_or(0).div_ceil(MIB)
-    } else {
-        0
-    };
+    let held = held.unwrap_or(0).div_ceil(MIB);
     (buffers + held).clamp(1, RESTORE_MEM_BUDGET_MIB as u64) as u32
+}
+
+/// One stored object making up (part of) a restored file.
+struct BlobRef<'a> {
+    /// Storage key, `data/<enc|clear>/<hash>`.
+    path: String,
+    /// Object id bound into v3 blobs (the content hash).
+    object_id: &'a str,
+    /// Expected hash of this blob's plaintext (multipart chunks only).
+    chunk_hash: Option<&'a str>,
+}
+
+/// Largest decoded size accepted for a whole file and for each of its
+/// blobs (from the manifest entry, see `FileMetadata::max_plain_size`).
+#[derive(Debug, Clone, Copy)]
+struct OutputLimits {
+    file: u64,
+    blob: u64,
 }
 
 /// Output side of a blob decode: feeds the optional per-chunk hasher and the
 /// verified temp file (which hashes the full file incrementally).
+///
+/// Enforces the output limits as data arrives, so a malicious repository
+/// (e.g. a zstd bomb) cannot fill the disk before the final hash check:
+/// writing past a limit fails with `io::ErrorKind::FileTooLarge` and the
+/// temp file is removed by the caller.
 struct BlobSink<'a> {
     out: &'a mut VerifiedOutput,
     chunk_hasher: Option<&'a mut blake3::Hasher>,
+    blob_written: u64,
+    limits: OutputLimits,
 }
 
 impl BlobSink<'_> {
     async fn write(&mut self, data: &[u8]) -> io::Result<()> {
+        let len = data.len() as u64;
+        if self.blob_written + len > self.limits.blob {
+            return Err(super::limits::too_large(
+                "Restored object",
+                self.limits.blob,
+            ));
+        }
+        if self.out.written + len > self.limits.file {
+            return Err(super::limits::too_large("Restored file", self.limits.file));
+        }
+        self.blob_written += len;
         if let Some(h) = self.chunk_hasher.as_deref_mut() {
             h.update(data);
         }
@@ -445,9 +500,81 @@ impl BlobSink<'_> {
     }
 }
 
-/// Copies `src` to `sink`, zstd-decompressing on the fly when `compressed`.
-/// Memory is bounded by `inbuf` + `outbuf` whatever the blob size or the
-/// compression ratio (no decompression-bomb amplification).
+/// Push-based decoder: feeds decrypted/raw input to `sink`,
+/// zstd-decompressing on the fly when `compressed`. Memory is bounded by
+/// the caller's `outbuf` whatever the blob size or compression ratio (no
+/// decompression-bomb amplification).
+struct PayloadDecoder {
+    zstd: Option<zstd::stream::raw::Decoder<'static>>,
+    saw_input: bool,
+    frame_complete: bool,
+}
+
+impl PayloadDecoder {
+    fn new(compressed: bool) -> io::Result<Self> {
+        Ok(Self {
+            zstd: if compressed {
+                Some(zstd::stream::raw::Decoder::new()?)
+            } else {
+                None
+            },
+            saw_input: false,
+            frame_complete: false,
+        })
+    }
+
+    async fn push(
+        &mut self,
+        input: &[u8],
+        outbuf: &mut [u8],
+        sink: &mut BlobSink<'_>,
+    ) -> io::Result<()> {
+        use zstd::stream::raw::{InBuffer, Operation, OutBuffer};
+        if input.is_empty() {
+            return Ok(());
+        }
+        let Some(decoder) = self.zstd.as_mut() else {
+            return sink.write(input).await;
+        };
+        self.saw_input = true;
+        let mut consumed = 0;
+        loop {
+            let (used, produced, hint) = {
+                let mut inb = InBuffer::around(&input[consumed..]);
+                let mut outb = OutBuffer::around(&mut *outbuf);
+                let hint = decoder.run(&mut inb, &mut outb)?;
+                (inb.pos(), outb.pos(), hint)
+            };
+            consumed += used;
+            // Only calls that made progress tell us about the frame: once a
+            // frame ends, an extra empty call reports the next frame's hint.
+            if used > 0 || produced > 0 {
+                self.frame_complete = hint == 0;
+            }
+            if produced > 0 {
+                sink.write(&outbuf[..produced]).await?;
+            }
+            // Input exhausted and the decoder has nothing more to flush. A
+            // short (non-full) output is NOT enough: zstd may return early at
+            // block boundaries while still holding decoded data.
+            if consumed == input.len() && produced == 0 {
+                return Ok(());
+            }
+        }
+    }
+
+    fn finish(self) -> io::Result<()> {
+        if self.saw_input && !self.frame_complete {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "Truncated or corrupt compressed data",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Copies `src` to `sink` through a [`PayloadDecoder`].
 async fn decode_into<R>(
     src: &mut R,
     compressed: bool,
@@ -458,90 +585,104 @@ async fn decode_into<R>(
 where
     R: AsyncRead + Unpin + ?Sized,
 {
-    if !compressed {
-        loop {
-            let n = src.read(inbuf).await?;
-            if n == 0 {
-                return Ok(());
-            }
-            sink.write(&inbuf[..n]).await?;
-        }
-    }
-
-    use zstd::stream::raw::{Decoder, InBuffer, Operation, OutBuffer};
-    let mut decoder = Decoder::new()?;
-    let mut saw_input = false;
-    let mut frame_complete = false;
+    let mut decoder = PayloadDecoder::new(compressed)?;
     loop {
         let n = src.read(inbuf).await?;
         if n == 0 {
             break;
         }
-        saw_input = true;
-        let mut consumed = 0;
-        loop {
-            let (used, produced, hint) = {
-                let mut input = InBuffer::around(&inbuf[consumed..n]);
-                let mut output = OutBuffer::around(&mut *outbuf);
-                let hint = decoder.run(&mut input, &mut output)?;
-                (input.pos(), output.pos(), hint)
-            };
-            consumed += used;
-            // Only calls that made progress tell us about the frame: once a
-            // frame ends, an extra empty call reports the next frame's hint.
-            if used > 0 || produced > 0 {
-                frame_complete = hint == 0;
-            }
-            if produced > 0 {
-                sink.write(&outbuf[..produced]).await?;
-            }
-            // Input exhausted and the decoder has nothing more to flush. A
-            // short (non-full) output is NOT enough: zstd may return early at
-            // block boundaries while still holding decoded data.
-            if consumed == n && produced == 0 {
-                break;
-            }
-        }
+        decoder.push(&inbuf[..n], outbuf, sink).await?;
     }
-    if saw_input && !frame_complete {
-        return Err(io::Error::new(
-            ErrorKind::InvalidData,
-            "Truncated or corrupt compressed data",
-        ));
-    }
-    Ok(())
+    decoder.finish()
 }
 
-/// Reads a whole (encrypted) blob into one allocation sized from the
-/// object's metadata (no grow-and-copy, no collected intermediate buffers).
-async fn read_blob_exact(
+/// Reads up to `buf.len()` bytes (fewer only at EOF).
+async fn read_up_to<R>(src: &mut R, buf: &mut [u8]) -> io::Result<usize>
+where
+    R: AsyncRead + Unpin + ?Sized,
+{
+    let mut filled = 0;
+    while filled < buf.len() {
+        let n = src.read(&mut buf[filled..]).await?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    Ok(filled)
+}
+
+/// Restores one encrypted blob: v3 is decrypted chunk by chunk (bounded
+/// memory, every chunk authenticated before it is written); v1/v2 blobs are
+/// read whole and decrypted in place.
+async fn decode_encrypted_blob(
     storage: &dyn Storage,
-    data_path: &str,
-    size_hint: Option<u64>,
-) -> io::Result<Vec<u8>> {
-    // The hint comes from storage metadata: cap the up-front allocation.
+    blob: &BlobRef<'_>,
+    key: &KeyCache,
+    compressed: bool,
+    outbuf: &mut [u8],
+    sink: &mut BlobSink<'_>,
+) -> io::Result<()> {
+    let mut reader = storage.read_stream(&blob.path).await?;
+    let mut magic = [0u8; 8];
+    let got = read_up_to(&mut reader, &mut magic).await?;
+
+    if got == magic.len() && &magic == BLOB_MAGIC_V3 {
+        let repo_key = key
+            .repo_key()
+            .ok_or_else(|| io::Error::from(CryptoError::RepoKeyRequired))?;
+        let mut dec = repo_key
+            .stream_decryptor(blob.object_id, &magic, reader)
+            .await?;
+        let chunk = dec.header().chunk_size as u64 + crate::crypto::stream::V3_TAG_LEN as u64;
+        let _permit = RESTORE_MEM_BUDGET
+            .acquire_many(budget_permits(Some(chunk)))
+            .await
+            .map_err(io::Error::other)?;
+        let mut decoder = PayloadDecoder::new(compressed)?;
+        while let Some(plain) = dec.next_chunk().await? {
+            decoder.push(plain, outbuf, sink).await?;
+        }
+        return decoder.finish();
+    }
+
+    let size = storage.size(&blob.path).await?;
+    let _permit = RESTORE_MEM_BUDGET
+        .acquire_many(budget_permits(size))
+        .await
+        .map_err(io::Error::other)?;
+    // The size hint comes from storage metadata: cap the up-front allocation.
     const MAX_PREALLOC: u64 = 1024 * 1024 * 1024;
-    let cap = size_hint.unwrap_or(0).min(MAX_PREALLOC) as usize;
-    let mut buf = Vec::with_capacity(cap);
-    let mut reader = storage.read_stream(data_path).await?;
-    reader.read_to_end(&mut buf).await?;
-    Ok(buf)
+    let cap = size.unwrap_or(0).min(MAX_PREALLOC) as usize;
+    let mut whole = Vec::with_capacity(cap.max(got));
+    whole.extend_from_slice(&magic[..got]);
+    reader.read_to_end(&mut whole).await?;
+    // Decrypted in place: one copy of the blob in memory.
+    let plain = key.decrypt_owned(whole)?;
+    let mut decoder = PayloadDecoder::new(compressed)?;
+    for piece in plain.chunks(STREAM_BUF) {
+        decoder.push(piece, outbuf, sink).await?;
+    }
+    decoder.finish()
 }
 
 /// Streams, decrypts, decompresses and writes `blobs` in order to a temp
 /// file next to `target`, verifying each chunk hash (when given) and the
 /// full-file hash before atomically replacing `target`.
 ///
-/// Memory: unencrypted blobs stream storage -> zstd -> hasher -> file with
-/// constant memory; encrypted blobs are held once (decrypted in place) and
-/// then stream-decompressed. See [`RESTORE_MEM_BUDGET_MIB`].
+/// Memory: unencrypted and v3 blobs stream storage -> (decrypt) -> zstd ->
+/// hasher -> file with bounded memory; v1/v2 encrypted blobs are held once
+/// (decrypted in place) and then stream-decompressed. See
+/// [`RESTORE_MEM_BUDGET_MIB`]. On any error (including a v3 blob that fails
+/// authentication midway) the temp file is removed: nothing is left behind.
 async fn restore_blobs(
     storage: &dyn Storage,
-    blobs: &[(String, Option<&str>)],
+    blobs: &[BlobRef<'_>],
     target: &Path,
     key: Option<&KeyCache>,
     expected_full_hash: &str,
     compressed: bool,
+    limits: OutputLimits,
 ) -> io::Result<()> {
     let mut out = VerifiedOutput::create(target).await?;
     let tmp = out.tmp.clone();
@@ -549,45 +690,38 @@ async fn restore_blobs(
     let result = async {
         let mut inbuf = vec![0u8; STREAM_BUF];
         let mut outbuf = vec![0u8; STREAM_BUF];
-        for (data_path, chunk_hash) in blobs {
-            let mut chunk_hasher = chunk_hash.map(|_| blake3::Hasher::new());
+        for blob in blobs {
+            let mut chunk_hasher = blob.chunk_hash.map(|_| blake3::Hasher::new());
             {
                 let mut sink = BlobSink {
                     out: &mut out,
                     chunk_hasher: chunk_hasher.as_mut(),
+                    blob_written: 0,
+                    limits,
                 };
                 match key {
                     Some(k) => {
-                        let size = storage.size(data_path).await?;
-                        let _permit = RESTORE_MEM_BUDGET
-                            .acquire_many(budget_permits(size, true))
-                            .await
-                            .map_err(io::Error::other)?;
-                        let blob = read_blob_exact(storage, data_path, size).await?;
-                        // Decrypted in place: one copy of the blob in memory.
-                        let plain = k.decrypt_owned(blob)?;
-                        let mut src: &[u8] = &plain;
-                        decode_into(&mut src, compressed, &mut inbuf, &mut outbuf, &mut sink)
+                        decode_encrypted_blob(storage, blob, k, compressed, &mut outbuf, &mut sink)
                             .await?;
                     }
                     None => {
                         let _permit = RESTORE_MEM_BUDGET
-                            .acquire_many(budget_permits(None, false))
+                            .acquire_many(budget_permits(None))
                             .await
                             .map_err(io::Error::other)?;
-                        let mut src = storage.read_stream(data_path).await?;
+                        let mut src = storage.read_stream(&blob.path).await?;
                         decode_into(&mut src, compressed, &mut inbuf, &mut outbuf, &mut sink)
                             .await?;
                     }
                 }
             }
 
-            if let (Some(expected), Some(h)) = (chunk_hash, chunk_hasher)
-                && h.finalize().to_hex().as_str() != *expected
+            if let (Some(expected), Some(h)) = (blob.chunk_hash, chunk_hasher)
+                && h.finalize().to_hex().as_str() != expected
             {
                 return Err(io::Error::new(
                     ErrorKind::InvalidData,
-                    format!("Chunk hash mismatch for {}", data_path),
+                    format!("Chunk hash mismatch for {}", blob.path),
                 ));
             }
         }
@@ -723,6 +857,60 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn zstd_bomb_stops_at_recorded_size_and_leaves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path().to_str().unwrap());
+        let content = b"small file";
+        let hash = hash_file_content(content).unwrap();
+        // 512 MiB of zeros in a few KiB, where a 10-byte file belongs.
+        let bomb = zstd::stream::encode_all(std::io::Read::take(std::io::repeat(0), 512 << 20), 1)
+            .unwrap();
+        storage
+            .write(&format!("data/clear/{}", hash), &bomb)
+            .await
+            .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let target = out.path().join("f.txt");
+        let blobs = [BlobRef {
+            path: format!("data/clear/{}", hash),
+            object_id: &hash,
+            chunk_hash: None,
+        }];
+        let meta = FileMetadata::new(hash.clone(), false, true).with_size(content.len() as u64);
+        let err = restore_blobs(
+            &storage,
+            &blobs,
+            &target,
+            None,
+            &hash,
+            true,
+            OutputLimits {
+                file: meta.max_plain_size(),
+                blob: meta.max_object_plain_size(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::FileTooLarge);
+        assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+
+        // Through the public entry point: reported as a failed file.
+        let mut manifest = HashMap::new();
+        manifest.insert(PathBuf::from("f.txt"), meta);
+        storage
+            .write(
+                "snapshots/2026-01-01T000000Z.toml",
+                toml::to_string(&manifest).unwrap().as_bytes(),
+            )
+            .await
+            .unwrap();
+        let report = run(&storage, out.path(), false).await;
+        assert_eq!(report.files_with_errors, 1);
+        assert!(report.errors[0].contains("exceeds"), "{:?}", report.errors);
+        assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

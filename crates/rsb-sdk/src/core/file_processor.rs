@@ -1,6 +1,9 @@
-// file_processor.rs - Performant version with EncryptionKey
+// file_processor.rs - dedup, compression and (v3 streaming) encryption of files
 use super::types::{CHUNK_SIZE, ChunkMetadata, FileMetadata, FileStatus, MULTIPART_THRESHOLD};
-use crate::crypto::{BLOB_MAGIC_V2, EncryptionKey, hash_file_content};
+use crate::crypto::stream::V3Header;
+use crate::crypto::{
+    BLOB_MAGIC_V2, BLOB_MAGIC_V3, RepoKey, V3_DEFAULT_CHUNK_SIZE, hash_file_content, v3_blob_len,
+};
 use crate::storage::Storage;
 use glob::Pattern;
 use std::collections::{HashMap, HashSet};
@@ -12,11 +15,15 @@ use tokio::runtime::Handle;
 use tracing::warn;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
-/// AES-GCM framing overhead added by `EncryptionKey::encrypt`:
-/// salt(16) + nonce(12) + tag(16).
+/// AES-GCM framing overhead of a legacy (v1) blob:
+/// salt(16) + nonce(12) + tag(16). Also the smallest possible encrypted
+/// object of any format.
 const ENCRYPTION_OVERHEAD: u64 = 16 + 12 + 16;
 /// Overhead of the versioned (v2) blob format: magic(8) + iterations(4) + legacy framing.
 const ENCRYPTION_OVERHEAD_V2: u64 = 8 + 4 + ENCRYPTION_OVERHEAD;
+/// Encrypted output up to this size is spooled in memory before the upload;
+/// larger output spills to a temp file that is streamed to storage.
+pub(crate) const SPOOL_MEM_LIMIT: usize = 8 * 1024 * 1024;
 /// zstd level used when an existing object forces compression but the
 /// profile has compression disabled.
 const FALLBACK_COMPRESSION_LEVEL: u8 = 3;
@@ -60,7 +67,7 @@ pub fn process_file(
     src: &Path,
     storage: &Arc<dyn Storage>,
     rel_path: &Path,
-    encryption_key: Option<Arc<EncryptionKey>>, // ⚡ Pre-derived EncryptionKey instead of password
+    encryption_key: Option<Arc<RepoKey>>, // repository key (v3); None = no encryption
     previous_metadata_cache: &HashMap<String, FileMetadata>,
     dry_run: bool,
     rt_handle: &Handle,
@@ -99,7 +106,10 @@ pub fn process_file(
     // corrupt objects so that the next backup re-uploads them).
     if let Some(cached) = previous_metadata_cache.get(&current_hash) {
         if cached_objects_present(storage, rt_handle, cached, data.len() as u64)? {
-            return Ok((FileStatus::Skipped, cached.clone()));
+            return Ok((
+                FileStatus::Skipped,
+                cached.clone().with_size(data.len() as u64),
+            ));
         }
         warn!(
             "Object for {} referenced by the previous snapshot is missing or damaged; re-uploading",
@@ -136,7 +146,8 @@ pub fn process_file(
                 mode.is_compressed(),
                 None,
                 Some(existing),
-            );
+            )
+            .with_size(data.len() as u64);
             return Ok((FileStatus::Skipped, metadata));
         }
         warn!(
@@ -154,22 +165,22 @@ pub fn process_file(
             compression_level > 0,
             None,
             None,
-        );
+        )
+        .with_size(data.len() as u64);
         return Ok((FileStatus::Processed, metadata));
     }
 
-    // Compress + Encrypt (optimized)
-    let final_data = compress_and_encrypt(
+    // Compress + encrypt (streamed) + upload.
+    let (stored_size, stored_hash) = store_object(
+        storage,
+        rt_handle,
+        &data_path,
+        &current_hash,
         &data,
         compression_level,
         should_encrypt,
-        encryption_key.as_deref(), // ⚡ Dereference Arc to get Option<&EncryptionKey>
+        encryption_key.as_deref(),
     )?;
-
-    let stored_size = final_data.len() as u64;
-    let stored_hash = hash_file_content(&final_data)?;
-
-    rt_handle.block_on(storage.write(&data_path, &final_data))?;
 
     let metadata = build_file_metadata(
         current_hash,
@@ -177,7 +188,8 @@ pub fn process_file(
         compression_level > 0,
         Some(stored_hash),
         Some(stored_size),
-    );
+    )
+    .with_size(data.len() as u64);
 
     Ok((FileStatus::Processed, metadata))
 }
@@ -237,10 +249,10 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
 /// with an *uncompressed* payload (otherwise it must be a zstd frame):
 /// - clear objects are then checked byte-for-byte (raw hash, else zstd);
 /// - encrypted objects are then classified by their exact framing overhead
-///   (v2 header or legacy), since they cannot be decrypted here (each
-///   backup session uses its own salt). The only residual ambiguity is a
-///   zstd frame of exactly `plain_len` bytes, which is classified as
-///   uncompressed; restore's hash check still catches that case.
+///   (v3 header + per-chunk tags, v2 header or legacy), without decrypting.
+///   The only residual ambiguity is a zstd frame of exactly `plain_len`
+///   bytes, which is classified as uncompressed; restore's hash check still
+///   catches that case.
 fn classify_existing_object(
     storage: &Arc<dyn Storage>,
     rt_handle: &Handle,
@@ -273,16 +285,34 @@ fn classify_existing_object(
 
     if stored_size != plain_len + ENCRYPTION_OVERHEAD
         && stored_size != plain_len + ENCRYPTION_OVERHEAD_V2
+        && stored_size != v3_blob_len(plain_len, V3_DEFAULT_CHUNK_SIZE)
     {
         return Ok(Some(StoredMode::Compressed));
     }
     let raw = rt_handle.block_on(storage.read(data_path))?;
+    let raw_len = raw.len() as u64;
+    if raw.starts_with(BLOB_MAGIC_V3) {
+        // The chunk size comes from the header (it may differ from ours).
+        let Ok(header) = V3Header::parse(&raw) else {
+            return Ok(None);
+        };
+        if raw_len < v3_blob_len(0, header.chunk_size) {
+            return Ok(None);
+        }
+        return Ok(Some(
+            if raw_len == v3_blob_len(plain_len, header.chunk_size) {
+                StoredMode::Uncompressed
+            } else {
+                StoredMode::Compressed
+            },
+        ));
+    }
     let overhead = if raw.starts_with(BLOB_MAGIC_V2) {
         ENCRYPTION_OVERHEAD_V2
     } else {
         ENCRYPTION_OVERHEAD
     };
-    match (raw.len() as u64).checked_sub(overhead) {
+    match raw_len.checked_sub(overhead) {
         Some(payload) if payload == plain_len => Ok(Some(StoredMode::Uncompressed)),
         Some(_) => Ok(Some(StoredMode::Compressed)),
         None => Ok(None),
@@ -357,7 +387,7 @@ fn process_file_multipart_streaming(
     src: &Path,
     storage: &Arc<dyn Storage>,
     should_encrypt: bool,
-    encryption_key: Option<&EncryptionKey>, // ⚡ Pre-derived key
+    encryption_key: Option<&RepoKey>,
     previous_metadata_cache: &HashMap<String, FileMetadata>,
     dry_run: bool,
     rt_handle: &Handle,
@@ -371,6 +401,7 @@ fn process_file_multipart_streaming(
     let mut full_hasher = blake3::Hasher::new();
     // (chunk hash, plain length, stored size if the object exists)
     let mut scanned: Vec<(String, u64, Option<u64>)> = Vec::new();
+    let mut file_size: u64 = 0;
     loop {
         let n = read_full(&mut file, &mut buf)?;
         if n == 0 {
@@ -378,6 +409,7 @@ fn process_file_multipart_streaming(
         }
         let chunk_data = &buf[..n];
         full_hasher.update(chunk_data);
+        file_size += n as u64;
         let chunk_hash = hash_file_content(chunk_data)?;
         let data_path = format!("data/{}/{}", kind, chunk_hash);
         let size = rt_handle.block_on(storage.size(&data_path))?;
@@ -400,7 +432,7 @@ fn process_file_multipart_streaming(
                     })
             });
         if same {
-            return Ok((FileStatus::Skipped, cached.clone()));
+            return Ok((FileStatus::Skipped, cached.clone().with_size(file_size)));
         }
     }
 
@@ -468,12 +500,18 @@ fn process_file_multipart_streaming(
             if plan.existing.is_some() || !seen.insert(plan.hash.as_str()) {
                 continue;
             }
-            let final_data =
-                compress_and_encrypt(chunk_data, write_level, should_encrypt, encryption_key)?;
-            let stored_hash = hash_file_content(&final_data)?;
             let data_path = format!("data/{}/{}", kind, plan.hash);
-            rt_handle.block_on(storage.write(&data_path, &final_data))?;
-            written.insert(plan.hash.clone(), (final_data.len() as u64, stored_hash));
+            let (stored_size, stored_hash) = store_object(
+                storage,
+                rt_handle,
+                &data_path,
+                &plan.hash,
+                chunk_data,
+                write_level,
+                should_encrypt,
+                encryption_key,
+            )?;
+            written.insert(plan.hash.clone(), (stored_size, stored_hash));
         }
     }
 
@@ -501,7 +539,8 @@ fn process_file_multipart_streaming(
         mode.is_compressed(),
         chunks_meta,
         total_stored_size,
-    );
+    )
+    .with_size(file_size);
     let status = if needs_write {
         FileStatus::Processed
     } else {
@@ -514,7 +553,7 @@ fn process_file_multipart_streaming(
 
 fn should_encrypt_file(
     rel_path: &Path,
-    key: Option<&EncryptionKey>,
+    key: Option<&RepoKey>,
     encrypt_patterns: &Option<Vec<String>>,
 ) -> bool {
     if key.is_none() {
@@ -528,33 +567,147 @@ fn should_encrypt_file(
     }
 }
 
-/// Compresses (if `compression_level > 0`) and encrypts (only if
-/// `should_encrypt` and a key is present). Used for whole files and chunks
-/// alike, so the `enc`/`clear` location always matches the stored bytes.
-fn compress_and_encrypt(
+/// Compresses (if `compression_level > 0`), encrypts (only if
+/// `should_encrypt` and a key is present) and uploads `data` to `data_path`.
+/// Used for whole files and chunks alike, so the `enc`/`clear` location
+/// always matches the stored bytes. Returns (stored size, stored BLAKE3).
+///
+/// Encrypted objects are produced as a stream (zstd → v3 chunk encryptor →
+/// hasher → spool) and uploaded with [`Storage::write_file`] once the spool
+/// exceeds [`SPOOL_MEM_LIMIT`], so the compressed/encrypted copy of a file
+/// is never held in memory as a whole. `object_id` (the content hash) is
+/// bound into the v3 blob.
+#[allow(clippy::too_many_arguments)]
+fn store_object(
+    storage: &Arc<dyn Storage>,
+    rt_handle: &Handle,
+    data_path: &str,
+    object_id: &str,
     data: &[u8],
     compression_level: u8,
     should_encrypt: bool,
-    encryption_key: Option<&EncryptionKey>, // ⚡ Pre-derived key instead of password
-) -> io::Result<Vec<u8>> {
-    let compressed = if compression_level > 0 {
-        let mut compressed = Vec::with_capacity(data.len() * 2 / 3);
-        let mut encoder = ZstdEncoder::new(&mut compressed, compression_level as i32)?;
-        encoder.write_all(data)?;
-        encoder.finish()?;
-        compressed
-    } else {
-        data.to_vec()
+    encryption_key: Option<&RepoKey>,
+) -> io::Result<(u64, String)> {
+    let key = match (should_encrypt, encryption_key) {
+        (true, Some(k)) => k,
+        (true, None) => {
+            // Never silently store in clear what was meant to be encrypted.
+            return Err(io::Error::other(
+                "encryption requested but no repository key is loaded",
+            ));
+        }
+        (false, _) => {
+            let stored = if compression_level > 0 {
+                zstd::stream::encode_all(data, compression_level as i32)?
+            } else {
+                data.to_vec()
+            };
+            let hash = hash_file_content(&stored)?;
+            rt_handle.block_on(storage.write(data_path, &stored))?;
+            return Ok((stored.len() as u64, hash));
+        }
     };
 
-    if should_encrypt {
-        if let Some(key) = encryption_key {
-            key.encrypt(&compressed) // ✅ No PBKDF2 - key already derived!
-        } else {
-            Ok(compressed)
-        }
+    let sink = HashingWriter {
+        inner: Spool::new(SPOOL_MEM_LIMIT),
+        hasher: blake3::Hasher::new(),
+        len: 0,
+    };
+    let mut enc = key.encryptor(object_id, sink)?;
+    if compression_level > 0 {
+        let mut z = ZstdEncoder::new(&mut enc, compression_level as i32)?;
+        z.write_all(data)?;
+        z.finish()?;
     } else {
-        Ok(compressed)
+        enc.write_all(data)?;
+    }
+    let sink = enc.finish()?;
+    let (len, hash) = (sink.len, sink.hasher.finalize().to_hex().to_string());
+    match sink.inner {
+        Spool::Memory { buf, .. } => rt_handle.block_on(storage.write(data_path, &buf))?,
+        Spool::File(tmp) => rt_handle.block_on(storage.write_file(data_path, tmp.path()))?,
+    }
+    Ok((len, hash))
+}
+
+/// Counts and hashes everything written through it.
+pub(crate) struct HashingWriter<W: Write> {
+    inner: W,
+    hasher: blake3::Hasher,
+    len: u64,
+}
+
+impl<W: Write> HashingWriter<W> {
+    pub(crate) fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: blake3::Hasher::new(),
+            len: 0,
+        }
+    }
+
+    /// (inner writer, bytes written, BLAKE3 hex of them)
+    pub(crate) fn into_parts(self) -> (W, u64, String) {
+        (
+            self.inner,
+            self.len,
+            self.hasher.finalize().to_hex().to_string(),
+        )
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.len += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// In-memory buffer that spills to an anonymous-on-drop temp file once it
+/// exceeds `limit` bytes.
+pub(crate) enum Spool {
+    Memory { buf: Vec<u8>, limit: usize },
+    File(tempfile::NamedTempFile),
+}
+
+impl Spool {
+    pub(crate) fn new(limit: usize) -> Self {
+        Spool::Memory {
+            buf: Vec::new(),
+            limit,
+        }
+    }
+}
+
+impl Write for Spool {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if let Spool::Memory { buf, limit } = self
+            && buf.len() + data.len() > *limit
+        {
+            let mut tmp = tempfile::NamedTempFile::new()?;
+            tmp.write_all(buf)?;
+            *self = Spool::File(tmp);
+        }
+        match self {
+            Spool::Memory { buf, .. } => {
+                buf.extend_from_slice(data);
+                Ok(data.len())
+            }
+            Spool::File(f) => f.write(data),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Spool::Memory { .. } => Ok(()),
+            Spool::File(f) => f.flush(),
+        }
     }
 }
 
@@ -572,6 +725,7 @@ fn build_file_metadata(
         stored_size,
         chunks: None,
         compressed,
+        size: None,
     }
 }
 
@@ -612,7 +766,7 @@ mod tests {
         rt: &tokio::runtime::Runtime,
         storage: &Arc<dyn Storage>,
         src: &Path,
-        key: Option<Arc<EncryptionKey>>,
+        key: Option<Arc<RepoKey>>,
         cache: &HashMap<String, FileMetadata>,
         level: u8,
     ) -> (FileStatus, FileMetadata) {
@@ -632,9 +786,15 @@ mod tests {
 
     /// Decodes a stored object the way restore does, driven only by the
     /// manifest entry.
-    fn decode_like_restore(raw: Vec<u8>, meta: &FileMetadata, password: Option<&[u8]>) -> Vec<u8> {
-        let dec = match (meta.encrypted, password) {
-            (true, Some(p)) => crate::crypto::decrypt_data(&raw, p).unwrap(),
+    fn decode_like_restore(
+        raw: Vec<u8>,
+        meta: &FileMetadata,
+        key: Option<&Arc<RepoKey>>,
+    ) -> Vec<u8> {
+        let dec = match (meta.encrypted, key) {
+            (true, Some(k)) => crate::crypto::KeyCache::with_repo_key(b"pw", k.clone())
+                .decrypt_object(&meta.hash, &raw)
+                .unwrap(),
             _ => raw,
         };
         if meta.compressed {
@@ -657,8 +817,7 @@ mod tests {
         let none = HashMap::new();
 
         for encrypted in [false, true] {
-            let password: Option<&[u8]> = encrypted.then_some(b"pw".as_slice());
-            let key = password.map(|p| Arc::new(EncryptionKey::new(p).unwrap()));
+            let key = encrypted.then(|| Arc::new(RepoKey::generate().unwrap()));
             for (first, second) in [(0u8, 3u8), (3, 0), (1, 19)] {
                 let repo = tempfile::tempdir().unwrap();
                 let storage: Arc<dyn Storage> =
@@ -677,8 +836,85 @@ mod tests {
                 let kind = if encrypted { "enc" } else { "clear" };
                 let raw =
                     std::fs::read(repo.path().join("data").join(kind).join(&m2.hash)).unwrap();
-                assert_eq!(decode_like_restore(raw, &m2, password), content);
+                assert!(!encrypted || raw.starts_with(BLOB_MAGIC_V3));
+                assert_eq!(decode_like_restore(raw, &m2, key.as_ref()), content);
             }
+        }
+    }
+
+    #[test]
+    fn dedup_onto_existing_v2_object_keeps_it_readable() {
+        // Mixed repository: an object written by an older version (v2,
+        // password-derived key) is reused as-is by a v3 backup.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("f.txt");
+        let content = b"legacy content ".repeat(100);
+        std::fs::write(&src, &content).unwrap();
+        let hash = hash_file_content(&content).unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
+        for compressed in [false, true] {
+            let payload = if compressed {
+                zstd::stream::encode_all(&content[..], 3).unwrap()
+            } else {
+                content.clone()
+            };
+            let v2 = crate::crypto::EncryptionKey::new(b"pw")
+                .unwrap()
+                .encrypt(&payload)
+                .unwrap();
+            let obj = repo.path().join("data/enc").join(&hash);
+            std::fs::create_dir_all(obj.parent().unwrap()).unwrap();
+            std::fs::write(&obj, &v2).unwrap();
+            let key = Arc::new(RepoKey::generate().unwrap());
+            let (status, meta) = run(&rt, &storage, &src, Some(key), &HashMap::new(), 3);
+            assert_eq!(status, FileStatus::Skipped);
+            assert_eq!(meta.compressed, compressed);
+            assert_eq!(std::fs::read(&obj).unwrap(), v2, "v2 object must be kept");
+        }
+    }
+
+    #[test]
+    fn large_encrypted_object_spools_to_disk_and_roundtrips() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("big.bin");
+        // Incompressible and larger than SPOOL_MEM_LIMIT.
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let content: Vec<u8> = (0..SPOOL_MEM_LIMIT + 3 * 1024 * 1024 + 7)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        std::fs::write(&src, &content).unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(repo.path().to_str().unwrap()));
+        let key = Arc::new(RepoKey::generate().unwrap());
+        for level in [0u8, 3] {
+            let (_, meta) = run(
+                &rt,
+                &storage,
+                &src,
+                Some(key.clone()),
+                &HashMap::new(),
+                level,
+            );
+            let raw = std::fs::read(repo.path().join("data/enc").join(&meta.hash)).unwrap();
+            assert_eq!(meta.stored_size, Some(raw.len() as u64));
+            assert_eq!(meta.size, Some(content.len() as u64));
+            assert_eq!(meta.stored_hash, Some(hash_file_content(&raw).unwrap()));
+            assert_eq!(decode_like_restore(raw, &meta, Some(&key)), content);
+            std::fs::remove_file(repo.path().join("data/enc").join(&meta.hash)).unwrap();
         }
     }
 

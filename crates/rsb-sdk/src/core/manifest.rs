@@ -1,7 +1,8 @@
 // manifest.rs - Performance + reliability version
+use super::limits::{MAX_MANIFEST_SIZE, too_large, zstd_decode_bounded};
 use super::types::{ChunkMetadata, FileMetadata};
-use crate::crypto::KeyCache;
 use crate::crypto::encrypt_data_with_key;
+use crate::crypto::{KeyCache, RepoKey};
 use crate::error::{CryptoErrorKind, RsbError};
 use crate::storage::Storage;
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -10,7 +11,6 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use tracing::{debug, error, info};
-use zstd::stream::copy_decode;
 
 /// Legacy snapshot name format (1-second resolution), e.g. `2026-02-07T103000Z`.
 pub const SNAPSHOT_NAME_FORMAT_SECS: &str = "%Y-%m-%dT%H%M%SZ";
@@ -121,11 +121,53 @@ async fn unique_snapshot_path(
     Err("Could not allocate a unique snapshot name".into())
 }
 
-/// Writes the manifest in an optimized way (compression + encryption)
+/// Writes the manifest (zstd + encryption) given a password.
+///
+/// Uses the repository key (v3) if `keys/repo.key` exists; otherwise falls
+/// back to the legacy v2 format (the key file is only created by a backup
+/// or `rsb key init`). Backups use [`write_manifest_with_key`].
 pub async fn write_manifest(
     storage: &dyn Storage,
     manifest: &HashMap<PathBuf, FileMetadata>,
     encryption_key: Option<&str>,
+    dry_run: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match encryption_key {
+        Some(pw) => match crate::crypto::keyfile::load_repo_key(storage, pw.as_bytes()).await? {
+            Some(k) => write_manifest_with_key(storage, manifest, Some(&k), dry_run).await,
+            None => {
+                write_manifest_inner(storage, manifest, ManifestCipher::Legacy(pw), dry_run).await
+            }
+        },
+        None => write_manifest_inner(storage, manifest, ManifestCipher::None, dry_run).await,
+    }
+}
+
+/// Writes the manifest, encrypted as a v3 blob bound to its snapshot path
+/// when `repo_key` is given.
+pub async fn write_manifest_with_key(
+    storage: &dyn Storage,
+    manifest: &HashMap<PathBuf, FileMetadata>,
+    repo_key: Option<&RepoKey>,
+    dry_run: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let cipher = match repo_key {
+        Some(k) => ManifestCipher::V3(k),
+        None => ManifestCipher::None,
+    };
+    write_manifest_inner(storage, manifest, cipher, dry_run).await
+}
+
+enum ManifestCipher<'a> {
+    None,
+    Legacy(&'a str),
+    V3(&'a RepoKey),
+}
+
+async fn write_manifest_inner(
+    storage: &dyn Storage,
+    manifest: &HashMap<PathBuf, FileMetadata>,
+    cipher: ManifestCipher<'_>,
     dry_run: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let now = Utc::now();
@@ -152,12 +194,15 @@ pub async fn write_manifest(
     }
 
     // Encryption (if applicable)
-    let final_bytes = if let Some(key) = encryption_key {
-        let enc_key = crate::crypto::EncryptionKey::new(key.as_bytes())
-            .map_err(|e| format!("Failed to derive key for manifest: {}", e))?;
-        encrypt_data_with_key(&compressed, &enc_key)?
-    } else {
-        compressed
+    let final_bytes = match cipher {
+        ManifestCipher::None => compressed,
+        ManifestCipher::Legacy(pw) => {
+            let enc_key = crate::crypto::EncryptionKey::new(pw.as_bytes())
+                .map_err(|e| format!("Failed to derive key for manifest: {}", e))?;
+            encrypt_data_with_key(&compressed, &enc_key)?
+        }
+        // Object id = storage key: the manifest cannot be renamed/swapped.
+        ManifestCipher::V3(k) => k.encrypt_object(&snapshot_path, &compressed)?,
     };
 
     // Storage::write is atomic + fsync'ed for local storage.
@@ -178,7 +223,10 @@ pub async fn read_manifest(
     path: &str,
     key: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let cache = key.map(|k| KeyCache::new(k.as_bytes()));
+    let cache = match key {
+        Some(k) => Some(KeyCache::open(storage, k.as_bytes()).await?),
+        None => None,
+    };
     read_manifest_cached(storage, path, cache.as_ref()).await
 }
 
@@ -189,69 +237,34 @@ pub async fn read_manifest_cached(
     path: &str,
     cache: Option<&KeyCache>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    // Bound what a malicious repository can make us read and inflate.
+    if let Some(n) = storage.size(path).await?
+        && n > MAX_MANIFEST_SIZE
+    {
+        return Err(Box::new(too_large(path, MAX_MANIFEST_SIZE)));
+    }
     let raw = storage.read(path).await?;
 
     let decrypted = if let Some(cache) = cache {
-        match cache.decrypt(&raw) {
+        // v3 manifests are bound to their storage key (object id).
+        match cache.decrypt_object(path, &raw) {
             Ok(data) => data,
-            Err(e) => {
-                // 🐛 Fix: Provide more helpful error message.
-                // Classificação tipada (não por texto da mensagem): tag AEAD
-                // inválida ⇒ chave errada; dados mal formados ⇒ corrupção.
-                let kind = if crate::crypto::is_authentication_error(&e) {
-                    CryptoErrorKind::AuthenticationFailed
-                } else if e.kind() == std::io::ErrorKind::InvalidData {
-                    CryptoErrorKind::Corrupt
-                } else {
-                    CryptoErrorKind::Other
-                };
-                let user_message = match kind {
-                    CryptoErrorKind::AuthenticationFailed => {
-                        format!(
-                            "❌ Decryption failed (wrong key)\n\n\
-                        The backup is encrypted but the key provided is incorrect.\n\
-                        Use the SAME encryption key that was used when creating this backup.\n\n\
-                        Technical: {}",
-                            e
-                        )
-                    }
-                    CryptoErrorKind::Corrupt => {
-                        format!(
-                            "⚠️  Backup metadata may be corrupted\n\n\
-                        The backup data cannot be read, even with the provided key.\n\
-                        This may indicate:\n\
-                        - Incomplete backup copy\n\
-                        - Corrupted backup files\n\
-                        - Wrong backup directory\n\n\
-                        Try: rsb verify --backup /path/to/backup\n\n\
-                        Technical: {}",
-                            e
-                        )
-                    }
-                    CryptoErrorKind::Other => {
-                        format!(
-                            "❌ Decryption error\n\n\
-                        Could not decrypt backup metadata.\n\
-                        Ensure:\n\
-                        - The backup is not corrupted\n\
-                        - The correct encryption key is provided\n\
-                        - The entire backup folder was copied\n\n\
-                        Technical: {}",
-                            e
-                        )
-                    }
-                };
-                error!("Decryption error for {}: {}", path, e);
-                return Err(Box::new(RsbError::crypto(kind, user_message)));
-            }
+            Err(e) => return Err(Box::new(manifest_decrypt_error(path, &raw, cache, &e))),
         }
     } else {
         raw
     };
 
     // Tries to decompress (Zstd) - check magic number or just try decoding
-    let mut decompressed = Vec::new();
-    if copy_decode(&decrypted[..], &mut decompressed).is_ok() {
+    // Bounded: a tiny zstd frame of zeros would otherwise inflate to GiBs.
+    let decoded = zstd_decode_bounded(&decrypted, MAX_MANIFEST_SIZE, path);
+    if let Err(e) = &decoded
+        && e.kind() == std::io::ErrorKind::FileTooLarge
+    {
+        error!("{}", e);
+        return Err(decoded.unwrap_err().into());
+    }
+    if let Ok(decompressed) = decoded {
         return String::from_utf8(decompressed).map_err(|e| {
             debug!("Manifest UTF-8 decode failed after decompression: {:?}", e);
 
@@ -265,6 +278,73 @@ pub async fn read_manifest_cached(
 
         "Backup metadata is corrupted or unreadable".into()
     })
+}
+
+/// Typed, user-facing error for a manifest that cannot be decrypted.
+///
+/// Classification is by type, never by message text: AEAD tag mismatch →
+/// `AuthenticationFailed`, malformed blob → `Corrupt`, v3 blob without a
+/// repository key → `Other`.
+fn manifest_decrypt_error(
+    path: &str,
+    raw: &[u8],
+    cache: &KeyCache,
+    e: &std::io::Error,
+) -> RsbError {
+    use crate::crypto::CryptoError;
+    let crypto = crate::crypto::crypto_error_of(e);
+    let kind = match crypto {
+        Some(CryptoError::AuthenticationFailed) => CryptoErrorKind::AuthenticationFailed,
+        Some(CryptoError::Malformed) => CryptoErrorKind::Corrupt,
+        Some(CryptoError::RepoKeyRequired | CryptoError::KdfLimitExceeded) => {
+            CryptoErrorKind::Other
+        }
+        None if e.kind() == std::io::ErrorKind::InvalidData => CryptoErrorKind::Corrupt,
+        None => CryptoErrorKind::Other,
+    };
+    // With a v3 manifest the password was already proven by unlocking the
+    // repository key, so a tag mismatch here means tampering/corruption.
+    let key_verified = cache.repo_key().is_some() && crate::crypto::is_v3(raw);
+    let user_message = match kind {
+        CryptoErrorKind::AuthenticationFailed if key_verified => format!(
+            "❌ Backup metadata failed authentication\n\n\
+             The repository key is correct but {} does not authenticate: it was \
+             modified, truncated or moved from another name.\n\n\
+             Try: rsb verify --backup /path/to/backup\n\n\
+             Technical: {}",
+            path, e
+        ),
+        CryptoErrorKind::AuthenticationFailed => format!(
+            "❌ Decryption failed (wrong key)\n\n\
+             The backup is encrypted but the key provided is incorrect.\n\
+             Use the SAME encryption key that was used when creating this backup.\n\n\
+             Technical: {}",
+            e
+        ),
+        CryptoErrorKind::Corrupt => format!(
+            "⚠️  Backup metadata may be corrupted\n\n\
+             The backup data cannot be read, even with the provided key.\n\
+             This may indicate:\n\
+             - Incomplete backup copy\n\
+             - Corrupted backup files\n\
+             - Wrong backup directory\n\n\
+             Try: rsb verify --backup /path/to/backup\n\n\
+             Technical: {}",
+            e
+        ),
+        CryptoErrorKind::Other => format!(
+            "❌ Decryption error\n\n\
+             Could not decrypt backup metadata.\n\
+             Ensure:\n\
+             - The backup is not corrupted\n\
+             - The correct encryption key is provided\n\
+             - The entire backup folder was copied (including keys/repo.key)\n\n\
+             Technical: {}",
+            e
+        ),
+    };
+    error!("Decryption error for {}: {}", path, e);
+    RsbError::crypto(kind, user_message)
 }
 
 /// Sorts snapshot paths newest first: by parsed timestamp, then by name
@@ -293,7 +373,10 @@ pub async fn find_latest_snapshot(
     snapshot_id: Option<&str>,
     key: Option<&str>,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let cache = key.map(|k| KeyCache::new(k.as_bytes()));
+    let cache = match key {
+        Some(k) => Some(KeyCache::open(storage, k.as_bytes()).await?),
+        None => None,
+    };
     find_latest_snapshot_cached(storage, snapshot_id, cache.as_ref()).await
 }
 
@@ -364,6 +447,55 @@ mod tests {
         assert!(validate_snapshot_id("..").is_err());
         assert!(validate_snapshot_id("").is_err());
         assert!(validate_snapshot_id("x\\y").is_err());
+    }
+
+    #[tokio::test]
+    async fn manifest_zstd_bomb_is_refused() {
+        let storage = crate::storage::MemoryStorage::new();
+        // Valid unencrypted manifest framing: a zstd frame inflating past
+        // MAX_MANIFEST_SIZE from a few KiB of input.
+        let bomb = zstd::stream::encode_all(
+            std::io::Read::take(std::io::repeat(b' '), MAX_MANIFEST_SIZE + 1),
+            1,
+        )
+        .unwrap();
+        assert!(bomb.len() < 1024 * 1024);
+        storage
+            .write("snapshots/2026-01-01T000000Z.toml", &bomb)
+            .await
+            .unwrap();
+        let err = find_latest_snapshot(&storage, None, None)
+            .await
+            .unwrap_err();
+        let io = err.downcast_ref::<std::io::Error>().expect("io error");
+        assert_eq!(io.kind(), std::io::ErrorKind::FileTooLarge);
+    }
+
+    #[tokio::test]
+    async fn oversized_manifest_object_is_refused_before_reading() {
+        struct Huge;
+        #[async_trait::async_trait]
+        impl Storage for Huge {
+            async fn write(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+                Ok(())
+            }
+            async fn read(&self, _: &str) -> std::io::Result<Vec<u8>> {
+                panic!("must not read an oversized manifest");
+            }
+            async fn exists(&self, _: &str) -> std::io::Result<bool> {
+                Ok(true)
+            }
+            async fn list(&self, _: &str) -> std::io::Result<Vec<String>> {
+                Ok(vec!["snapshots/2026-01-01T000000Z.toml".into()])
+            }
+            async fn delete(&self, _: &str) -> std::io::Result<()> {
+                Ok(())
+            }
+            async fn size(&self, _: &str) -> std::io::Result<Option<u64>> {
+                Ok(Some(MAX_MANIFEST_SIZE + 1))
+            }
+        }
+        assert!(find_latest_snapshot(&Huge, None, None).await.is_err());
     }
 
     #[tokio::test]

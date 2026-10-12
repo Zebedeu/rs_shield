@@ -2,7 +2,8 @@ use clap::Subcommand;
 use std::path::PathBuf;
 
 use crate::command::{
-    config_cmd::ConfigCommand, fido2_cmd::Fido2Command, snapshot_cmd::SnapshotCommand,
+    config_cmd::ConfigCommand, fido2_cmd::Fido2Command, key_cmd::KeyCommand,
+    snapshot_cmd::SnapshotCommand,
 };
 
 #[derive(clap::ValueEnum, Clone, Copy)]
@@ -307,6 +308,10 @@ pub enum Commands {
 
     #[command(subcommand)]
     Snapshots(SnapshotCommand),
+
+    /// Manage the repository key (format v3): init, change-password
+    #[command(subcommand)]
+    Key(KeyCommand),
 
     /// List backup profiles
     ListProfiles {

@@ -14,6 +14,21 @@
 // next 4 bytes fall in the accepted iteration range (probability < 2^-64).
 // We deliberately do not retry as legacy on failure, so a wrong password costs
 // a single PBKDF2 run.
+// * v3 (written by this version, see `stream` and `keyfile`):
+//     "RSBENCv3" | flags | blob salt(32) | chunk size u32 BE | AEAD chunks...
+//   Encrypted with a per-blob HKDF subkey of the repository DEK stored
+//   (wrapped with Argon2id) in `keys/repo.key`. Readers detect v3 by its
+//   magic before trying v2/legacy. Flag 0x01 puts the DEK's key id in the
+//   first 4 salt bytes (key rotation).
+
+pub mod keyfile;
+pub mod lifecycle;
+pub mod paper;
+
+pub mod stream;
+
+pub use keyfile::{KdfParams, REPO_KEY_PATH, RepoKey, RepoKeyFile};
+pub use stream::{BLOB_MAGIC_V3, V3_DEFAULT_CHUNK_SIZE, is_v3, v3_blob_len};
 
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::pbkdf2;
@@ -38,9 +53,11 @@ const V2_HEADER_LEN: usize = 8 + 4;
 pub const PBKDF2_ITERATIONS: u32 = 600_000;
 /// PBKDF2 iterations used by legacy (header-less) blobs.
 pub const LEGACY_PBKDF2_ITERATIONS: u32 = 600_000;
-/// Bounds accepted from a v2 header (protects against DoS via huge counts).
+/// Bounds accepted from a v2 header (protects against CPU DoS via huge
+/// counts). Every version ever released wrote exactly 600k, so the maximum
+/// is that value: a header asking for more is not parsed as v2.
 const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
-const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
+const MAX_PBKDF2_ITERATIONS: u32 = PBKDF2_ITERATIONS;
 
 /// Typed crypto errors. They are wrapped in `io::Error` (kind `InvalidData`)
 /// so existing `io::Result` signatures are unchanged; use
@@ -49,6 +66,16 @@ const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
 pub enum CryptoError {
     /// AEAD tag verification failed: wrong password/key or tampered data.
     AuthenticationFailed,
+    /// Structurally invalid encrypted blob (bad header, truncated chunk,
+    /// missing final chunk): corruption, not a key problem.
+    Malformed,
+    /// A v3 blob was found but no repository key is available (the
+    /// repository has no `keys/repo.key`, or the caller did not load it).
+    RepoKeyRequired,
+    /// A [`KeyCache`] reached [`MAX_KEY_DERIVATIONS`] distinct PBKDF2
+    /// derivations (v1/v2 salts): refused to bound the CPU a malicious
+    /// repository can make us spend.
+    KdfLimitExceeded,
 }
 
 impl fmt::Display for CryptoError {
@@ -60,6 +87,17 @@ impl fmt::Display for CryptoError {
                 f,
                 "Decryption failed: authentication tag mismatch (wrong password or tampered data)"
             ),
+            CryptoError::Malformed => write!(f, "Malformed encrypted blob"),
+            CryptoError::KdfLimitExceeded => write!(
+                f,
+                "Too many distinct v1/v2 key derivations (limit {}); refusing to continue",
+                MAX_KEY_DERIVATIONS
+            ),
+            CryptoError::RepoKeyRequired => write!(
+                f,
+                "Blob uses format v3 but no repository key ({}) was loaded",
+                REPO_KEY_PATH
+            ),
         }
     }
 }
@@ -70,6 +108,18 @@ impl From<CryptoError> for io::Error {
     fn from(e: CryptoError) -> Self {
         io::Error::new(ErrorKind::InvalidData, e)
     }
+}
+
+/// Typed crypto error carried by `err`, if any.
+pub fn crypto_error_of(err: &io::Error) -> Option<CryptoError> {
+    let inner = err.get_ref()?;
+    if let Some(e) = inner.downcast_ref::<CryptoError>() {
+        return Some(*e);
+    }
+    if inner.downcast_ref::<stream::MalformedBlob>().is_some() {
+        return Some(CryptoError::Malformed);
+    }
+    None
 }
 
 /// Returns true if `err` is an AEAD authentication failure (wrong password
@@ -237,6 +287,9 @@ fn decrypt_with<F>(encrypted: &[u8], key_for: F) -> io::Result<Vec<u8>>
 where
     F: Fn(&[u8; SALT_LEN], u32) -> io::Result<Arc<LessSafeKey>>,
 {
+    if is_v3(encrypted) {
+        return Err(CryptoError::RepoKeyRequired.into());
+    }
     let result = match (parse_v2(encrypted), parse_legacy(encrypted)) {
         (Some(v2), _) => {
             let key = key_for(&v2.salt, v2.iterations)?;
@@ -275,29 +328,125 @@ pub fn decrypt_data(encrypted: &[u8], password: &[u8]) -> io::Result<Vec<u8>> {
     })
 }
 
-/// Maximum number of derived keys kept by a [`KeyCache`].
-const KEY_CACHE_MAX_ENTRIES: usize = 1024;
+/// Maximum number of distinct (salt, iterations) PBKDF2 derivations one
+/// [`KeyCache`] performs (one restore/verify/prune). Each v1/v2 backup
+/// session used its own salt and a snapshot references objects from every
+/// session it dedups against, so legitimate repositories need one per
+/// session (e.g. a year of daily backups = 365); 1024 bounds the worst case
+/// of a malicious repository to about a thousand 600k-iteration runs.
+pub const MAX_KEY_DERIVATIONS: usize = 1024;
 
-/// Thread-safe cache of PBKDF2-derived keys for decrypting many blobs that
-/// share a password (e.g. a restore). Keys are cached by (salt, iterations);
-/// all blobs from one backup session share a salt, so PBKDF2 runs once per
-/// session instead of once per blob. The password is bound at construction
-/// and wiped on drop.
-/// Derived keys indexed by (salt, PBKDF2 iterations).
-type DerivedKeyMap = HashMap<([u8; SALT_LEN], u32), Arc<LessSafeKey>>;
-
+/// Decryption context for a restore/verify/prune (and the manifests a
+/// backup reads): the repository key for v3 blobs plus a thread-safe cache
+/// of PBKDF2-derived keys for v1/v2 blobs.
+///
+/// v1/v2 keys are cached by (salt, iterations); all blobs from one backup
+/// session share a salt, so PBKDF2 runs once per session instead of once
+/// per blob. The v1/v2 password is the repository's legacy secret when the
+/// repository was migrated (so it survives password changes), else the
+/// password given. Secrets are wiped on drop.
 pub struct KeyCache {
     password: Zeroizing<Vec<u8>>,
     keys: Mutex<DerivedKeyMap>,
+    derivations: std::sync::atomic::AtomicUsize,
+    derivation_limit: usize,
+    repo_key: Option<Arc<RepoKey>>,
+    /// False for a v3-only context: v1/v2 blobs are refused.
+    legacy_allowed: bool,
 }
 
+/// Error for a v1/v2 blob met by a v3-only [`KeyCache`].
+fn legacy_refused() -> io::Error {
+    io::Error::new(
+        ErrorKind::InvalidData,
+        "v1/v2 (pre-v3) blob found where only v3 is accepted (run `rsb key migrate`)",
+    )
+}
+
+/// Derived keys indexed by (salt, PBKDF2 iterations).
+type DerivedKeyMap = HashMap<([u8; SALT_LEN], u32), Arc<LessSafeKey>>;
+
 impl KeyCache {
-    /// Create a cache bound to `password`.
+    /// Create a cache bound to `password`, without a repository key: it
+    /// opens v1/v2 blobs only. Prefer [`KeyCache::open`] for repositories.
     pub fn new(password: &[u8]) -> Self {
         KeyCache {
             password: Zeroizing::new(password.to_vec()),
             keys: Mutex::new(HashMap::new()),
+            derivations: Default::default(),
+            derivation_limit: MAX_KEY_DERIVATIONS,
+            repo_key: None,
+            legacy_allowed: true,
         }
+    }
+
+    /// Cache that opens v3 blobs with `repo_key` only and refuses every
+    /// v1/v2 blob (used to prove a migration or rotation is complete).
+    pub fn v3_only(repo_key: Arc<RepoKey>) -> Self {
+        KeyCache {
+            password: Zeroizing::new(Vec::new()),
+            keys: Mutex::new(HashMap::new()),
+            derivations: Default::default(),
+            derivation_limit: 0,
+            repo_key: Some(repo_key),
+            legacy_allowed: false,
+        }
+    }
+
+    /// Cache with an unlocked repository key (opens v1, v2 and v3 blobs).
+    pub fn with_repo_key(password: &[u8], repo_key: Arc<RepoKey>) -> Self {
+        let legacy = repo_key.legacy_password().unwrap_or(password);
+        KeyCache {
+            password: Zeroizing::new(legacy.to_vec()),
+            keys: Mutex::new(HashMap::new()),
+            derivations: Default::default(),
+            derivation_limit: MAX_KEY_DERIVATIONS,
+            repo_key: Some(repo_key),
+            legacy_allowed: true,
+        }
+    }
+
+    /// Opens the decryption context of a repository: unlocks
+    /// `keys/repo.key` if it exists (a wrong password fails here with
+    /// `RsbError::Crypto { kind: AuthenticationFailed }`, before any blob is
+    /// read), otherwise falls back to v1/v2-only decryption.
+    pub async fn open(
+        storage: &dyn crate::storage::Storage,
+        password: &[u8],
+    ) -> Result<Self, crate::error::RsbError> {
+        Ok(match keyfile::load_repo_key(storage, password).await? {
+            Some(k) => Self::with_repo_key(password, Arc::new(k)),
+            None => Self::new(password),
+        })
+    }
+
+    /// Overrides [`MAX_KEY_DERIVATIONS`] for this cache.
+    pub fn with_derivation_limit(mut self, limit: usize) -> Self {
+        self.derivation_limit = limit;
+        self
+    }
+
+    /// The unlocked repository key, if the repository has one.
+    pub fn repo_key(&self) -> Option<&Arc<RepoKey>> {
+        self.repo_key.as_ref()
+    }
+
+    /// Decrypts a blob of any format. `object_id` is the name the blob is
+    /// stored under (content hash for data objects, storage key for
+    /// manifests); v3 blobs are bound to it.
+    pub fn decrypt_object(&self, object_id: &str, encrypted: &[u8]) -> io::Result<Vec<u8>> {
+        if is_v3(encrypted) {
+            let key = self
+                .repo_key
+                .as_ref()
+                .ok_or_else(|| io::Error::from(CryptoError::RepoKeyRequired))?;
+            let r = key.decrypt_object(object_id, encrypted);
+            if r.is_err() {
+                error!("Decryption failed (v3 blob {})", object_id);
+            }
+            return r;
+        }
+        self.decrypt(encrypted)
     }
 
     fn key_for(&self, salt: &[u8; SALT_LEN], iterations: u32) -> io::Result<Arc<LessSafeKey>> {
@@ -305,19 +454,25 @@ impl KeyCache {
         if let Some(k) = self.keys.lock().ok().and_then(|m| m.get(&id).cloned()) {
             return Ok(k);
         }
+        use std::sync::atomic::Ordering;
+        if self.derivations.fetch_add(1, Ordering::Relaxed) >= self.derivation_limit {
+            error!("Refusing PBKDF2 derivation: per-operation limit reached");
+            return Err(CryptoError::KdfLimitExceeded.into());
+        }
         // Derive outside the lock so parallel restores aren't serialized.
         let key = Arc::new(derive_key(&self.password, salt, iterations)?);
         if let Ok(mut map) = self.keys.lock() {
-            if map.len() >= KEY_CACHE_MAX_ENTRIES {
-                map.clear();
-            }
             map.insert(id, key.clone());
         }
         Ok(key)
     }
 
-    /// Decrypt a blob (legacy or v2 format) using cached keys.
+    /// Decrypt a blob (legacy or v2 format) using cached keys. v3 blobs
+    /// need their object id: use [`KeyCache::decrypt_object`].
     pub fn decrypt(&self, encrypted: &[u8]) -> io::Result<Vec<u8>> {
+        if !self.legacy_allowed && !is_v3(encrypted) {
+            return Err(legacy_refused());
+        }
         decrypt_with(encrypted, |salt, iterations| self.key_for(salt, iterations))
     }
 
@@ -325,6 +480,12 @@ impl KeyCache {
     /// allocation and returns it trimmed to the plaintext, so peak memory is
     /// one copy of the blob instead of two.
     pub fn decrypt_owned(&self, mut blob: Vec<u8>) -> io::Result<Vec<u8>> {
+        if is_v3(&blob) {
+            return Err(CryptoError::RepoKeyRequired.into());
+        }
+        if !self.legacy_allowed {
+            return Err(legacy_refused());
+        }
         // (aad bytes, salt, nonce, iterations, body offset)
         let (aad, salt, nonce, iterations, body_start) = match parse_v2(&blob) {
             Some(p) => (
@@ -458,6 +619,37 @@ mod tests {
         assert_eq!(decrypt_data_with_cache(&a, &cache).unwrap(), b"a");
         assert_eq!(decrypt_data_with_cache(&b, &cache).unwrap(), b"b");
         assert_eq!(cache.keys.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn v2_header_cannot_request_more_than_600k_iterations() {
+        let key = EncryptionKey::new(b"pw").unwrap();
+        let mut blob = key.encrypt(b"hello").unwrap();
+        assert!(parse_v2(&blob).is_some());
+        blob[8..12].copy_from_slice(&(PBKDF2_ITERATIONS + 1).to_be_bytes());
+        assert!(parse_v2(&blob).is_none());
+        blob[8..12].copy_from_slice(&10_000_000u32.to_be_bytes());
+        assert!(parse_v2(&blob).is_none());
+        // Falls back to the legacy (600k) interpretation and fails cleanly.
+        assert!(decrypt_data(&blob, b"pw").is_err());
+    }
+
+    #[test]
+    fn key_cache_caps_distinct_derivations() {
+        let cache = KeyCache::new(b"pw").with_derivation_limit(2);
+        let blobs: Vec<Vec<u8>> = (0..3)
+            .map(|_| EncryptionKey::new(b"pw").unwrap().encrypt(b"x").unwrap())
+            .collect();
+        assert_eq!(cache.decrypt(&blobs[0]).unwrap(), b"x");
+        assert_eq!(cache.decrypt(&blobs[1]).unwrap(), b"x");
+        // Cached salts keep working; a third distinct salt is refused.
+        assert_eq!(cache.decrypt(&blobs[0]).unwrap(), b"x");
+        let err = cache.decrypt(&blobs[2]).unwrap_err();
+        assert_eq!(crypto_error_of(&err), Some(CryptoError::KdfLimitExceeded));
+        assert!(matches!(
+            crate::error::RsbError::from(err),
+            crate::error::RsbError::Crypto { .. }
+        ));
     }
 
     #[test]

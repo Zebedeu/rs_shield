@@ -1,9 +1,10 @@
 use crate::config::Config;
 use crate::core::file_processor;
-use crate::core::manifest::write_manifest;
+use crate::core::manifest::write_manifest_with_key;
 use crate::core::resource_monitor::spawn_resource_monitor;
 use crate::core::types::FileMetadata;
 use crate::core::types::FileStatus;
+use crate::crypto::{KeyCache, RepoKey};
 use crate::error::RsbError;
 use crate::options::BackupOptions;
 use crate::report::ReportData;
@@ -51,13 +52,27 @@ pub async fn perform_backup(
     // not garbage-collect data objects this backup writes before its
     // manifest exists. Dry-runs write nothing and take no lock.
     let dry_run = options.dry_run;
+
+    // ====================== REPOSITORY KEY ======================
+    // Unlock keys/repo.key (wrong password -> typed AuthenticationFailed
+    // before anything is read or written), or create it on the first
+    // encrypted backup. Done before the shared lock: creation takes the
+    // exclusive lock so two first backups cannot create two keys.
+    let repo_key = match options.key() {
+        Some(pw) => Some(Arc::new(
+            crate::crypto::keyfile::open_or_init_repo_key(storage.clone(), pw.as_bytes(), dry_run)
+                .await?,
+        )),
+        None => None,
+    };
+
     let repo_lock = if dry_run {
         None
     } else {
         Some(RepoLock::acquire(storage.clone(), LockKind::Shared, "backup").await?)
     };
 
-    let result = run_backup(config, source, storage, &options, start_time)
+    let result = run_backup(config, source, storage, &options, repo_key, start_time)
         .await
         .map_err(RsbError::from);
 
@@ -74,6 +89,7 @@ async fn run_backup(
     source: &Path,
     storage: Arc<dyn Storage>,
     options: &BackupOptions,
+    repo_key: Option<Arc<RepoKey>>,
     start_time: Instant,
 ) -> Result<ReportData, Box<dyn std::error::Error>> {
     let mode = options.mode.as_deref().unwrap_or(&config.backup_mode);
@@ -107,7 +123,11 @@ async fn run_backup(
     // ====================== PREVIOUS METADATA ======================
     // Load metadata indexed by file hash for deduplication
     // Deduplication já funciona no file_processor.rs via hash matching
-    let previous_metadata_cache = load_previous_metadata(&*storage, encryption_key).await?;
+    let key_cache = match (encryption_key, &repo_key) {
+        (Some(pw), Some(k)) => Some(KeyCache::with_repo_key(pw.as_bytes(), k.clone())),
+        _ => None,
+    };
+    let previous_metadata_cache = load_previous_metadata(&*storage, key_cache.as_ref()).await?;
     debug!(
         "✅ Deduplication cache ready: {} files indexed by hash",
         previous_metadata_cache.len()
@@ -137,7 +157,7 @@ async fn run_backup(
     threading::setup_rayon_thread_pool(num_threads)?;
 
     // ====================== PREPARE DATA ======================
-    let encryption_key_cached = CachedEncryptionKey::new(encryption_key)?;
+    let encryption_key_cached = CachedEncryptionKey::new(repo_key.clone());
     let encrypt_patterns = config.encrypt_patterns.clone();
     let on_progress_clone = on_progress.clone();
     let compression_level = config.compression_level.unwrap_or(3);
@@ -222,7 +242,7 @@ async fn run_backup(
     // ====================== FINALIZE ======================
     let snapshot_path = if !dry_run {
         let manifest = snapshot_manifest.lock().unwrap().clone();
-        write_manifest(&*storage, &manifest, encryption_key, dry_run).await?
+        write_manifest_with_key(&*storage, &manifest, repo_key.as_deref(), dry_run).await?
     } else {
         "[Dry-run] No snapshot written".to_string()
     };

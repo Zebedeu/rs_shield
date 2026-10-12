@@ -11,7 +11,7 @@ use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use tokio::fs;
-use tokio::io::{AsyncRead, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 pub use lock::{LockKind, RepoLock};
 pub use memory::MemoryStorage;
@@ -34,6 +34,31 @@ pub trait Storage: Send + Sync {
     async fn read_stream(&self, path: &str) -> io::Result<BlobReader> {
         let data = self.read(path).await?;
         Ok(Box::pin(io::Cursor::new(data)))
+    }
+
+    /// Writes everything `reader` yields to `path`; returns the number of
+    /// bytes written. Same atomicity as [`Storage::write`].
+    ///
+    /// The default implementation buffers the whole stream in memory; real
+    /// backends override it (local: streamed into a temp file + rename,
+    /// S3: spooled to a local temp file, then [`Storage::write_file`]).
+    async fn write_from_reader(&self, path: &str, mut reader: BlobReader) -> io::Result<u64> {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await?;
+        self.write(path, &buf).await?;
+        Ok(buf.len() as u64)
+    }
+
+    /// Writes the contents of the local file `src` to `path` (used to
+    /// upload blobs spooled to disk without loading them in memory). Same
+    /// atomicity as [`Storage::write`].
+    ///
+    /// The default implementation reads the file into memory; real backends
+    /// stream it (local: copy into a temp file + rename, S3: PutObject with
+    /// a file-backed body of known length).
+    async fn write_file(&self, path: &str, src: &Path) -> io::Result<()> {
+        let data = fs::read(src).await?;
+        self.write(path, &data).await
     }
 
     async fn exists(&self, path: &str) -> io::Result<bool>;
@@ -165,6 +190,16 @@ pub fn is_insecure_remote_endpoint(endpoint: &str) -> bool {
 /// Parent directories are created with plain `create_dir_all` (no `~`/`$VAR`
 /// expansion).
 pub async fn atomic_write_file(path: &Path, data: &[u8]) -> io::Result<()> {
+    let mut src: &[u8] = data;
+    atomic_write_from_reader(path, &mut src).await.map(|_| ())
+}
+
+/// Like [`atomic_write_file`], streaming the content from `reader` (memory
+/// stays bounded by the copy buffer). Returns the number of bytes written.
+pub async fn atomic_write_from_reader<R>(path: &Path, reader: &mut R) -> io::Result<u64>
+where
+    R: AsyncRead + Unpin + ?Sized,
+{
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -190,12 +225,13 @@ pub async fn atomic_write_file(path: &Path, data: &[u8]) -> io::Result<()> {
             .create_new(true)
             .open(&tmp_path)
             .await?;
-        file.write_all(data).await?;
+        let n = tokio::io::copy(reader, &mut file).await?;
         file.flush().await?;
         file.sync_all().await?;
         drop(file);
         fs::rename(&tmp_path, path).await?;
-        sync_dir(parent).await
+        sync_dir(parent).await?;
+        Ok(n)
     }
     .await;
 
@@ -229,6 +265,18 @@ impl Storage for LocalStorage {
         // Atomic (tmp + fsync + rename + fsync dir): a crash never leaves a
         // truncated `data/<kind>/<hash>` that dedup would trust forever.
         atomic_write_file(&full_path, data).await
+    }
+
+    async fn write_from_reader(&self, path: &str, mut reader: BlobReader) -> io::Result<u64> {
+        let full_path = self.safe_join(path)?;
+        atomic_write_from_reader(&full_path, &mut reader).await
+    }
+
+    async fn write_file(&self, path: &str, src: &Path) -> io::Result<()> {
+        let full_path = self.safe_join(path)?;
+        let mut file = fs::File::open(src).await?;
+        atomic_write_from_reader(&full_path, &mut file).await?;
+        Ok(())
     }
 
     async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
@@ -465,6 +513,36 @@ impl Storage for S3Storage {
         Ok(())
     }
 
+    async fn write_file(&self, path: &str, src: &Path) -> io::Result<()> {
+        // Plain PutObject with a file-backed body of known length (no
+        // multipart, no conditional write): streamed from disk, never held
+        // in memory, and accepted by every S3-compatible provider.
+        let body = aws_sdk_s3::primitives::ByteStream::from_path(src)
+            .await
+            .map_err(|e| io::Error::other(format!("S3 Upload Error ({}): {}", path, e)))?;
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(path)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| s3_io_error("Upload", path, e, |_| false))?;
+        Ok(())
+    }
+
+    async fn write_from_reader(&self, path: &str, mut reader: BlobReader) -> io::Result<u64> {
+        // PutObject needs the length up front: spool to a local temp file
+        // (deleted on drop) instead of buffering the stream in memory.
+        let tmp = tempfile::NamedTempFile::new()?;
+        let mut file = fs::File::create(tmp.path()).await?;
+        let n = tokio::io::copy(&mut reader, &mut file).await?;
+        file.flush().await?;
+        drop(file);
+        self.write_file(path, tmp.path()).await?;
+        Ok(n)
+    }
+
     async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         let resp = self
             .client
@@ -688,6 +766,39 @@ mod tests {
         assert_eq!(got, payload);
         assert!(storage.read_stream("../etc/passwd").await.is_err());
         assert!(storage.read_stream("data/clear/missing").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn local_streaming_writes_are_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path().to_str().unwrap());
+        let payload: Vec<u8> = (0..500_000u32).map(|i| (i % 249) as u8).collect();
+        let n = storage
+            .write_from_reader("data/enc/x", Box::pin(io::Cursor::new(payload.clone())))
+            .await
+            .unwrap();
+        assert_eq!(n, payload.len() as u64);
+        assert_eq!(storage.read("data/enc/x").await.unwrap(), payload);
+
+        let src = dir.path().join("spool");
+        std::fs::write(&src, b"from file").unwrap();
+        storage.write_file("data/enc/y", &src).await.unwrap();
+        assert_eq!(storage.read("data/enc/y").await.unwrap(), b"from file");
+        assert!(storage.write_file("../escape", &src).await.is_err());
+        let names: Vec<_> = std::fs::read_dir(dir.path().join("data/enc"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "temp files left behind: {:?}", names);
+
+        // Default trait implementations (MemoryStorage) behave the same.
+        let mem = MemoryStorage::new();
+        mem.write_from_reader("a/b", Box::pin(io::Cursor::new(b"xyz".to_vec())))
+            .await
+            .unwrap();
+        mem.write_file("a/c", &src).await.unwrap();
+        assert_eq!(mem.read("a/b").await.unwrap(), b"xyz");
+        assert_eq!(mem.read("a/c").await.unwrap(), b"from file");
     }
 
     #[tokio::test]

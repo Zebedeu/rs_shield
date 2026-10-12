@@ -1,0 +1,16 @@
+["docs/a.txt"]
+hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+encrypted = false
+compressed = true
+stored_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+stored_size = 12
+
+["big.bin"]
+hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+encrypted = true
+stored_size = 64
+
+[["big.bin".chunks]]
+hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+stored_size = 32
+stored_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

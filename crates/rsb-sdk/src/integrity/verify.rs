@@ -48,11 +48,16 @@ pub async fn perform_verify(
     let snapshot_id = snapshot_id.as_deref();
     let start_time = Instant::now();
     let storage = storage_or_from_config(storage, config).await?;
-    let key_cache = encryption_key
+    let password = encryption_key
         .as_ref()
         .map(|k| k.as_str())
-        .or(config.encryption_key.as_deref())
-        .map(|k| KeyCache::new(k.as_bytes()));
+        .or(config.encryption_key.as_deref());
+    // Unlocks keys/repo.key (if any) before touching objects: a wrong
+    // password fails here with a typed authentication error.
+    let key_cache = match password {
+        Some(k) => Some(KeyCache::open(&*storage, k.as_bytes()).await?),
+        None => None,
+    };
 
     // Reading the manifest with the key also proves the key is correct, so
     // a later decryption failure on an object means the object is damaged.
@@ -191,6 +196,7 @@ async fn check_object_content(
     path: &str,
     content_hash: &str,
     encrypted: bool,
+    max_plain: u64,
     key: Option<&KeyCache>,
 ) -> ObjectCheck {
     let raw = match storage.read(path).await {
@@ -204,7 +210,8 @@ async fn check_object_content(
                 path
             ));
         };
-        match key.decrypt(&raw) {
+        // v3 blobs are bound to their object id (the content hash).
+        match key.decrypt_object(content_hash, &raw) {
             Ok(p) => p,
             Err(e) => {
                 return ObjectCheck::Corrupt {
@@ -217,11 +224,21 @@ async fn check_object_content(
         raw
     };
 
-    let mut decoded = Vec::new();
-    let zstd_ok = zstd::stream::copy_decode(&payload[..], &mut decoded).is_ok()
-        && content_matches(&decoded, content_hash);
-    if zstd_ok {
-        return ObjectCheck::Ok(Some(Decoded::Zstd));
+    // Streamed hash, bounded by the size the manifest allows for this
+    // object: a zstd bomb is reported instead of exhausting memory/CPU.
+    match crate::core::limits::zstd_hash_bounded(&payload, max_plain, path) {
+        Ok((h, _)) if h == content_hash => return ObjectCheck::Ok(Some(Decoded::Zstd)),
+        // A plain object may itself be a zstd frame of something larger.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::FileTooLarge
+                && !content_matches(&payload, content_hash) =>
+        {
+            return ObjectCheck::Corrupt {
+                reason: e.to_string(),
+                decrypt_failed: false,
+            };
+        }
+        _ => {}
     }
     if content_matches(&payload, content_hash) {
         return ObjectCheck::Ok(Some(Decoded::Plain));
@@ -248,6 +265,8 @@ pub async fn verify_manifest_objects(
 
     // object path -> (content hash, encrypted, references)
     let mut objects: BTreeMap<String, (String, bool, Vec<ObjectRef>)> = BTreeMap::new();
+    // object path -> largest decoded size any reference allows
+    let mut max_plain: HashMap<String, u64> = HashMap::new();
     for (file, meta) in manifest {
         let kind = if meta.encrypted { "enc" } else { "clear" };
         let items: Vec<(String, Option<u64>, Option<String>)> = match &meta.chunks {
@@ -263,6 +282,8 @@ pub async fn verify_manifest_objects(
         };
         for (hash, size, stored_hash) in items {
             let path = format!("data/{}/{}", kind, hash);
+            let limit = max_plain.entry(path.clone()).or_insert(0);
+            *limit = (*limit).max(meta.max_object_plain_size());
             objects
                 .entry(path)
                 .or_insert_with(|| (hash, meta.encrypted, Vec::new()))
@@ -344,7 +365,8 @@ pub async fn verify_manifest_objects(
             continue;
         }
 
-        match check_object_content(storage, path, content_hash, *encrypted, key).await {
+        let limit = max_plain.get(path).copied().unwrap_or(0);
+        match check_object_content(storage, path, content_hash, *encrypted, limit, key).await {
             ObjectCheck::Ok(decoded) => {
                 if *encrypted {
                     decrypted_any = true;
@@ -441,4 +463,45 @@ pub async fn verify_manifest_objects(
     out.files_with_errors = bad_files.len();
     out.files_ok = manifest.len().saturating_sub(bad_files.len());
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::MemoryStorage;
+
+    #[tokio::test]
+    async fn zstd_bomb_object_is_reported_not_inflated() {
+        let storage = MemoryStorage::new();
+        let content = b"0123456789";
+        let hash = hash_file_content(content).unwrap();
+        // 256 MiB of zeros in a few KiB, stored where a 10-byte file belongs.
+        let bomb = zstd::stream::encode_all(std::io::Read::take(std::io::repeat(0), 256 << 20), 1)
+            .unwrap();
+        storage
+            .write(&format!("data/clear/{}", hash), &bomb)
+            .await
+            .unwrap();
+        let mut manifest = HashMap::new();
+        manifest.insert(
+            PathBuf::from("f.txt"),
+            FileMetadata::new(hash.clone(), false, true).with_size(content.len() as u64),
+        );
+        let out = verify_manifest_objects(
+            &storage,
+            &manifest,
+            None,
+            VerifyObjectsOptions::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.corrupt.len(), 1, "{:?}", out.errors);
+        assert!(
+            out.corrupt[0].reason.contains("exceeds"),
+            "{:?}",
+            out.corrupt
+        );
+    }
 }
