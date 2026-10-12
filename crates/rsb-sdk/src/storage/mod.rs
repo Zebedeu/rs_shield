@@ -1,3 +1,4 @@
+pub mod instrumented;
 pub mod lock;
 pub mod memory;
 
@@ -7,12 +8,13 @@ use aws_credential_types::Credentials;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::error::{DisplayErrorContext, SdkError};
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
+pub use instrumented::{InstrumentedStorage, StorageCallCounts};
 pub use lock::{LockKind, RepoLock};
 pub use memory::MemoryStorage;
 
@@ -61,6 +63,34 @@ pub trait Storage: Send + Sync {
         self.write(path, &data).await
     }
 
+    /// Like [`Storage::write`], but making the new object durable may be
+    /// deferred until the next [`Storage::sync`]. The object is never
+    /// visible partially written; a crash before the `sync` can only lose
+    /// it. Used for data objects, whose manifest is written after a
+    /// `sync`. The default implementation is [`Storage::write`].
+    async fn write_deferred(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.write(path, data).await
+    }
+
+    /// [`Storage::write_file`] with the durability of
+    /// [`Storage::write_deferred`].
+    async fn write_file_deferred(&self, path: &str, src: &Path) -> io::Result<()> {
+        self.write_file(path, src).await
+    }
+
+    /// Makes every earlier deferred write durable. The default does
+    /// nothing (writes are durable when they return).
+    async fn sync(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Stable identity of the storage location (directory, bucket...),
+    /// used to key local caches such as the dedup index. `None` (the
+    /// default) disables those caches for this storage.
+    fn cache_identity(&self) -> Option<String> {
+        None
+    }
+
     async fn exists(&self, path: &str) -> io::Result<bool>;
     async fn list(&self, prefix: &str) -> io::Result<Vec<String>>;
     async fn delete(&self, path: &str) -> io::Result<()>;
@@ -81,12 +111,24 @@ pub trait Storage: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct LocalStorage {
     base_path: PathBuf,
+    /// Directories that received a deferred write since the last `sync`.
+    pending_dirs: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
 }
 
 impl LocalStorage {
     pub fn new(path: &str) -> Self {
         Self {
             base_path: PathBuf::from(path),
+            pending_dirs: Default::default(),
+        }
+    }
+
+    fn note_pending(&self, full_path: &Path) {
+        if let Some(parent) = full_path.parent() {
+            self.pending_dirs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(parent.to_path_buf());
         }
     }
 
@@ -182,30 +224,60 @@ pub fn is_insecure_remote_endpoint(endpoint: &str) -> bool {
     endpoint.trim().to_lowercase().starts_with("http://") && !is_loopback_endpoint(endpoint)
 }
 
-/// Atomically and durably writes `data` to `path`:
-/// temp file in the same directory → `sync_all` → `rename` → fsync(dir).
+/// Atomically and durably writes `data` to `path`: temp file in the same
+/// directory → [`sync_before_rename`] → `rename` → fsync(dir).
 ///
 /// A crash at any point leaves either the old object or the complete new
 /// one, never a truncated file (which dedup would otherwise trust forever).
 /// Parent directories are created with plain `create_dir_all` (no `~`/`$VAR`
 /// expansion).
 pub async fn atomic_write_file(path: &Path, data: &[u8]) -> io::Result<()> {
-    let mut src: &[u8] = data;
-    atomic_write_from_reader(path, &mut src).await.map(|_| ())
+    // One blocking task for the whole sequence (one copy of `data`), instead
+    // of a blocking round trip per 8 KiB through `tokio::fs`.
+    let path = path.to_path_buf();
+    let data = data.to_vec();
+    blocking(move || atomic_write_blocking(&path, true, |f| f.write_all(&data)).map(|_| ())).await
 }
 
-/// Like [`atomic_write_file`], streaming the content from `reader` (memory
-/// stays bounded by the copy buffer). Returns the number of bytes written.
-pub async fn atomic_write_from_reader<R>(path: &Path, reader: &mut R) -> io::Result<u64>
-where
-    R: AsyncRead + Unpin + ?Sized,
-{
+/// Like [`atomic_write_file`], copying the content of the local file `src`
+/// (in one blocking task, through a 1 MiB buffer).
+pub async fn atomic_copy_file(path: &Path, src: &Path) -> io::Result<()> {
+    copy_file_atomically(path, src, true).await
+}
+
+/// [`atomic_copy_file`]; with `sync_parent == false` the directory is not
+/// fsync'ed (see [`Storage::write_file_deferred`]).
+async fn copy_file_atomically(path: &Path, src: &Path, sync_parent: bool) -> io::Result<()> {
+    let (path, src) = (path.to_path_buf(), src.to_path_buf());
+    blocking(move || {
+        let src = std::fs::File::open(&src)?;
+        let mut reader = std::io::BufReader::with_capacity(COPY_BUF, src);
+        atomic_write_blocking(&path, sync_parent, |f| {
+            std::io::copy(&mut reader, f).map(|_| ())
+        })
+        .map(|_| ())
+    })
+    .await
+}
+
+/// Copy buffer of the atomic writes.
+const COPY_BUF: usize = 1024 * 1024;
+
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(io::Error::other)?
+}
+
+/// Temp file name next to `path` and the directory holding both.
+fn atomic_tmp_path(path: &Path) -> io::Result<(PathBuf, PathBuf)> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).await?;
-
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
     let file_name = path
         .file_name()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "Path has no file name"))?
@@ -217,6 +289,51 @@ where
         TMP_MARKER,
         uuid::Uuid::new_v4().simple()
     ));
+    Ok((parent, tmp_path))
+}
+
+/// Blocking core of [`atomic_write_file`] / [`atomic_copy_file`]: `fill`
+/// writes the content into the temp file. The parent directory is
+/// fsync'ed after the rename when `sync_parent` is set.
+fn atomic_write_blocking(
+    path: &Path,
+    sync_parent: bool,
+    fill: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<u64> {
+    let (parent, tmp_path) = atomic_tmp_path(path)?;
+    std::fs::create_dir_all(&parent)?;
+    let result = (|| {
+        // create_new => O_CREAT|O_EXCL: never follows a pre-planted symlink.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        fill(&mut file)?;
+        file.flush()?;
+        sync_before_rename(&file)?;
+        let n = file.metadata()?.len();
+        drop(file);
+        std::fs::rename(&tmp_path, path)?;
+        if sync_parent {
+            sync_dir_blocking(&parent)?;
+        }
+        Ok(n)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// Like [`atomic_write_file`], streaming the content from `reader` (memory
+/// stays bounded by the copy buffer). Returns the number of bytes written.
+pub async fn atomic_write_from_reader<R>(path: &Path, reader: &mut R) -> io::Result<u64>
+where
+    R: AsyncRead + Unpin + ?Sized,
+{
+    let (parent, tmp_path) = atomic_tmp_path(path)?;
+    let parent = parent.as_path();
+    fs::create_dir_all(parent).await?;
 
     let result = async {
         // create_new => O_CREAT|O_EXCL: never follows a pre-planted symlink.
@@ -225,7 +342,10 @@ where
             .create_new(true)
             .open(&tmp_path)
             .await?;
-        let n = tokio::io::copy(reader, &mut file).await?;
+        // 1 MiB reads/writes: each `tokio::fs` operation is a blocking-pool
+        // round trip, so the default 8 KiB copy buffer is slow.
+        let mut reader = tokio::io::BufReader::with_capacity(COPY_BUF, reader);
+        let n = tokio::io::copy_buf(&mut reader, &mut file).await?;
         file.flush().await?;
         file.sync_all().await?;
         drop(file);
@@ -258,6 +378,37 @@ pub async fn sync_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Makes the data written to `file` reach stable storage before any later
+/// write, in particular the rename that publishes it, so a crash or power
+/// loss can never leave a renamed but incomplete file.
+///
+/// On Apple platforms this is `F_BARRIERFSYNC`: an I/O barrier, much
+/// cheaper than the full drive-cache flush of `F_FULLFSYNC` (what
+/// `sync_all` does there), with the ordering guarantee needed here. It
+/// does not make the file durable by itself: callers report success only
+/// after [`sync_dir`] (`F_FULLFSYNC`, which flushes everything written
+/// before it). If the barrier is not supported, falls back to `sync_all`.
+/// Elsewhere it is `sync_all`.
+pub fn sync_before_rename(file: &std::fs::File) -> io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fcntl on a valid, open descriptor owned by `file`.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } != -1 {
+            return Ok(());
+        }
+    }
+    file.sync_all()
+}
+
+/// Blocking [`sync_dir`].
+fn sync_dir_blocking(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
 #[async_trait]
 impl Storage for LocalStorage {
     async fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
@@ -274,8 +425,45 @@ impl Storage for LocalStorage {
 
     async fn write_file(&self, path: &str, src: &Path) -> io::Result<()> {
         let full_path = self.safe_join(path)?;
-        let mut file = fs::File::open(src).await?;
-        atomic_write_from_reader(&full_path, &mut file).await?;
+        atomic_copy_file(&full_path, src).await
+    }
+
+    async fn write_deferred(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        let full_path = self.safe_join(path)?;
+        let data = data.to_vec();
+        let target = full_path.clone();
+        blocking(move || atomic_write_blocking(&target, false, |f| f.write_all(&data))).await?;
+        self.note_pending(&full_path);
+        Ok(())
+    }
+
+    async fn write_file_deferred(&self, path: &str, src: &Path) -> io::Result<()> {
+        let full_path = self.safe_join(path)?;
+        copy_file_atomically(&full_path, src, false).await?;
+        self.note_pending(&full_path);
+        Ok(())
+    }
+
+    fn cache_identity(&self) -> Option<String> {
+        let path = std::fs::canonicalize(&self.base_path)
+            .or_else(|_| std::path::absolute(&self.base_path))
+            .ok()?;
+        Some(format!("local:{}", path.display()))
+    }
+
+    async fn sync(&self) -> io::Result<()> {
+        let dirs: Vec<PathBuf> = {
+            let mut pending = self.pending_dirs.lock().unwrap_or_else(|e| e.into_inner());
+            pending.drain().collect()
+        };
+        for (i, dir) in dirs.iter().enumerate() {
+            if let Err(e) = sync_dir(dir).await {
+                // Not synced: keep them pending for the next attempt.
+                let mut pending = self.pending_dirs.lock().unwrap_or_else(|e| e.into_inner());
+                pending.extend(dirs[i..].iter().cloned());
+                return Err(e);
+            }
+        }
         Ok(())
     }
 
@@ -454,6 +642,8 @@ where
 pub struct S3Storage {
     client: Client,
     bucket: String,
+    /// `s3:<endpoint or "aws">:<region>:<bucket>` (see `cache_identity`).
+    identity: String,
 }
 
 impl S3Storage {
@@ -465,9 +655,20 @@ impl S3Storage {
         endpoint: Option<String>,
         credentials: Credentials,
     ) -> Self {
+        let identity = format!(
+            "s3:{}:{}:{}",
+            endpoint
+                .as_deref()
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+                .unwrap_or("aws"),
+            effective_s3_region(region.as_deref(), endpoint.as_deref()).unwrap_or_default(),
+            bucket
+        );
         Self {
             client: build_s3_client(region, endpoint, credentials).await,
             bucket: bucket.to_string(),
+            identity,
         }
     }
 
@@ -499,6 +700,10 @@ impl S3Storage {
 
 #[async_trait]
 impl Storage for S3Storage {
+    fn cache_identity(&self) -> Option<String> {
+        Some(self.identity.clone())
+    }
+
     async fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
         // PutObject simples (sem ACL, tagging, storage class, SSE-KMS nem
         // escrita condicional): suportado por todos os fornecedores.
@@ -799,6 +1004,44 @@ mod tests {
         mem.write_file("a/c", &src).await.unwrap();
         assert_eq!(mem.read("a/b").await.unwrap(), b"xyz");
         assert_eq!(mem.read("a/c").await.unwrap(), b"from file");
+    }
+
+    #[tokio::test]
+    async fn local_deferred_writes_are_atomic_and_synced_on_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path().to_str().unwrap());
+        storage
+            .write_deferred("data/clear/a", b"one")
+            .await
+            .unwrap();
+        let src = dir.path().join("spool");
+        std::fs::write(&src, b"two").unwrap();
+        storage
+            .write_file_deferred("data/enc/b", &src)
+            .await
+            .unwrap();
+        assert!(storage.write_deferred("../escape", b"x").await.is_err());
+        // Visible (and complete) at once; durability waits for `sync`.
+        assert_eq!(storage.read("data/clear/a").await.unwrap(), b"one");
+        assert_eq!(storage.read("data/enc/b").await.unwrap(), b"two");
+        assert_eq!(storage.pending_dirs.lock().unwrap().len(), 2);
+        storage.sync().await.unwrap();
+        assert!(storage.pending_dirs.lock().unwrap().is_empty());
+        for d in ["data/clear", "data/enc"] {
+            assert_eq!(std::fs::read_dir(dir.path().join(d)).unwrap().count(), 1);
+        }
+        // Defaults (MemoryStorage) behave like plain writes.
+        let mem = MemoryStorage::new();
+        mem.write_deferred("a/b", b"x").await.unwrap();
+        mem.sync().await.unwrap();
+        assert_eq!(mem.read("a/b").await.unwrap(), b"x");
+    }
+
+    #[test]
+    fn sync_before_rename_works_on_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = std::fs::File::create(dir.path().join("f")).unwrap();
+        sync_before_rename(&f).unwrap();
     }
 
     #[tokio::test]

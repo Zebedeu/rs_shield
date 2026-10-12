@@ -16,6 +16,7 @@
 //! escopo) e nunca aparece em `Debug`.
 
 use crate::core::cancellation::CancellationToken;
+use crate::core::dedup_index::DedupIndexOptions;
 use crate::core::types::ProgressCallback;
 use crate::credentials::SecureString;
 use crate::storage::Storage;
@@ -47,6 +48,9 @@ pub struct BackupOptions {
     pub resume: bool,
     /// Limite de threads; `None` usa `config.max_threads`/automático.
     pub max_threads: Option<usize>,
+    /// Índice local de dedup (ativo por omissão): evita um HEAD por
+    /// objeto já conhecido. Ver [`crate::core::dedup_index`].
+    pub dedup_index: DedupIndexOptions,
     pub on_progress: Option<ProgressCallback>,
     pub cancellation_token: Option<CancellationToken>,
     /// Storage já construído (ex.: [`crate::storage::MemoryStorage`]);
@@ -79,6 +83,7 @@ impl fmt::Debug for BackupOptions {
             .field("dry_run", &self.dry_run)
             .field("resume", &self.resume)
             .field("max_threads", &self.max_threads)
+            .field("dedup_index", &self.dedup_index)
             .field("on_progress", &shown(&self.on_progress, "<callback>"))
             .field(
                 "cancellation_token",
@@ -103,6 +108,11 @@ pub struct RestoreOptions {
     pub force: bool,
     /// Restaura para `target_path/restore_<timestamp>`.
     pub versioned: bool,
+    /// Ficheiros restaurados em paralelo; `None` (ou 0) usa
+    /// [`crate::core::restore::default_restore_concurrency`]. A memória
+    /// continua limitada por
+    /// [`crate::core::restore::RESTORE_MEM_BUDGET_MIB`].
+    pub concurrency: Option<usize>,
     pub on_progress: Option<ProgressCallback>,
     pub cancellation_token: Option<CancellationToken>,
     /// Storage já construído (ex.: [`crate::storage::MemoryStorage`]);
@@ -143,6 +153,7 @@ impl fmt::Debug for RestoreOptions {
             )
             .field("force", &self.force)
             .field("versioned", &self.versioned)
+            .field("concurrency", &self.concurrency)
             .field("on_progress", &shown(&self.on_progress, "<callback>"))
             .field(
                 "cancellation_token",

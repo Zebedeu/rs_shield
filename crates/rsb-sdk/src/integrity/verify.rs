@@ -440,6 +440,19 @@ pub async fn verify_manifest_objects(
                 encrypted_failures
             ));
         }
+        if delete_candidates
+            .iter()
+            .any(|(_, d)| !(*d && distrust_decrypt))
+            && let Err(e) = crate::core::dedup_index::bump_repo_epoch(storage).await
+        {
+            // Without the epoch change, local dedup indexes could keep
+            // trusting the objects about to be deleted: do not delete.
+            out.errors.push(format!(
+                "Repair skipped: could not update the repository epoch: {}",
+                e
+            ));
+            delete_candidates.clear();
+        }
         for (path, decrypt_failed) in delete_candidates {
             if decrypt_failed && distrust_decrypt {
                 continue;

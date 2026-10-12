@@ -1,6 +1,7 @@
 // Re-exports everything for easier external use (e.g., rsb_sdk::core::perform_backup)
 pub mod cancellation;
 pub mod chat_integrations;
+pub mod dedup_index;
 pub mod email_notifications;
 pub mod file_processor;
 pub mod limits;

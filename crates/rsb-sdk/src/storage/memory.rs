@@ -25,9 +25,20 @@ struct Inner {
 }
 
 /// Backend [`Storage`] totalmente em memória (thread-safe).
-#[derive(Default)]
 pub struct MemoryStorage {
     inner: RwLock<Inner>,
+    /// Identidade única por instância (chave de caches locais, como o
+    /// índice de dedup): duas instâncias nunca partilham um cache.
+    id: String,
+}
+
+impl Default for MemoryStorage {
+    fn default() -> Self {
+        Self {
+            inner: RwLock::default(),
+            id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
 }
 
 impl std::fmt::Debug for MemoryStorage {
@@ -71,6 +82,10 @@ impl MemoryStorage {
 
 #[async_trait]
 impl Storage for MemoryStorage {
+    fn cache_identity(&self) -> Option<String> {
+        Some(format!("memory:{}", self.id))
+    }
+
     async fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
         validate_storage_path(path)?;
         let mut inner = self.inner.write().map_err(|_| poisoned())?;

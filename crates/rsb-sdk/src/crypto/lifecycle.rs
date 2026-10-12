@@ -641,6 +641,9 @@ async fn migrate_locked(
     let key = Arc::new(unwrap_blocking(file.clone(), password).await?);
     let cache = KeyCache::with_repo_key(password, key.clone());
     let scan = scan(storage, &cache).await?;
+    // Objects are rewritten with other stored sizes: local dedup indexes
+    // must start over.
+    crate::core::dedup_index::bump_repo_epoch(storage).await?;
     let mut rep = MigrationReport::default();
     let mut info: HashMap<String, StoredInfo> = HashMap::new();
 
@@ -1014,6 +1017,8 @@ async fn rotate_locked(
     let mut file = RepoKeyFile::from_bytes(&raw)?;
     let mut key = Arc::new(unwrap_blocking(file.clone(), password).await?);
     let mut rep = RotationReport::default();
+    // Objects are rewritten: local dedup indexes must start over.
+    crate::core::dedup_index::bump_repo_epoch(storage).await?;
 
     if key.is_rotating() {
         rep.resumed = true;

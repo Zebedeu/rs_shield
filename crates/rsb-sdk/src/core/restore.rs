@@ -1,16 +1,19 @@
+use super::cancellation::CancellationToken;
 use super::manifest::find_latest_snapshot_cached;
-use super::types::FileMetadata;
+use super::types::{FileMetadata, ProgressCallback};
 use crate::config::Config;
 use crate::crypto::{BLOB_MAGIC_V3, CryptoError, KeyCache};
 use crate::options::RestoreOptions;
 use crate::report::ReportData;
-use crate::storage::{Storage, sync_dir};
+use crate::storage::{BlobReader, Storage, sync_dir};
 use crate::storage::{validate_content_hash, validate_storage_path};
 use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info};
@@ -28,8 +31,28 @@ pub async fn perform_restore(
     restore_from_storage(&*storage, options).await
 }
 
+/// Default number of files restored concurrently: twice the CPU count,
+/// between 4 and 64. Concurrency overlaps storage latency, fsyncs and
+/// decoding; memory stays bounded by [`RESTORE_MEM_BUDGET_MIB`].
+pub fn default_restore_concurrency() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (cpus * 2).clamp(4, 64)
+}
+
 /// Restore implementation working on any [`Storage`] (used by tests too).
 /// `options.storage` is ignored here: `storage` is used.
+///
+/// Files are restored concurrently (see [`RestoreOptions::concurrency`]),
+/// each with the same guarantees as a sequential restore: temp file next to
+/// the target, chunk and full-file hash verification, then an atomic
+/// rename. Entries are handed out in path order, progress is reported in
+/// that order and errors are listed in that order, whatever order the
+/// files finish in. Entries whose paths differ only by case are restored
+/// one after the other (they are the same file on case-insensitive file
+/// systems). Cancellation stops handing out new files; files in progress
+/// finish or fail as a whole.
 pub async fn restore_from_storage(
     storage: &dyn Storage,
     options: RestoreOptions,
@@ -40,6 +63,7 @@ pub async fn restore_from_storage(
         encryption_key,
         force,
         versioned,
+        concurrency,
         on_progress,
         cancellation_token,
         storage: _,
@@ -64,6 +88,8 @@ pub async fn restore_from_storage(
     info!("Restoring snapshot: {}", manifest_path);
 
     let manifest: HashMap<PathBuf, FileMetadata> = toml::from_str(&manifest_content)?;
+    let mut entries: Vec<(PathBuf, FileMetadata)> = manifest.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let restore_root = if versioned {
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
@@ -79,7 +105,7 @@ pub async fn restore_from_storage(
     tokio::fs::create_dir_all(&restore_root).await?;
     let restore_root_canon = tokio::fs::canonicalize(&restore_root).await?;
 
-    let pb = ProgressBar::new(manifest.len() as u64);
+    let pb = ProgressBar::new(entries.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
             .template(
@@ -88,48 +114,54 @@ pub async fn restore_from_storage(
             .progress_chars("#>-"),
     );
 
+    let total_files = entries.len();
+    let (parallel, serial) = split_case_collisions(&entries);
+    let run = RestoreRun {
+        storage,
+        root: &restore_root_canon,
+        key: key_cache.as_ref(),
+        force,
+        entries: &entries,
+        cancel: cancellation_token.as_ref(),
+        on_progress: on_progress.as_ref(),
+        pb: &pb,
+        started: Mutex::new(0),
+        results: Mutex::new(vec![None; total_files]),
+        dirs: Mutex::new(BTreeSet::new()),
+    };
+    let workers = concurrency
+        .filter(|&n| n > 0)
+        .unwrap_or_else(default_restore_concurrency);
+    run_workers(&run, &parallel, workers).await;
+    run_workers(&run, &serial, 1).await;
+
+    if cancellation_token
+        .as_ref()
+        .is_some_and(|t| t.is_cancelled())
+    {
+        info!("⏹️ Restore cancelled by user");
+    }
+    pb.finish_with_message("Restore completed");
+
+    let RestoreRun { results, dirs, .. } = run;
     let mut errors = Vec::new();
     let mut success = 0;
-    let total_files = manifest.len();
-
-    for (current_files, (rel_path, metadata)) in manifest.into_iter().enumerate() {
-        // Check if the operation was cancelled
-        if let Some(token) = &cancellation_token
-            && token.is_cancelled()
-        {
-            info!("⏹️ Restore cancelled by user");
-            break;
+    for r in results.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        match r {
+            Some(Ok(())) => success += 1,
+            Some(Err(msg)) => errors.push(msg),
+            None => {} // not attempted (cancelled)
         }
-
-        pb.set_message(format!("Restoring: {}", rel_path.display()));
-        if let Some(cb) = &on_progress {
-            cb(
-                current_files,
-                total_files,
-                format!("Restoring: {}", rel_path.display()),
-            );
-        }
-
-        if let Err(msg) = restore_entry(
-            storage,
-            &restore_root_canon,
-            &rel_path,
-            &metadata,
-            key_cache.as_ref(),
-            force,
-        )
-        .await
-        {
+    }
+    // Each restored file was fsync'ed before its rename; one fsync per
+    // directory now makes the renames durable before success is reported.
+    for dir in dirs.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        if let Err(e) = sync_dir(&dir).await {
+            let msg = format!("Failed to sync directory {}: {}", dir.display(), e);
             error!("{}", msg);
             errors.push(msg);
-        } else {
-            success += 1;
         }
-
-        pb.inc(1);
     }
-
-    pb.finish_with_message("Restore completed");
 
     let status = if errors.is_empty() {
         "Success"
@@ -155,7 +187,134 @@ pub async fn restore_from_storage(
     Ok(report_data)
 }
 
-/// Restores one manifest entry; returns a user-facing message on failure.
+/// Splits entry indices into those that can be restored concurrently and
+/// those whose path collides with another one when case is ignored (same
+/// file on case-insensitive file systems): the latter are restored
+/// sequentially, in path order, so `force`/"already exists" behave as in a
+/// sequential restore.
+fn split_case_collisions(entries: &[(PathBuf, FileMetadata)]) -> (Vec<usize>, Vec<usize>) {
+    let folded: Vec<String> = entries
+        .iter()
+        .map(|(p, _)| p.to_string_lossy().to_lowercase())
+        .collect();
+    let mut seen: HashMap<&str, usize> = HashMap::with_capacity(entries.len());
+    for f in &folded {
+        *seen.entry(f.as_str()).or_default() += 1;
+    }
+    (0..entries.len()).partition(|&i| seen[folded[i].as_str()] == 1)
+}
+
+/// Shared state of one restore, used by every worker.
+struct RestoreRun<'a> {
+    storage: &'a dyn Storage,
+    root: &'a Path,
+    key: Option<&'a KeyCache>,
+    force: bool,
+    entries: &'a [(PathBuf, FileMetadata)],
+    cancel: Option<&'a CancellationToken>,
+    on_progress: Option<&'a ProgressCallback>,
+    pb: &'a ProgressBar,
+    /// Entries handed out so far (also serializes progress reporting).
+    started: Mutex<usize>,
+    /// Outcome per entry index (`None` = not attempted).
+    results: Mutex<Vec<Option<Result<(), String>>>>,
+    /// Directories that received a file (fsync'ed once at the end).
+    dirs: Mutex<BTreeSet<PathBuf>>,
+}
+
+impl RestoreRun<'_> {
+    /// Next entry of `queue` to restore, or `None` when the queue is empty
+    /// or the restore was cancelled. Progress is reported here, under one
+    /// lock, so callbacks see a strictly increasing count in path order.
+    fn next(&self, queue: &[usize], pos: &AtomicUsize) -> Option<usize> {
+        let mut started = self.started.lock().unwrap_or_else(|e| e.into_inner());
+        if self.cancel.is_some_and(|t| t.is_cancelled()) {
+            return None;
+        }
+        let i = *queue.get(pos.fetch_add(1, Ordering::Relaxed))?;
+        let msg = format!("Restoring: {}", self.entries[i].0.display());
+        self.pb.set_message(msg.clone());
+        if let Some(cb) = self.on_progress {
+            cb(*started, self.entries.len(), msg);
+        }
+        *started += 1;
+        Some(i)
+    }
+
+    async fn worker(&self, queue: &[usize], pos: &AtomicUsize) {
+        while let Some(i) = self.next(queue, pos) {
+            let (rel_path, metadata) = &self.entries[i];
+            let result = restore_entry(
+                self.storage,
+                self.root,
+                rel_path,
+                metadata,
+                self.key,
+                self.force,
+            )
+            .await;
+            let result = match result {
+                Ok(dir) => {
+                    self.dirs
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(dir);
+                    Ok(())
+                }
+                Err(msg) => {
+                    error!("{}", msg);
+                    Err(msg)
+                }
+            };
+            self.results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(result);
+            self.pb.inc(1);
+        }
+    }
+}
+
+/// Restores the entries of `queue` with up to `concurrency` files in
+/// flight.
+///
+/// On a multi-threaded tokio runtime the workers run on scoped OS threads
+/// (at most one per CPU, each driving several files), so decryption,
+/// decompression and hashing use several cores while the storage and the
+/// key cache stay borrowed. Elsewhere (current-thread runtime) the workers
+/// run concurrently on the calling task, which still overlaps I/O.
+async fn run_workers(run: &RestoreRun<'_>, queue: &[usize], concurrency: usize) {
+    use futures_util::future::join_all;
+    use tokio::runtime::{Handle, RuntimeFlavor};
+
+    if queue.is_empty() {
+        return;
+    }
+    let pos = AtomicUsize::new(0);
+    let n = concurrency.clamp(1, queue.len());
+    let multi_thread =
+        Handle::try_current().is_ok_and(|h| h.runtime_flavor() == RuntimeFlavor::MultiThread);
+    if n == 1 || !multi_thread {
+        join_all((0..n).map(|_| run.worker(queue, &pos))).await;
+        return;
+    }
+    let cpus = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(1);
+    let threads = n.min(cpus).max(1);
+    let per_thread = n.div_ceil(threads);
+    let handle = Handle::current();
+    let (handle, pos) = (&handle, &pos);
+    tokio::task::block_in_place(|| {
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(move || {
+                    handle.block_on(join_all((0..per_thread).map(|_| run.worker(queue, pos))))
+                });
+            }
+        })
+    });
+}
+
+/// Restores one manifest entry; returns the directory the file was
+/// written to, or a user-facing message on failure.
 async fn restore_entry(
     storage: &dyn Storage,
     restore_root_canon: &Path,
@@ -163,7 +322,7 @@ async fn restore_entry(
     metadata: &FileMetadata,
     key_cache: Option<&KeyCache>,
     force: bool,
-) -> Result<(), String> {
+) -> Result<PathBuf, String> {
     // Contenção anti-traversal: rejeita absoluto, `..`, componentes especiais.
     // Manifests escritos no Windows antes da normalização usam `\`: aí é
     // separador e cada componente continua a ser validado.
@@ -228,25 +387,18 @@ async fn restore_entry(
                 path: format!("data/{}/{}", kind, c.hash),
                 object_id: c.hash.as_str(),
                 chunk_hash: Some(c.hash.as_str()),
+                stored_size: Some(c.stored_size).filter(|&n| n > 0),
             })
             .collect(),
         None => {
+            // No HEAD first: a missing object is reported by the GET
+            // (see `MissingObject`), which saves one round trip per file.
             let data_path = format!("data/{}/{}", kind, metadata.hash);
-            match storage.exists(&data_path).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    // 🐛 Fix: More informative error about missing data
-                    return Err(format!(
-                        "❌ Missing data for file: {}\n   This file is referenced in the backup metadata but the data file is missing.\n   Your backup may be incomplete or corrupted.",
-                        rel_path.display()
-                    ));
-                }
-                Err(e) => return Err(format!("Failed to restore {}: {}", rel_path.display(), e)),
-            }
             vec![BlobRef {
                 path: data_path,
                 object_id: metadata.hash.as_str(),
                 chunk_hash: None,
+                stored_size: None,
             }]
         }
     };
@@ -265,13 +417,24 @@ async fn restore_entry(
     )
     .await
     .map_err(|e| {
+        if metadata.chunks.is_none() && MissingObject::is(&e) {
+            // 🐛 Fix: More informative error about missing data
+            return format!(
+                "❌ Missing data for file: {}\n   This file is referenced in the backup metadata but the data file is missing.\n   Your backup may be incomplete or corrupted.",
+                rel_path.display()
+            );
+        }
         let what = if metadata.chunks.is_some() {
             "multipart "
         } else {
             ""
         };
         format!("Failed to restore {}{}: {}", what, rel_path.display(), e)
-    })
+    })?;
+    Ok(target
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| restore_root_canon.to_path_buf()))
 }
 
 /// Builds the on-disk target for `rel` under `root_canon`, creating parent
@@ -406,7 +569,13 @@ impl VerifiedOutput {
 
     async fn commit(mut self, expected_hash: &str, target: &Path) -> io::Result<()> {
         self.file.flush().await?;
-        self.file.sync_all().await?;
+        // Data reaches stable storage before the rename below (ordering
+        // barrier); the restore fsyncs every directory at the end, before
+        // it reports success.
+        let file = self.file.into_std().await;
+        tokio::task::spawn_blocking(move || crate::storage::sync_before_rename(&file))
+            .await
+            .map_err(io::Error::other)??;
         let computed = self.hasher.finalize().to_hex().to_string();
         if computed != expected_hash {
             return Err(io::Error::new(
@@ -414,11 +583,9 @@ impl VerifiedOutput {
                 "Full file hash mismatch after restore",
             ));
         }
-        tokio::fs::rename(&self.tmp, target).await?;
-        if let Some(parent) = target.parent() {
-            sync_dir(parent).await?;
-        }
-        Ok(())
+        // The caller fsyncs the parent directory (once per directory, at
+        // the end of the restore) to make the rename durable.
+        tokio::fs::rename(&self.tmp, target).await
     }
 }
 
@@ -456,6 +623,9 @@ struct BlobRef<'a> {
     object_id: &'a str,
     /// Expected hash of this blob's plaintext (multipart chunks only).
     chunk_hash: Option<&'a str>,
+    /// Stored size recorded in the manifest (multipart chunks only); bounds
+    /// what a prefetch may buffer.
+    stored_size: Option<u64>,
 }
 
 /// Largest decoded size accepted for a whole file and for each of its
@@ -615,6 +785,10 @@ where
 /// Restores one encrypted blob: v3 is decrypted chunk by chunk (bounded
 /// memory, every chunk authenticated before it is written); v1/v2 blobs are
 /// read whole and decrypted in place.
+///
+/// `prefetched` holds the whole stored blob when it was fetched ahead (its
+/// memory, including the decode buffers, is already reserved from
+/// [`RESTORE_MEM_BUDGET`]); otherwise the blob is streamed from storage.
 async fn decode_encrypted_blob(
     storage: &dyn Storage,
     blob: &BlobRef<'_>,
@@ -622,8 +796,18 @@ async fn decode_encrypted_blob(
     compressed: bool,
     outbuf: &mut [u8],
     sink: &mut BlobSink<'_>,
+    prefetched: Option<Vec<u8>>,
 ) -> io::Result<()> {
-    let mut reader = storage.read_stream(&blob.path).await?;
+    let is_prefetched = prefetched.is_some();
+    let mut reader: BlobReader = match prefetched {
+        // v1/v2 are authenticated as a whole: decrypt the buffer in place.
+        Some(whole) if !crate::crypto::is_v3(&whole) => {
+            let plain = key.decrypt_owned(whole)?;
+            return push_whole(&plain, compressed, outbuf, sink).await;
+        }
+        Some(whole) => Box::pin(std::io::Cursor::new(whole)),
+        None => open_blob(storage, &blob.path).await?,
+    };
     let mut magic = [0u8; 8];
     let got = read_up_to(&mut reader, &mut magic).await?;
 
@@ -635,10 +819,16 @@ async fn decode_encrypted_blob(
             .stream_decryptor(blob.object_id, &magic, reader)
             .await?;
         let chunk = dec.header().chunk_size as u64 + crate::crypto::stream::V3_TAG_LEN as u64;
-        let _permit = RESTORE_MEM_BUDGET
-            .acquire_many(budget_permits(Some(chunk)))
-            .await
-            .map_err(io::Error::other)?;
+        let _permit = if is_prefetched {
+            None
+        } else {
+            Some(
+                RESTORE_MEM_BUDGET
+                    .acquire_many(budget_permits(Some(chunk)))
+                    .await
+                    .map_err(io::Error::other)?,
+            )
+        };
         let mut decoder = PayloadDecoder::new(compressed)?;
         while let Some(plain) = dec.next_chunk().await? {
             decoder.push(plain, outbuf, sink).await?;
@@ -659,11 +849,107 @@ async fn decode_encrypted_blob(
     reader.read_to_end(&mut whole).await?;
     // Decrypted in place: one copy of the blob in memory.
     let plain = key.decrypt_owned(whole)?;
+    push_whole(&plain, compressed, outbuf, sink).await
+}
+
+/// A data object referenced by the manifest does not exist in storage.
+#[derive(Debug)]
+struct MissingObject(String);
+
+impl std::fmt::Display for MissingObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "object {} is missing from the repository", self.0)
+    }
+}
+
+impl std::error::Error for MissingObject {}
+
+impl MissingObject {
+    fn is(e: &io::Error) -> bool {
+        e.kind() == ErrorKind::NotFound && e.get_ref().is_some_and(|i| i.is::<MissingObject>())
+    }
+}
+
+/// Opens a data object for reading; a missing object is reported as
+/// [`MissingObject`].
+async fn open_blob(storage: &dyn Storage, path: &str) -> io::Result<BlobReader> {
+    storage.read_stream(path).await.map_err(|e| {
+        if e.kind() == ErrorKind::NotFound {
+            io::Error::new(ErrorKind::NotFound, MissingObject(path.to_string()))
+        } else {
+            e
+        }
+    })
+}
+
+/// Decodes an in-memory payload into `sink`.
+async fn push_whole(
+    plain: &[u8],
+    compressed: bool,
+    outbuf: &mut [u8],
+    sink: &mut BlobSink<'_>,
+) -> io::Result<()> {
     let mut decoder = PayloadDecoder::new(compressed)?;
     for piece in plain.chunks(STREAM_BUF) {
         decoder.push(piece, outbuf, sink).await?;
     }
     decoder.finish()
+}
+
+/// Chunks of a multipart file fetched ahead of the one being written.
+const PREFETCH_CHUNKS: usize = 2;
+
+/// Largest stored chunk that is prefetched into memory: chunks are
+/// written as 32 MiB of plaintext, so their stored size stays well below
+/// this; anything larger (or of unknown size) is streamed instead.
+const PREFETCH_MAX_STORED: u64 = 2 * super::types::CHUNK_SIZE as u64;
+
+/// A multipart chunk downloaded ahead of the decoder, with its memory
+/// reservation (stored bytes plus the decode buffers).
+struct Prefetched<'s> {
+    data: Vec<u8>,
+    _budget: tokio::sync::SemaphorePermit<'static>,
+    _slot: tokio::sync::SemaphorePermit<'s>,
+}
+
+/// Downloads `blob` whole if its manifest size is known and small enough
+/// and the memory budget has room right now (never waits for budget, so a
+/// prefetch can never hold memory that a decoder is waiting for).
+///
+/// Returns `None` when the blob should be streamed on demand instead
+/// (no room, unknown or oversized blob, or any storage error: the on-demand
+/// read reports it).
+async fn prefetch<'s>(
+    storage: &dyn Storage,
+    blob: &BlobRef<'_>,
+    slots: &'s tokio::sync::Semaphore,
+) -> Option<Prefetched<'s>> {
+    let size = blob.stored_size.filter(|&n| n <= PREFETCH_MAX_STORED)?;
+    let slot = slots.acquire().await.ok()?;
+    // Stored bytes + the largest v3 ciphertext chunk + the two stream
+    // buffers: decoding a prefetched blob never takes budget again.
+    let held = size
+        + crate::crypto::stream::V3_MAX_CHUNK_SIZE as u64
+        + crate::crypto::stream::V3_TAG_LEN as u64;
+    let budget = RESTORE_MEM_BUDGET
+        .try_acquire_many(budget_permits(Some(held)))
+        .ok()?;
+    let mut reader = storage.read_stream(&blob.path).await.ok()?;
+    let mut data = Vec::with_capacity(size as usize);
+    (&mut reader)
+        .take(size + 1)
+        .read_to_end(&mut data)
+        .await
+        .ok()?;
+    if data.len() as u64 > size {
+        // Larger than the manifest says: let the streaming path handle it.
+        return None;
+    }
+    Some(Prefetched {
+        data,
+        _budget: budget,
+        _slot: slot,
+    })
 }
 
 /// Streams, decrypts, decompresses and writes `blobs` in order to a temp
@@ -672,7 +958,9 @@ async fn decode_encrypted_blob(
 ///
 /// Memory: unencrypted and v3 blobs stream storage -> (decrypt) -> zstd ->
 /// hasher -> file with bounded memory; v1/v2 encrypted blobs are held once
-/// (decrypted in place) and then stream-decompressed. See
+/// (decrypted in place) and then stream-decompressed. The chunks of a
+/// multipart file are fetched up to [`PREFETCH_CHUNKS`] ahead, in parallel,
+/// when the memory budget allows, and always written in order. See
 /// [`RESTORE_MEM_BUDGET_MIB`]. On any error (including a v3 blob that fails
 /// authentication midway) the temp file is removed: nothing is left behind.
 async fn restore_blobs(
@@ -684,13 +972,62 @@ async fn restore_blobs(
     compressed: bool,
     limits: OutputLimits,
 ) -> io::Result<()> {
+    use futures_util::future::{Either, select};
+    use futures_util::{StreamExt, stream};
+
     let mut out = VerifiedOutput::create(target).await?;
     let tmp = out.tmp.clone();
 
-    let result = async {
+    let slots = tokio::sync::Semaphore::new(PREFETCH_CHUNKS);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let multipart = blobs.len() > 1;
+    // In-order prefetch of the chunks; dropped as soon as the writer stops.
+    //
+    // Once one chunk is not prefetched, no later chunk of this file is
+    // either: a writer that streams a chunk on demand (and may wait for
+    // budget) then never holds budget for chunks it has not reached, so
+    // writers cannot all wait on budget held by each other's prefetches.
+    let stopped = std::sync::atomic::AtomicBool::new(false);
+    let producer = async {
+        if !multipart {
+            return;
+        }
+        let mut fetched = stream::iter(blobs)
+            .map(|b| async {
+                if stopped.load(Ordering::Relaxed) {
+                    return None;
+                }
+                prefetch(storage, b, &slots).await
+            })
+            .buffered(PREFETCH_CHUNKS);
+        while let Some(p) = fetched.next().await {
+            let p = if stopped.load(Ordering::Relaxed) {
+                None // dropped here: frees its budget
+            } else {
+                p
+            };
+            if p.is_none() {
+                stopped.store(true, Ordering::Relaxed);
+            }
+            if tx.send(p).is_err() {
+                break;
+            }
+        }
+    };
+
+    let writer = async {
         let mut inbuf = vec![0u8; STREAM_BUF];
         let mut outbuf = vec![0u8; STREAM_BUF];
         for blob in blobs {
+            let prefetched = if multipart {
+                rx.recv().await.flatten()
+            } else {
+                None
+            };
+            let (data, _reservation) = match prefetched {
+                Some(p) => (Some(p.data), Some((p._budget, p._slot))),
+                None => (None, None),
+            };
             let mut chunk_hasher = blob.chunk_hash.map(|_| blake3::Hasher::new());
             {
                 let mut sink = BlobSink {
@@ -701,15 +1038,31 @@ async fn restore_blobs(
                 };
                 match key {
                     Some(k) => {
-                        decode_encrypted_blob(storage, blob, k, compressed, &mut outbuf, &mut sink)
-                            .await?;
+                        decode_encrypted_blob(
+                            storage,
+                            blob,
+                            k,
+                            compressed,
+                            &mut outbuf,
+                            &mut sink,
+                            data,
+                        )
+                        .await?;
                     }
                     None => {
-                        let _permit = RESTORE_MEM_BUDGET
-                            .acquire_many(budget_permits(None))
-                            .await
-                            .map_err(io::Error::other)?;
-                        let mut src = storage.read_stream(&blob.path).await?;
+                        let _permit = match data {
+                            Some(_) => None,
+                            None => Some(
+                                RESTORE_MEM_BUDGET
+                                    .acquire_many(budget_permits(None))
+                                    .await
+                                    .map_err(io::Error::other)?,
+                            ),
+                        };
+                        let mut src: BlobReader = match data {
+                            Some(d) => Box::pin(std::io::Cursor::new(d)),
+                            None => open_blob(storage, &blob.path).await?,
+                        };
                         decode_into(&mut src, compressed, &mut inbuf, &mut outbuf, &mut sink)
                             .await?;
                     }
@@ -725,9 +1078,17 @@ async fn restore_blobs(
                 ));
             }
         }
+        drop(rx);
         out.commit(expected_full_hash, target).await
-    }
-    .await;
+    };
+
+    let result = {
+        let (writer, producer) = (std::pin::pin!(writer), std::pin::pin!(producer));
+        match select(writer, producer).await {
+            Either::Left((result, _producer)) => result,
+            Either::Right(((), writer)) => writer.await,
+        }
+    };
 
     if result.is_err() {
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -801,6 +1162,7 @@ mod tests {
     use crate::core::types::ChunkMetadata;
     use crate::crypto::hash_file_content;
     use crate::storage::LocalStorage;
+    use std::sync::Arc;
 
     async fn repo_with(
         files: &[(&str, &[u8])],
@@ -878,6 +1240,7 @@ mod tests {
             path: format!("data/clear/{}", hash),
             object_id: &hash,
             chunk_hash: None,
+            stored_size: None,
         }];
         let meta = FileMetadata::new(hash.clone(), false, true).with_size(content.len() as u64);
         let err = restore_blobs(
@@ -970,5 +1333,204 @@ mod tests {
         let report = run(&storage, out.path(), false).await;
         assert_eq!(report.files_with_errors, 0, "{:?}", report.errors);
         assert!(out.path().join("$HOME").join("x.txt").exists());
+    }
+
+    /// Many single-blob and multipart files, a few of them broken.
+    async fn mixed_repo() -> (tempfile::TempDir, LocalStorage, Vec<(String, Vec<u8>)>) {
+        let files: Vec<(String, Vec<u8>)> = (0..60)
+            .map(|i| {
+                (
+                    format!("d{}/f{:02}.bin", i % 7, i),
+                    format!("content of file {:02}", i).into_bytes(),
+                )
+            })
+            .collect();
+        let refs: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(n, c)| (n.as_str(), c.as_slice()))
+            .collect();
+        let (dir, storage) = repo_with(&refs[..30], false).await;
+        // Second half multipart, in the same repository.
+        let (dir2, storage2) = repo_with(&refs[30..], true).await;
+        let mut manifest: HashMap<PathBuf, FileMetadata> = HashMap::new();
+        for s in [&storage, &storage2] {
+            let snap = s.read("snapshots/2026-01-01T000000Z.toml").await.unwrap();
+            let m: HashMap<PathBuf, FileMetadata> =
+                toml::from_str(std::str::from_utf8(&snap).unwrap()).unwrap();
+            manifest.extend(m);
+        }
+        for e in std::fs::read_dir(dir2.path().join("data/clear")).unwrap() {
+            let e = e.unwrap();
+            std::fs::copy(e.path(), dir.path().join("data/clear").join(e.file_name())).unwrap();
+        }
+        storage
+            .write(
+                "snapshots/2026-01-01T000000Z.toml",
+                toml::to_string(&manifest).unwrap().as_bytes(),
+            )
+            .await
+            .unwrap();
+        // Break one single-blob file and the (unique) last chunk of a
+        // multipart file.
+        for name in ["d3/f10.bin", "d4/f46.bin"] {
+            let meta = &manifest[Path::new(name)];
+            let h = match &meta.chunks {
+                Some(c) => c.last().unwrap().hash.clone(),
+                None => meta.hash.clone(),
+            };
+            std::fs::write(dir.path().join("data/clear").join(h), b"garbage").unwrap();
+        }
+        (dir, storage, files)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn parallel_restore_matches_sequential_and_reports_in_path_order() {
+        let (_repo, storage, files) = mixed_repo().await;
+        let mut reports = Vec::new();
+        for concurrency in [1, 3, 16] {
+            let out = tempfile::tempdir().unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let seen2 = seen.clone();
+            let report = restore_from_storage(
+                &storage,
+                RestoreOptions {
+                    concurrency: Some(concurrency),
+                    on_progress: Some(Arc::new(move |i, total, msg| {
+                        seen2.lock().unwrap().push((i, total, msg));
+                    })),
+                    ..RestoreOptions::new(out.path())
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(report.total_files, 60);
+            assert_eq!(report.files_processed, 58, "{:?}", report.errors);
+            assert_eq!(report.files_with_errors, 2);
+            for (name, content) in &files {
+                let p = out.path().join(name);
+                if name == "d3/f10.bin" || name == "d4/f46.bin" {
+                    assert!(!p.exists(), "{} must not be restored", name);
+                } else {
+                    assert_eq!(&std::fs::read(&p).unwrap(), content, "{}", name);
+                }
+            }
+            // Progress: 0..60 in path order, whatever the concurrency.
+            let seen = seen.lock().unwrap();
+            let mut sorted: Vec<&String> = files.iter().map(|(n, _)| n).collect();
+            sorted.sort();
+            assert_eq!(seen.len(), 60);
+            for (k, (i, total, msg)) in seen.iter().enumerate() {
+                assert_eq!((*i, *total), (k, 60));
+                assert_eq!(msg, &format!("Restoring: {}", sorted[k]));
+            }
+            // No temp files anywhere.
+            for d in std::fs::read_dir(out.path()).unwrap() {
+                for f in std::fs::read_dir(d.unwrap().path()).unwrap() {
+                    let name = f.unwrap().file_name().to_string_lossy().to_string();
+                    assert!(!name.starts_with('.'), "temp file left: {}", name);
+                }
+            }
+            reports.push(report.errors);
+        }
+        // Same errors, same order, for every concurrency.
+        assert!(reports[0][0].contains("d3/f10.bin"), "{:?}", reports[0]);
+        assert!(reports[0][1].contains("d4/f46.bin"), "{:?}", reports[0]);
+        assert_eq!(reports[0], reports[1]);
+        assert_eq!(reports[0], reports[2]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_stops_handing_out_files() {
+        let (_repo, storage, _files) = mixed_repo().await;
+        let out = tempfile::tempdir().unwrap();
+        let token = CancellationToken::new();
+        let t = token.clone();
+        let report = restore_from_storage(
+            &storage,
+            RestoreOptions {
+                concurrency: Some(8),
+                cancellation_token: Some(token),
+                on_progress: Some(Arc::new(move |i, _, _| {
+                    if i == 4 {
+                        t.cancel();
+                    }
+                })),
+                ..RestoreOptions::new(out.path())
+            },
+        )
+        .await
+        .unwrap();
+        // Entries 0..=4 were handed out before the cancellation was seen.
+        assert_eq!(report.files_processed + report.files_with_errors, 5);
+        assert_eq!(report.total_files, 60);
+    }
+
+    #[tokio::test]
+    async fn missing_object_is_reported_without_a_head_per_file() {
+        use crate::storage::InstrumentedStorage;
+        let (repo, local) = repo_with(&[("a.txt", b"alpha"), ("b.txt", b"bravo")], false).await;
+        let h = hash_file_content(b"bravo").unwrap();
+        std::fs::remove_file(repo.path().join("data/clear").join(h)).unwrap();
+        let storage = InstrumentedStorage::new(Arc::new(local));
+        let out = tempfile::tempdir().unwrap();
+        let report = restore_from_storage(&storage, RestoreOptions::new(out.path()))
+            .await
+            .unwrap();
+        assert_eq!(report.files_processed, 1);
+        assert_eq!(report.files_with_errors, 1);
+        assert!(
+            report.errors[0].contains("Missing data for file: b.txt"),
+            "{:?}",
+            report.errors
+        );
+        assert!(!out.path().join("b.txt").exists());
+        // One GET per file and no HEAD per file.
+        let c = storage.counts();
+        assert_eq!(c.get, 2 + 1, "{}", c); // 2 objects + the manifest
+        assert_eq!(c.head, 1, "{}", c); // the manifest size check
+    }
+
+    #[test]
+    fn case_colliding_paths_are_restored_sequentially() {
+        let m = |p: &str| {
+            (
+                PathBuf::from(p),
+                FileMetadata::new("0".repeat(64), false, false),
+            )
+        };
+        let entries = vec![m("A.txt"), m("a.txt"), m("b.txt"), m("dir/X"), m("dir/x")];
+        let (parallel, serial) = split_case_collisions(&entries);
+        assert_eq!(parallel, vec![2]);
+        assert_eq!(serial, vec![0, 1, 3, 4]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multipart_chunk_larger_than_manifest_says_is_streamed() {
+        let content = b"0123456789abcdef".to_vec();
+        let (repo, storage) = repo_with(&[("big.bin", &content)], true).await;
+        // The manifest under-states a chunk's stored size: the prefetch
+        // refuses to buffer it and the streaming path restores it.
+        let snap = "snapshots/2026-01-01T000000Z.toml";
+        let raw = storage.read(snap).await.unwrap();
+        let mut m: HashMap<PathBuf, FileMetadata> =
+            toml::from_str(std::str::from_utf8(&raw).unwrap()).unwrap();
+        for c in m
+            .get_mut(Path::new("big.bin"))
+            .unwrap()
+            .chunks
+            .as_mut()
+            .unwrap()
+        {
+            c.stored_size = 1;
+        }
+        storage
+            .write(snap, toml::to_string(&m).unwrap().as_bytes())
+            .await
+            .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let report = run(&storage, out.path(), false).await;
+        assert_eq!(report.files_with_errors, 0, "{:?}", report.errors);
+        assert_eq!(std::fs::read(out.path().join("big.bin")).unwrap(), content);
+        drop(repo);
     }
 }
