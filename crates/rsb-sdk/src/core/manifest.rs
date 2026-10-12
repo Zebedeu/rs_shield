@@ -25,6 +25,17 @@ pub struct ChunkReport {
     pub total_chunks: usize,
 }
 
+/// Manifest key of a source-relative path: components joined with `/`
+/// whatever the platform, so a manifest written on Windows restores
+/// everywhere (restore refuses `\` in entries).
+pub fn manifest_key(rel: &std::path::Path) -> PathBuf {
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    PathBuf::from(parts.join("/"))
+}
+
 /// Parses the timestamp encoded in a snapshot name or path.
 ///
 /// Accepts `snapshots/<name>.toml` or a bare `<name>` in any of the formats
@@ -366,5 +377,15 @@ mod tests {
         assert_eq!(storage.list("snapshots").await.unwrap().len(), 2);
         let (latest, _) = find_latest_snapshot(&storage, None, None).await.unwrap();
         assert_eq!(latest, b, "the most recently written manifest must win");
+    }
+
+    #[test]
+    fn manifest_key_uses_forward_slashes() {
+        let rel: PathBuf = ["sub", "dir", "b.txt"].iter().collect();
+        assert_eq!(manifest_key(&rel), PathBuf::from("sub/dir/b.txt"));
+        assert_eq!(
+            manifest_key(std::path::Path::new("a.txt")),
+            PathBuf::from("a.txt")
+        );
     }
 }

@@ -160,7 +160,11 @@ async fn restore_entry(
     force: bool,
 ) -> Result<(), String> {
     // Contenção anti-traversal: rejeita absoluto, `..`, componentes especiais.
+    // Manifests escritos no Windows antes da normalização usam `\`: aí é
+    // separador e cada componente continua a ser validado.
     let rel_str = rel_path.to_string_lossy();
+    #[cfg(windows)]
+    let rel_str = std::borrow::Cow::<str>::Owned(rel_str.replace('\\', "/"));
     if let Err(e) = validate_storage_path(&rel_str) {
         return Err(format!(
             "⛔ Refused unsafe manifest entry '{}': {}",

@@ -187,7 +187,8 @@ async fn run_backup(
                     } else {
                         stats_clone.inc_skipped();
                     }
-                    let _ = tx_clone.blocking_send((rel_path.clone(), metadata));
+                    let key = crate::core::manifest::manifest_key(rel_path);
+                    let _ = tx_clone.blocking_send((key, metadata));
                 }
                 Err(e) => {
                     stats_clone.inc_error();
