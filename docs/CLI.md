@@ -471,9 +471,11 @@ rsb prune [OPTIONS]
 OPTIONS:
   -c, --config <CONFIG>         Path to config.toml (optional)
   -b, --backup <BACKUP>         Path to backup directory (portable mode)
-  --keep-last <COUNT>           Keep last N backups
+  -l, --keep-last <COUNT>       Keep last N backups (the short flag was -k
+                                before 0.1.0-alpha.9)
   -r, --retention <POLICY>      Retention policy: "30d", "6m", "1y", or number
   -d, --dry-run                 Preview deletions without removing
+  --confirm                     Required to actually delete (unless --dry-run)
   -q, --quiet                   Suppress output
   -H, --healthcheck-url <URL>   Healthchecks.io URL
 ```
@@ -485,13 +487,13 @@ OPTIONS:
 rsb prune --config mybackup.toml --retention 30d --dry-run
 
 # Keep last 6 months
-rsb prune --config mybackup.toml --retention 6m
+rsb prune --config mybackup.toml --retention 6m --confirm
 
 # Keep last 10 backups
-rsb prune --config mybackup.toml --keep-last 10
+rsb prune --config mybackup.toml --keep-last 10 --confirm
 
 # Using backup path (portable)
-rsb prune --backup /backup/docs --retention 90d
+rsb prune --backup /backup/docs --retention 90d --confirm
 ```
 
 #### Schedule
