@@ -18,7 +18,14 @@ ignore = [
     "RUSTSEC-2024-0412",
     "RUSTSEC-2025-0057",
     "RUSTSEC-2024-0413",
-    "RUSTSEC-2024-0416"
+    "RUSTSEC-2024-0416",
+    # derivative and instant: unmaintained, transitive only (no direct use).
+    "RUSTSEC-2024-0388",
+    "RUSTSEC-2024-0384",
+    # h2 0.3 (pulled by the AWS SDK's legacy HTTP client): unbounded empty
+    # DATA frames. Low severity; the fix exists only in h2 0.4.16+, so this
+    # waits on the AWS SDK dropping h2 0.3.
+    "RUSTSEC-2026-0258",
 
 
 ]

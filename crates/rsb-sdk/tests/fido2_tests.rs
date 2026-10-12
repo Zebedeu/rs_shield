@@ -31,6 +31,19 @@ fn test_fido2_storage_path() {
             }
         }
     }
+    // CI runners without a secret service (e.g. Linux without D-Bus
+    // `org.freedesktop.secrets`) have no keyring backend: skip there.
+    let probe = keyring::Entry::new(&service, "default")
+        .and_then(|entry| entry.set_password("probe").map(|_| entry));
+    match probe {
+        Ok(entry) => {
+            let _ = entry.delete_password();
+        }
+        Err(e) => {
+            eprintln!("skipping test_fido2_storage_path: no keyring backend ({e})");
+            return;
+        }
+    }
     let _cleanup = Cleanup(service);
 
     let temp_file = NamedTempFile::new().unwrap();
