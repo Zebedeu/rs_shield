@@ -76,7 +76,11 @@ jobs:
         run: cargo bench -p rsb-sdk --no-run
 
       - name: Run criterion benchmarks
+        # rust-cache restores a partial target/criterion from earlier runs
+        # (estimates without sample.json) and criterion then errors out
+        # instead of measuring; baselines live in bench-baseline instead.
         run: |
+          rm -rf target/criterion
           cargo bench -p rsb-sdk --bench backup_restore -- --output-format bencher \
             | tee output.txt
 

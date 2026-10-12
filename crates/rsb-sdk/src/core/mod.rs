@@ -12,6 +12,7 @@ pub mod notifications;
 pub mod prune;
 pub mod resource_monitor;
 pub mod restore;
+pub mod restore_select;
 pub mod storage_backend;
 pub mod telegram_validator;
 pub mod types;
@@ -27,4 +28,7 @@ pub use prune::{
     prune_with_storage,
 };
 pub use restore::perform_restore;
+pub use restore_select::{
+    FileSelector, find_snapshot_at_or_before, find_snapshot_at_or_before_in, parse_restore_date,
+};
 pub use telegram_validator::{get_telegram_chat_id, validate_telegram_token};
