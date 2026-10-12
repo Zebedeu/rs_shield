@@ -126,6 +126,15 @@ cargo test -- --nocapture
 cargo test --release -- --ignored
 ```
 
+Property tests (`crates/rsb-sdk/tests/proptest_*.rs`) run 16–32 cases by
+default; set `PROPTEST_CASES=1000` for a longer run.
+
+The S3 integration tests (`crates/rsb-sdk/tests/s3_compat_integration_tests.rs`)
+are skipped unless `RSB_TEST_S3_ENDPOINT`, `RSB_TEST_S3_BUCKET`,
+`RSB_TEST_S3_ACCESS_KEY` and `RSB_TEST_S3_SECRET_KEY` point to a dedicated,
+empty bucket; the file header shows how to run them against a local MinIO
+(CI does this in the `s3-minio` job).
+
 ## Documentation
 
 - **README.md** - Overview and quick start
