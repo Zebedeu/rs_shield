@@ -29,6 +29,8 @@ pub fn RestoreScreen() -> Element {
     let mut restore_to = use_signal(PathBuf::new);
     let mut key = use_signal(String::new);
     let mut snapshot_id = use_signal(String::new);
+    let mut include_text = use_signal(String::new);
+    let mut date_text = use_signal(String::new);
     let mut generate_report = use_signal(|| false);
     let mut last_report_path = use_signal(|| Option::<PathBuf>::None);
 
@@ -133,6 +135,8 @@ pub fn RestoreScreen() -> Element {
             let bkp = source_path();
             let rst = restore_to();
             let snap = snapshot_id();
+            let include = include_patterns(&include_text());
+            let date = date_text();
             let key_val = key();
             let s3_bucket = app_config.s3_bucket();
             let s3_region = app_config.s3_region();
@@ -158,7 +162,21 @@ pub fn RestoreScreen() -> Element {
             });
 
             let res = async {
-                let snap_opt = if snap.is_empty() { None } else { Some(snap) };
+                let snap_opt = if snap.trim().is_empty() {
+                    None
+                } else {
+                    Some(snap.trim().to_string())
+                };
+                // Same parsing/validation as `rsb restore --date/--files`.
+                let at_or_before = if date.trim().is_empty() {
+                    None
+                } else {
+                    Some(rsb_sdk::core::parse_restore_date(&date).map_err(|e| e.to_string())?)
+                };
+                if at_or_before.is_some() && snap_opt.is_some() {
+                    return Err("❌ Give either a snapshot ID or a date, not both.".to_string());
+                }
+                rsb_sdk::core::FileSelector::new(&include).map_err(|e| e.to_string())?;
                 let key_opt = if key_val.is_empty() {
                     None
                 } else {
@@ -180,6 +198,8 @@ pub fn RestoreScreen() -> Element {
                 let token = cancellation_token();
                 let restore_opts = RestoreOptions {
                     snapshot_id: snap_opt.clone(),
+                    at_or_before,
+                    include,
                     force: true, // UI default is force
                     versioned: false,
                     on_progress: Some(progress_cb),
@@ -425,6 +445,34 @@ pub fn RestoreScreen() -> Element {
             }
 
             div { class: "form-group",
+                label { class: "label-text", "{texts.restore_date_label}" }
+                input {
+                    class: "input-field",
+                    r#type: "text",
+                    placeholder: "2026-10-01 or 2026-10-01 12:00",
+                    value: "{date_text}",
+                    oninput: move |evt| date_text.set(evt.value())
+                }
+                p { class: "hint",
+                    "YYYY-MM-DD (end of that day), YYYY-MM-DD HH:MM (local time) or RFC 3339. Leave the snapshot ID empty."
+                }
+            }
+
+            div { class: "form-group",
+                label { class: "label-text", "{texts.restore_files_label}" }
+                textarea {
+                    class: "input-field font-mono",
+                    placeholder: "docs/\nphotos/2025/*.jpg\nnotes/todo.txt",
+                    value: "{include_text}",
+                    oninput: move |evt: Event<FormData>| include_text.set(evt.value()),
+                    rows: "3"
+                }
+                p { class: "hint",
+                    "Exact path, folder (docs/) or glob (**/*.pdf), relative to the backup source. Empty restores everything."
+                }
+            }
+
+            div { class: "form-group",
                 label { class: "label-text", "{texts.key_label}" }
                 input {
                     class: "input-field",
@@ -497,5 +545,29 @@ pub fn RestoreScreen() -> Element {
                 p { "{status_msg}" }
             }
         }
+    }
+}
+
+/// One `--files` pattern per non-blank line (line endings stripped).
+fn include_patterns(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::include_patterns;
+
+    #[test]
+    fn include_patterns_one_per_line() {
+        assert!(include_patterns("").is_empty());
+        assert!(include_patterns("  \n\n").is_empty());
+        assert_eq!(
+            include_patterns("docs/\r\n**/*.pdf\n\nmy file.txt"),
+            ["docs/", "**/*.pdf", "my file.txt"]
+        );
     }
 }
