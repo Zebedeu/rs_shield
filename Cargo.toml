@@ -142,3 +142,8 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+# PBKDF2-HMAC-SHA256 (600 000 iterations) protects the FIDO2 credential file
+# and recovery codes: unoptimized it takes seconds per call in tests.
+[profile.dev.package.sha2]
+opt-level = 3
