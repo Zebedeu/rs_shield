@@ -20,6 +20,7 @@ use crate::core::dedup_index::DedupIndexOptions;
 use crate::core::types::ProgressCallback;
 use crate::credentials::SecureString;
 use crate::storage::Storage;
+use chrono::{DateTime, Utc};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -98,8 +99,18 @@ impl fmt::Debug for BackupOptions {
 /// [`crate::portable_restore::restore_from_config_or_backup`].
 #[derive(Clone, Default)]
 pub struct RestoreOptions {
-    /// Snapshot a restaurar; `None` = o mais recente.
+    /// Snapshot a restaurar; `None` = o mais recente (ou o escolhido por
+    /// `at_or_before`).
     pub snapshot_id: Option<String>,
+    /// Restaura o snapshot mais recente tirado até este instante
+    /// (inclusive), em vez do mais recente. Exclusivo com `snapshot_id`.
+    /// Ver [`crate::core::restore_select::parse_restore_date`].
+    pub at_or_before: Option<DateTime<Utc>>,
+    /// Padrões de ficheiros a restaurar (caminho exato, diretório ou glob
+    /// sobre a chave do manifest, ver [`crate::core::restore_select`]);
+    /// vazio = o snapshot inteiro. Se nenhum padrão corresponder a nada o
+    /// restore falha sem escrever ficheiros.
+    pub include: Vec<String>,
     /// Diretório de destino do restore.
     pub target_path: PathBuf,
     /// Chave de cifra (necessária para backups cifrados).
@@ -146,6 +157,8 @@ impl fmt::Debug for RestoreOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RestoreOptions")
             .field("snapshot_id", &self.snapshot_id)
+            .field("at_or_before", &self.at_or_before)
+            .field("include", &self.include)
             .field("target_path", &self.target_path)
             .field(
                 "encryption_key",
@@ -239,6 +252,7 @@ mod tests {
         assert!(!b.dry_run && b.mode.is_none() && b.encryption_key.is_none());
         let r = RestoreOptions::default();
         assert!(!r.force && !r.versioned && r.snapshot_id.is_none());
+        assert!(r.include.is_empty() && r.at_or_before.is_none());
         let v = VerifyOptions::default();
         assert!(!v.fast && !v.repair && !v.quiet);
     }

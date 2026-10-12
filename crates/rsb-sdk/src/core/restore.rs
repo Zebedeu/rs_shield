@@ -1,5 +1,6 @@
 use super::cancellation::CancellationToken;
 use super::manifest::find_latest_snapshot_cached;
+use super::restore_select::{FileSelector, find_snapshot_at_or_before, snapshot_id_of};
 use super::types::{FileMetadata, ProgressCallback};
 use crate::config::Config;
 use crate::crypto::{BLOB_MAGIC_V3, CryptoError, KeyCache};
@@ -59,6 +60,8 @@ pub async fn restore_from_storage(
 ) -> crate::error::Result<ReportData> {
     let RestoreOptions {
         snapshot_id,
+        at_or_before,
+        include,
         target_path,
         encryption_key,
         force,
@@ -68,12 +71,26 @@ pub async fn restore_from_storage(
         cancellation_token,
         storage: _,
     } = options;
-    let snapshot_id = snapshot_id.as_deref();
     let encryption_key = encryption_key.as_ref().map(|k| k.as_str());
     let start_time = Instant::now();
 
+    // User input first: bad patterns / conflicting options fail before any
+    // repository access.
+    let selector = FileSelector::new(&include)?;
+    if snapshot_id.is_some() && at_or_before.is_some() {
+        return Err(crate::error::RsbError::InvalidInput(
+            "Give either a snapshot id or a date (at_or_before), not both".to_string(),
+        ));
+    }
+
     // 🐛 Fix: Validate backup structure before attempting restore
     validate_backup_structure(storage).await?;
+
+    let snapshot_id = match at_or_before {
+        Some(when) => Some(find_snapshot_at_or_before(storage, when).await?),
+        None => snapshot_id,
+    };
+    let snapshot_id = snapshot_id.as_deref();
 
     // Unlocks keys/repo.key first (a wrong password fails here, before any
     // blob is read); v1/v2 blobs use one PBKDF2 per salt for the whole
@@ -88,8 +105,18 @@ pub async fn restore_from_storage(
     info!("Restoring snapshot: {}", manifest_path);
 
     let manifest: HashMap<PathBuf, FileMetadata> = toml::from_str(&manifest_content)?;
-    let mut entries: Vec<(PathBuf, FileMetadata)> = manifest.into_iter().collect();
+    let entries: Vec<(PathBuf, FileMetadata)> = manifest.into_iter().collect();
+    // Selection happens before the target is created: a selection that
+    // matches nothing fails without touching the destination.
+    let mut entries = selector.select(entries, snapshot_id_of(&manifest_path))?;
     entries.sort_by(|a, b| a.0.cmp(&b.0));
+    if !selector.is_empty() {
+        info!(
+            "Restoring {} selected file(s) of {}",
+            entries.len(),
+            manifest_path
+        );
+    }
 
     let restore_root = if versioned {
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
