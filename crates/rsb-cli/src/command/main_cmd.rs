@@ -136,7 +136,7 @@ pub enum Commands {
         #[arg(short = 'b', long)]
         backup: Option<PathBuf>,
 
-        /// Snapshot ID
+        /// Snapshot ID (default: the latest snapshot)
         #[arg(short = 's', long)]
         snapshot: Option<String>,
 
@@ -144,12 +144,17 @@ pub enum Commands {
         #[arg(short = 't', long, required = true)]
         target: PathBuf,
 
-        /// Restore specific files (not yet supported)
-        #[arg(short = 'i', long)]
-        files: Option<String>,
+        /// Restore only matching files: exact path (docs/a.txt), directory
+        /// (docs or docs/) or glob (docs/*.pdf, '**/*.jpg'), relative to the
+        /// backup source with '/' separators. Repeatable; quote globs. Fails
+        /// if nothing matches
+        #[arg(short = 'i', long, value_name = "PATTERN", num_args = 1.., action = clap::ArgAction::Append)]
+        files: Vec<String>,
 
-        /// Restore from date (not yet supported)
-        #[arg(short = 'd', long)]
+        /// Restore the latest snapshot taken at or before WHEN: RFC 3339
+        /// (2026-10-01T12:00:00Z), YYYY-MM-DD (end of that day, local time)
+        /// or "YYYY-MM-DD HH:MM" (local time)
+        #[arg(short = 'd', long, value_name = "WHEN", conflicts_with = "snapshot")]
         date: Option<String>,
 
         /// Decryption key (DEPRECATED: visible in `ps`/history; prefer env RSB_ENCRYPTION_KEY or prompt)

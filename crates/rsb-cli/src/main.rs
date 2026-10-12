@@ -348,20 +348,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let _auth_token = check_fido2_auth().await?;
 
-            // Funcionalidades ainda não implementadas: falhar em vez de ignorar
-            // silenciosamente (restauraria tudo / o snapshot errado).
-            if files.is_some() {
-                return Err(
-                    "❌ --files (selective restore) is not yet supported; omit it to restore the whole snapshot"
-                        .into(),
-                );
-            }
-            if date.is_some() {
-                return Err(
-                    "❌ --date is not yet supported; use --snapshot <ID> (see `rsb snapshots list`)"
-                        .into(),
-                );
-            }
+            // User input is validated before any repository access.
+            rsb_sdk::core::FileSelector::new(&files)?;
+            let date = date
+                .as_deref()
+                .map(rsb_sdk::core::parse_restore_date)
+                .transpose()?;
 
             if key.is_some() {
                 warn_secret_arg("--key");
@@ -434,10 +426,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _target_for_verify = target.clone();
 
             let key = key.or_else(|| cfg.encryption_key.clone());
+            // --date is resolved here (not through RestoreOptions::at_or_before)
+            // so the chosen snapshot is shown and --verify checks the same one.
+            let snapshot = match date {
+                Some(when) => {
+                    let id = rsb_sdk::core::find_snapshot_at_or_before_in(&cfg, None, when).await?;
+                    println!(
+                        "📅 Latest snapshot at or before {}: {}",
+                        when.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S %:z"),
+                        id
+                    );
+                    Some(id)
+                }
+                None => snapshot,
+            };
+            if !files.is_empty() {
+                println!("🔎 Restoring only files matching: {}", files.join(", "));
+            }
             let mut report_data = core::perform_restore(
                 &cfg,
                 RestoreOptions {
                     snapshot_id: snapshot.clone(),
+                    include: files,
                     force,
                     versioned,
                     ..RestoreOptions::new(target)
