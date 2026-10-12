@@ -43,6 +43,8 @@ cargo run --bin rsb-cli -- --help
 - **[User Guide](/docs/USER_GUIDE.md)** - Complete guide for end users
 - **[Developer Guide](/docs/DEVELOPER_GUIDE.md)** - Architecture and technical details
 - **[CLI Reference](/docs/CLI.md)** - Command-line interface documentation
+- **[Migration Guide](/docs/MIGRATION.md)** - Upgrading repositories, keys and credentials between releases (read before upgrading to 0.1.0-alpha.9)
+- **[Changelog](/CHANGELOG.md)** - Release notes
 - **[Security Policy](/SECURITY.md)** - Encryption, security practices, and vulnerability reporting
 
 ## 🏗️ Project Structure
