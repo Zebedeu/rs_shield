@@ -45,6 +45,70 @@ jobs:
         run: cargo test --workspace --verbose
         continue-on-error: ${{ matrix.rust == 'beta' }}
 
+  s3-integration:
+    name: S3 integration (SeaweedFS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # MinIO no longer publishes public images; SeaweedFS is another
+      # independent S3 implementation (pinned release). GitHub service
+      # containers cannot pass a command, so it is started with docker run.
+      SEAWEEDFS_IMAGE: chrislusf/seaweedfs:3.80
+      RSB_TEST_S3_ENDPOINT: http://127.0.0.1:8333
+      RSB_TEST_S3_BUCKET: rsb-test
+      RSB_TEST_S3_ACCESS_KEY: rsbtest
+      RSB_TEST_S3_SECRET_KEY: rsbtest-secret-key
+      # Fail instead of skipping if the variables above are lost.
+      RSB_TEST_S3_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Start SeaweedFS (S3 API with signed requests)
+        run: |
+          mkdir -p "$RUNNER_TEMP/seaweedfs"
+          cat > "$RUNNER_TEMP/seaweedfs/s3.json" <<JSON
+          {"identities":[{"name":"rsbtest",
+            "credentials":[{"accessKey":"$RSB_TEST_S3_ACCESS_KEY","secretKey":"$RSB_TEST_S3_SECRET_KEY"}],
+            "actions":["Admin","Read","List","Tagging","Write"]}]}
+          JSON
+          docker run -d --name seaweedfs -p 127.0.0.1:8333:8333 \
+            -v "$RUNNER_TEMP/seaweedfs:/etc/rsb:ro" \
+            "$SEAWEEDFS_IMAGE" server -s3 -s3.port=8333 \
+            -s3.config=/etc/rsb/s3.json -dir=/data -ip.bind=0.0.0.0
+          for _ in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$RSB_TEST_S3_ENDPOINT/" || true)
+            if [ "$code" != "000" ]; then
+              echo "SeaweedFS S3 is up (HTTP $code)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "SeaweedFS did not become ready" >&2
+          docker logs seaweedfs
+          exit 1
+
+      - name: Create test bucket
+        run: echo "s3.bucket.create -name $RSB_TEST_S3_BUCKET" | docker exec -i seaweedfs weed shell
+
+      - name: Build S3 tests
+        run: cargo test -p rsb-sdk --test s3_compat_integration_tests --no-run
+
+      - name: Run S3 tests
+        run: cargo test -p rsb-sdk --test s3_compat_integration_tests -- --nocapture
+
+      - name: SeaweedFS logs
+        if: failure()
+        run: docker logs seaweedfs
+
   test-features:
     name: Test Features
     runs-on: ubuntu-latest
