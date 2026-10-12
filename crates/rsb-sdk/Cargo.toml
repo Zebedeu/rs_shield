@@ -146,6 +146,8 @@ fuzzing = []
 tempfile = { workspace = true }
 toml = { workspace = true }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# Property tests (tests/proptest_*.rs).
+proptest = { version = "1.5", default-features = false, features = ["std"] }
 # Software FIDO2 authenticator for the WebAuthn login tests (no physical key).
 webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = ["softpasskey"] }
 
