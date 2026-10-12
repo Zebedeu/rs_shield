@@ -1,5 +1,5 @@
-// Testes de integração contra um servidor S3-compatível real (MinIO, R2,
-// B2, Wasabi, Ceph RGW, Garage, ...). Só correm quando estas variáveis de
+// Testes de integração contra um servidor S3-compatível real (MinIO, SeaweedFS,
+// R2, B2, Wasabi, Ceph RGW, Garage, ...). Só correm quando estas variáveis de
 // ambiente estão definidas; caso contrário são ignorados (passam sem fazer
 // nada):
 //
@@ -10,13 +10,14 @@
 //   RSB_TEST_S3_REGION      opcional (por omissão us-east-1; R2 usa "auto")
 //   RSB_TEST_S3_REQUIRED    opcional: falhar (em vez de ignorar) sem as acima
 //
-// Exemplo com MinIO local (o CI faz o mesmo, ver .github/workflows/test.yml):
-//   docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=minio \
-//     -e MINIO_ROOT_PASSWORD=minio123 minio/minio server /data
-//   docker exec -e MC_HOST_local=http://minio:minio123@127.0.0.1:9000 \
-//     minio mc mb local/rsb-test
-//   RSB_TEST_S3_ENDPOINT=http://localhost:9000 RSB_TEST_S3_BUCKET=rsb-test \
-//   RSB_TEST_S3_ACCESS_KEY=minio RSB_TEST_S3_SECRET_KEY=minio123 \
+// Exemplo com SeaweedFS local (o CI faz o mesmo, ver .github/workflows/test.yml;
+// s3.json define a identidade rsbtest/rsbtest-secret-key):
+//   docker run -d --name seaweedfs -p 8333:8333 -v "$PWD/sw:/etc/rsb:ro" \
+//     chrislusf/seaweedfs:3.80 server -s3 -s3.port=8333 \
+//     -s3.config=/etc/rsb/s3.json -dir=/data -ip.bind=0.0.0.0
+//   echo "s3.bucket.create -name rsb-test" | docker exec -i seaweedfs weed shell
+//   RSB_TEST_S3_ENDPOINT=http://localhost:8333 RSB_TEST_S3_BUCKET=rsb-test \
+//   RSB_TEST_S3_ACCESS_KEY=rsbtest RSB_TEST_S3_SECRET_KEY=rsbtest-secret-key \
 //   cargo test -p rsb-sdk --test s3_compat_integration_tests
 //
 // Os testes que criam um repositório usam a raiz do bucket (snapshots/,
