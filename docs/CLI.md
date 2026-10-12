@@ -167,33 +167,92 @@ rsb backup mybackup.toml --report
 Restore files from a backup.
 
 ```bash
-rsb restore [OPTIONS]
+rsb restore [CONFIG] --target <DIR> [OPTIONS]
 
 OPTIONS:
-  -c, --config <CONFIG>         Path to config.toml
-  -b, --backup <BACKUP>         Path to backup directory
-  -s, --snapshot <ID>           Restore from specific snapshot ID
-  -k, --key <KEY>               Decryption password
-  --verify                      Verify backup before restoring
-  -o, --output <OUTPUT>         Restore destination directory
-  -q, --quiet                   Suppress output messages
+  [CONFIG]                      Path to config.toml (or use --backup)
+  -b, --backup <BACKUP>         Path to backup directory (portable mode)
+  -t, --target <DIR>            Restore destination directory (required)
+  -s, --snapshot <ID>           Restore a specific snapshot (default: latest)
+  -d, --date <WHEN>             Restore the latest snapshot taken at or before WHEN
+  -i, --files <PATTERN>...      Restore only matching files (repeatable)
+  -k, --key <KEY>               Decryption password (prefer RSB_ENCRYPTION_KEY)
+  -f, --force                   Overwrite existing files
+  -V, --versioned               Restore into <DIR>/restore_<timestamp>
+  -v, --verify                  Verify the snapshot after restoring
+  -r, --report                  Generate an HTML report
 ```
 
 **Examples:**
 
 ```bash
 # Restore using config file
-rsb restore --config mybackup.toml --output ~/restored
+rsb restore mybackup.toml --target ~/restored
 
 # Restore using backup path (portable)
-rsb restore --backup /backup/docs --output ~/restored
+rsb restore --backup /backup/docs --target ~/restored
 
 # Restore specific snapshot
-rsb restore --config mybackup.toml --snapshot 2026-05-25T10:30:00 --output ~/restored
+rsb restore mybackup.toml --snapshot 2026-05-25T103000.000Z --target ~/restored
 
 # Restore with verification
-rsb restore --config mybackup.toml --output ~/restored --verify
+rsb restore mybackup.toml --target ~/restored --verify
+
+# Only some files: an exact path, a whole folder and a glob
+rsb restore --backup /backup/docs --target ~/restored \
+  --files notes/todo.txt --files photos/ --files '**/*.pdf'
+
+# The backup as it was on 1 October 2026 (latest snapshot of that day)
+rsb restore --backup /backup/docs --target ~/restored --date 2026-10-01
+
+# ...as it was at noon, local time, or at an exact instant
+rsb restore --backup /backup/docs --target ~/restored --date "2026-10-01 12:00"
+rsb restore --backup /backup/docs --target ~/restored --date 2026-10-01T12:00:00Z
 ```
+
+**Selecting files (`--files`).** Patterns are matched against the paths
+stored in the snapshot: relative to the backup source, with `/` separators on
+every platform (`\` is accepted and read as `/`). Restored files keep their
+relative paths under `--target`.
+
+| Pattern | Restores |
+|---------|----------|
+| `docs/report.pdf` | that file |
+| `docs` | everything under `docs/` (and a file named `docs`, if any) |
+| `docs/` | everything under `docs/` |
+| `docs/*.pdf` | PDFs directly in `docs/` (`*` and `?` never cross `/`) |
+| `*.txt` | `.txt` files at the top level only |
+| `**/*.txt` | `.txt` files at any depth |
+| `photos/202[45]` | everything under `photos/2024/` and `photos/2025/` |
+
+* Globs use the `glob` crate syntax (`*`, `?`, `[...]`, `**`) and are anchored
+  at the backup root; a glob that matches a folder restores the whole folder.
+  Quote globs so the shell does not expand them.
+* Matching is case sensitive and does not normalize Unicode.
+* Absolute paths (`/etc`, `C:\...`) and `..` components are rejected.
+* `--files` takes several values (`--files a b`) and can be repeated. Put the
+  config path before `--files` (or use `--backup`), otherwise it is read as a
+  pattern.
+* If no pattern matches any file of the snapshot, the restore fails (non-zero
+  exit) and nothing is written. A pattern that matches nothing while others do
+  is reported as a warning.
+
+**Choosing a snapshot by date (`--date`).** Restores the most recent snapshot
+taken at or before WHEN (a snapshot taken exactly at WHEN qualifies). The
+chosen snapshot id is printed and `--verify` checks that same snapshot.
+
+| WHEN | Meaning |
+|------|---------|
+| `2026-10-01T12:00:00Z`, `2026-10-01T14:00:00+02:00` | that exact instant (RFC 3339) |
+| `2026-10-01` | the end of that day (23:59:59.999), **local time** |
+| `"2026-10-01 12:00"` | the end of that minute (12:00:59.999), local time |
+| `"2026-10-01 12:00:30"` | the end of that second, local time |
+
+Local times use the time zone of the machine running `rsb` (`T` may replace
+the space). If every snapshot is newer than WHEN the command fails and names
+the oldest available snapshot. `--date` and `--snapshot` cannot be combined.
+Snapshot times come from the snapshot names (UTC), as listed by
+`rsb snapshots list`.
 
 #### Verify
 
@@ -658,32 +717,33 @@ rsb backup --profile docs.toml --threads 4
 Restore from a backup.
 
 ```bash
-rsb restore [OPTIONS] --backup <PATH> --output <PATH>
+rsb restore [CONFIG] --target <PATH> [OPTIONS]
 
 OPTIONS:
   -b, --backup <PATH>            Backup source path
-  -o, --output <PATH>            Restore destination
-  -p, --password <PASSWORD>      Decryption password
-  -f, --files <PATTERNS>         Restore specific files (pattern matching)
-  -d, --date <DATE>              Restore from specific date (format: YYYY-MM-DD)
-  --verify                       Verify backup before restoring
-  -q, --quiet                    Suppress output
+  -t, --target <PATH>            Restore destination
+  -k, --key <KEY>                Decryption password
+  -i, --files <PATTERN>...       Restore only matching files (path, folder or glob)
+  -d, --date <WHEN>              Latest snapshot at or before WHEN (YYYY-MM-DD = end of day, local time)
+  -v, --verify                   Verify the snapshot after restoring
 ```
+
+See [Restore](#restore) above for the pattern and date rules.
 
 **Examples:**
 
 ```bash
 # Full restore
-rsb restore --backup /backup/docs --output ~/restored
+rsb restore --backup /backup/docs --target ~/restored
 
 # Specific files only
-rsb restore --backup /backup/docs --output ~/restored --files "*.pdf"
+rsb restore --backup /backup/docs --target ~/restored --files '**/*.pdf'
 
-# Restore specific date
-rsb restore --backup /backup/docs --output ~/restored --date 2026-02-01
+# Restore the backup as of a date
+rsb restore --backup /backup/docs --target ~/restored --date 2026-02-01
 
 # From S3
-rsb restore --backup s3://my-backups/docs --output ~/restored
+rsb restore --backup s3://my-backups/docs --target ~/restored
 ```
 
 #### Verify
@@ -1182,11 +1242,11 @@ rsb verify --backup /backup/docs
 ### Selective Restore
 
 ```bash
-# List what would be restored
-rsb restore --backup /backup/docs --output /tmp/preview --dry-run
+# Restore specific file types, at any depth
+rsb restore --backup /backup/docs --target ~/restored --files '**/*.pdf' '**/*.doc*'
 
-# Restore specific file types
-rsb restore --backup /backup/docs --output ~/restored --files "*.pdf,*.doc*"
+# Restore one folder as it was last Friday
+rsb restore --backup /backup/docs --target ~/restored --files projects/site/ --date 2026-10-09
 ```
 
 ---

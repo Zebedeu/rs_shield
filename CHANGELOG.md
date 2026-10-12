@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `rsb restore --files <PATTERN>...`: restore only matching files (exact
+  path, folder prefix or glob such as `**/*.pdf`, matched against the
+  `/`-separated snapshot paths). Absolute paths and `..` are rejected; a
+  selection that matches nothing fails without writing anything.
+- `rsb restore --date <WHEN>`: restore the latest snapshot taken at or before
+  WHEN (RFC 3339, `YYYY-MM-DD` = end of that day in local time, or
+  `YYYY-MM-DD HH:MM` local time). Conflicts with `--snapshot`; fails naming
+  the oldest snapshot when none is old enough.
+- SDK: `RestoreOptions::include` / `RestoreOptions::at_or_before` and the
+  `core::restore_select` module (pattern selector, date parser,
+  snapshot-by-date lookup); the desktop restore screen exposes both.
 - Real-time file synchronization with auto-backup
 - Desktop dashboard with live metrics
 - System notifications for backup events

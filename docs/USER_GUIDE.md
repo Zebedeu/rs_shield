@@ -363,10 +363,30 @@ Changes are detected every 2 seconds and automatically synced.
 
 ### Restoring Specific Files
 
-Use the file browser to select:
-- Use search to find files
-- Check/uncheck individual files
-- Restore only what you need
+In the Restore tab, type one pattern per line in **Files to restore**:
+an exact path (`notes/todo.txt`), a folder (`photos/`) or a glob
+(`**/*.pdf`), relative to the backup source. Leave it empty to restore
+everything. If nothing matches, the restore fails and nothing is written.
+
+From the command line:
+
+```bash
+rsb restore --backup /backup/docs --target ~/restored --files photos/ '**/*.pdf'
+```
+
+### Restoring From a Date
+
+Fill **Date** in the Restore tab (leave the snapshot ID empty), or use
+`--date`: RS Shield restores the latest snapshot taken at or before that
+moment. `2026-10-01` means the end of that day and `2026-10-01 12:00` the end
+of that minute, both in your computer's local time; RFC 3339
+(`2026-10-01T12:00:00Z`) is an exact instant.
+
+```bash
+rsb restore --backup /backup/docs --target ~/restored --date 2026-10-01
+```
+
+See [docs/CLI.md](CLI.md#restore) for the full pattern and date rules.
 
 ---
 
